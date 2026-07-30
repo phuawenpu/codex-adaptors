@@ -33,10 +33,23 @@ Requires **bash 4+** (macOS ships 3.2 — `brew install bash`), the `sprite` CLI
 
 The run picks a sprite (or set `SPRITE_NAME=`), prompts for your key, installs Codex and Claude Code, does device-code auth, starts the bridge, runs all 23 probes, and prints a matrix plus a ready-to-paste config. Full transcript lands in `./debug.log`.
 
+While the bridge is up the sprite is held awake, which costs money — see
+[Keep-awake and billing](#keep-awake-and-billing). The hold expires by itself after
+two hours by default.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SPRITE_NAME` | *(picker)* | Skip sprite selection |
+| `SPRITE_ORG` | *(unset)* | Pass `-o <org>` if your account needs it |
+| `DEEPSEEK_MODEL` | `deepseek-v4-pro` | Model to test |
+| `BRIDGE_CMD` | `@codeproxy/cli` | Swap in a different proxy |
+| `BRIDGE_PORT` | `8787` | Port the bridge listens on |
+| `KEEPAWAKE_MAX` | `7200` | Seconds to hold the sprite awake before releasing |
+
 ```bash
-SPRITE_NAME=my-sprite bash zkc-verify.sh          # skip the picker
+SPRITE_NAME=my-sprite bash zkc-verify.sh
 BRIDGE_CMD='...' BRIDGE_PORT=9090 bash zkc-verify.sh   # test another proxy
-DEEPSEEK_MODEL=deepseek-v4-flash bash zkc-verify.sh
+KEEPAWAKE_MAX=21600 bash zkc-verify.sh                 # 6-hour ceiling
 ```
 
 ---
@@ -137,17 +150,45 @@ Three things to know anyway:
 2. **The key is written to `~/.codex/deepseek.env` on the sprite**, mode 600. The detached bridge needs it after your exec session ends. Remove it when done (below).
 3. **`debug.log` is gitignored — keep it that way.** It contains no key, but it does contain sprite/org names and a one-time device-auth code.
 
+The run leaves these on the sprite: `~/.codex/deepseek.env` (the key, mode 600),
+`~/probe/bridge.log` (proxy output — may echo request data), `~/probe/*.pid`, and
+a `~/.codex/config.toml` provider block. The cleanup command below removes them.
+
 **Both agents run with sandboxing disabled** (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`). This is correct *here*: a sprite is a hardware-isolated VM with a DNS egress allowlist, which is the environment those flags are documented for. Bubblewrap cannot even initialise inside one. **Do not copy these flags to your laptop.**
 
 `BRIDGE_CMD` is executed via `bash -c`. It's your own override knob, but never paste one from an untrusted source. Likewise `npx -y` fetches and runs a third-party package at launch — pin or vendor it if that matters to you.
 
-Cleanup — the keep-awake task bills while held:
+### Keep-awake and billing
+
+The bridge must outlive your shell, so the script registers a Sprites **Tasks API**
+hold (5-minute expiry, renewed every 60s) that keeps the sprite from hibernating.
+
+That hold is **bounded**. The heartbeat stops at a deadline — 2 hours by default —
+then deletes the task so the sprite frees immediately rather than waiting out the
+expiry. An abandoned run cannot bill indefinitely.
+
+```bash
+KEEPAWAKE_MAX=21600 bash zkc-verify.sh   # 6 hours for longer unattended work
+```
+
+The heartbeat also releases the hold if it is killed, so `kill` is a clean stop.
+
+Cleanup, **in this order** — deleting the task while the heartbeat still lives just
+re-registers it 60 seconds later:
 
 ```bash
 sprite exec -s YOUR_SPRITE -- bash -lc '
+  kill $(cat ~/probe/keepawake.pid) 2>/dev/null      # heartbeat FIRST
   kill -- -$(cat ~/probe/bridge.pid) 2>/dev/null
-  rm -f ~/probe/bridge.pid ~/probe/bridge.log ~/.codex/deepseek.env
-  curl -s -X DELETE --unix-socket /.sprite/api.sock http://sprite/v1/tasks/zkc-bridge'
+  curl -s -X DELETE --unix-socket /.sprite/api.sock http://sprite/v1/tasks/zkc-bridge
+  rm -f ~/probe/*.pid ~/probe/bridge.log ~/.codex/deepseek.env'
+```
+
+Check what is still holding the sprite awake:
+
+```bash
+sprite exec -s YOUR_SPRITE -- bash -lc \
+  'curl -s --unix-socket /.sprite/api.sock http://sprite/v1/tasks'
 ```
 
 ---
@@ -157,6 +198,10 @@ sprite exec -s YOUR_SPRITE -- bash -lc '
 These are **capability** probes, not endurance tests. Six short tasks per harness. Long-session behaviour, context compaction near the 1M boundary, and cost at scale are all unverified.
 
 Results are pinned to the versions above. The proxy landscape moves quickly — re-run rather than trusting this table.
+
+The keep-awake heartbeat is verified against a mock Tasks API (deadline exit and
+kill both release the hold) but has not been exercised across a real multi-hour
+sprite hibernation cycle.
 
 ---
 
