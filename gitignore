@@ -1,0 +1,20 @@
+# Run transcripts. These capture the full session: sprite and org names, model
+# ids, token counts, and the one-time device-auth code. No API key is ever
+# written to them, but they are still your infrastructure details.
+debug.log
+*.log
+zkc-*.log
+zkc-pull-*/
+
+# Anything key-shaped, in case a future edit writes one out
+*.env
+.env
+deepseek.env
+*.key
+*secret*
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
