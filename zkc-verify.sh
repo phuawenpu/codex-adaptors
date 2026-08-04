@@ -94,11 +94,28 @@ run_limited() {  # $1 seconds, rest: command. stdin closed, output on stdout.
 
 pick_sprite() {
   [[ -n "$SPRITE_NAME" ]] && { note "using SPRITE_NAME=$SPRITE_NAME from env"; return 0; }
-  local names=() src="" ESC api_raw list_raw n
+  local names=() src="" ESC api_raw list_raw n parsed_src
+  local -A seen=()
   ESC=$(printf '\033')
 
-  # Two CLI calls total, both bounded. Parse the captured text three ways
-  # rather than re-invoking the CLI per strategy.
+  # Add a candidate once, and reject values that are definitely metadata.  In
+  # particular, never offer SPRITE_ORG as a sprite name.
+  add_name() {
+    local candidate="$1"
+    [[ -n "$candidate" ]] || return 0
+    [[ "$candidate" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
+    [[ -n "${SPRITE_ORG:-}" && "$candidate" == "$SPRITE_ORG" ]] && return 0
+    case "${candidate,,}" in
+      name|sprite|sprites|organization|organisation|org|status|url|created|updated|running|stopped|warm|suspended|total)
+        return 0 ;;
+    esac
+    [[ -n "${seen[$candidate]:-}" ]] && return 0
+    seen[$candidate]=1
+    names+=("$candidate")
+  }
+
+  # Two CLI calls total, both bounded. Parse the captured text without assuming
+  # that every JSON "name" or the first displayed table column is a sprite.
   printf '       querying sprite api ... '
   api_raw=$(run_limited 20 sprite api "${ORG[@]}" /sprites || true)
   printf '%s\n' "$([ -n "$api_raw" ] && echo ok || echo 'no output')"
@@ -106,57 +123,175 @@ pick_sprite() {
   list_raw=$(run_limited 20 sprite list "${ORG[@]}" || true)
   printf '%s\n' "$([ -n "$list_raw" ] && echo ok || echo 'no output')"
 
-  # 1. API JSON. Does not reflow for a pipe and carries no colour codes.
+  # 1. API JSON. Only inspect collections that can represent the /sprites
+  #    result. Do NOT recursively collect every key named "name": responses may
+  #    also contain organization.name, owner.name, and other metadata.
   if [[ -n "$api_raw" ]]; then
-    while IFS= read -r n; do [[ -n "$n" ]] && names+=("$n"); done < <(
+    while IFS= read -r n; do add_name "$n"; done < <(
       printf '%s' "$api_raw" | python3 -c '
-import json,sys
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(0)
-out=[]
-def walk(x):
-    if isinstance(x,dict):
-        n=x.get("name")
-        if isinstance(n,str) and n: out.append(n)
-        for v in x.values(): walk(v)
-    elif isinstance(x,list):
-        for v in x: walk(v)
-walk(d)
-seen=set()
-for n in out:
-    if n not in seen: seen.add(n); print(n)
+import json, re, sys
+try:
+    root = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+valid = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+out = []
+
+def emit_sprite_records(value):
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("sprite_name")
+                if isinstance(name, str) and valid.fullmatch(name):
+                    out.append(name)
+    elif isinstance(value, dict):
+        # Some API versions wrap a single record or use an ID-keyed mapping.
+        name = value.get("name") or value.get("sprite_name")
+        sprite_markers = {"id", "status", "state", "url", "created_at", "updated_at"}
+        if isinstance(name, str) and valid.fullmatch(name) and sprite_markers.intersection(value):
+            out.append(name)
+        else:
+            for item in value.values():
+                if isinstance(item, dict):
+                    child = item.get("name") or item.get("sprite_name")
+                    if isinstance(child, str) and valid.fullmatch(child) and sprite_markers.intersection(item):
+                        out.append(child)
+
+def find_sprite_collections(node):
+    if isinstance(node, list):
+        # A top-level list returned by /sprites is itself the sprite collection.
+        emit_sprite_records(node)
+        return
+    if not isinstance(node, dict):
+        return
+
+    found = False
+    for key in ("sprites", "sprite_list"):
+        if key in node:
+            emit_sprite_records(node[key])
+            found = True
+
+    # Walk only generic response wrappers, never organization/owner metadata.
+    for key in ("data", "result", "results", "response"):
+        child = node.get(key)
+        if isinstance(child, (dict, list)):
+            find_sprite_collections(child)
+            found = True
+
+    # Common pagination wrappers use items for the endpoint resource itself.
+    if not found and "items" in node:
+        emit_sprite_records(node["items"])
+
+find_sprite_collections(root)
+seen = set()
+for name in out:
+    if name not in seen:
+        seen.add(name)
+        print(name)
 ' 2>/dev/null)
     ((${#names[@]})) && src="api"
   fi
 
-  # 2. Box/ascii table. Box chars are substituted literally, never placed in a
-  #    character class - a 3-byte UTF-8 char inside [...] makes sed match single
-  #    BYTES and the pattern can never align. ESC comes from printf because
-  #    \x1b is a GNU sed extension that BSD sed (macOS) rejects.
+  # 2. Parse `sprite list` by locating the NAME/SPRITE column in its header.
+  #    The organization is often the first column, so "$1 is the name" is not
+  #    valid. Handles box-drawing tables, ASCII tables, and 2+-space tables.
   if ((${#names[@]} == 0)) && [[ -n "$list_raw" ]]; then
-    while IFS= read -r n; do
-      [[ "$n" == "NAME" || -z "$n" ]] && continue
-      names+=("$n")
-    done < <(printf '%s\n' "$list_raw" \
-             | sed "s/${ESC}\[[0-9;]*[a-zA-Z]//g" \
-             | grep -e '│' -e '|' \
-             | sed 's/│/ /g; s/|/ /g' \
-             | awk '$1 != "NAME" && $1 ~ /^[A-Za-z0-9]/ { print $1 }')
-    ((${#names[@]})) && src="table"
+    while IFS=$'\t' read -r parsed_src n; do
+      [[ -n "$n" ]] || continue
+      add_name "$n"
+      [[ -z "$src" ]] && src="$parsed_src"
+    done < <(printf '%s\n' "$list_raw" | python3 -c '
+import re, sys
+
+ansi = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+valid = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+lines = [ansi.sub("", line.rstrip("\r\n")) for line in sys.stdin]
+
+HEADER_NAMES = {"NAME", "SPRITE", "SPRITE NAME", "SPRITE_NAME"}
+META = {
+    "NAME", "SPRITE", "SPRITES", "ORGANIZATION", "ORGANISATION", "ORG",
+    "STATUS", "STATE", "URL", "CREATED", "UPDATED", "RUNNING", "STOPPED",
+    "WARM", "SUSPENDED", "TOTAL"
+}
+
+def norm(value):
+    return re.sub(r"\s+", " ", value.strip()).upper()
+
+def emit_from_rows(rows, source):
+    header_i = name_i = None
+    for i, row in enumerate(rows):
+        normalized = [norm(cell) for cell in row]
+        for j, cell in enumerate(normalized):
+            if cell in HEADER_NAMES:
+                header_i, name_i = i, j
+                break
+        if header_i is not None:
+            break
+    if header_i is None:
+        return []
+
+    result = []
+    for row in rows[header_i + 1:]:
+        if name_i >= len(row):
+            continue
+        value = row[name_i].strip()
+        if valid.fullmatch(value) and norm(value) not in META:
+            result.append((source, value))
+    return result
+
+# Box/ASCII table rows. Empty edge cells are removed consistently from header
+# and data rows, preserving the real column indexes.
+pipe_rows = []
+for line in lines:
+    if "│" not in line and "|" not in line:
+        continue
+    cells = [cell.strip() for cell in re.split(r"[│|]", line)]
+    if cells and not cells[0]: cells.pop(0)
+    if cells and not cells[-1]: cells.pop()
+    if cells:
+        pipe_rows.append(cells)
+
+found = emit_from_rows(pipe_rows, "table")
+
+# Some CLI versions print aligned columns without border characters.
+if not found:
+    spaced_rows = []
+    for line in lines:
+        cells = [cell.strip() for cell in re.split(r"\s{2,}", line.strip()) if cell.strip()]
+        if len(cells) >= 2:
+            spaced_rows.append(cells)
+    found = emit_from_rows(spaced_rows, "columns")
+
+if found:
+    seen = set()
+    for source, value in found:
+        if value not in seen:
+            seen.add(value)
+            print(source + "\t" + value)
+    sys.exit(0)
+
+# Last resort: one bare sprite name per line. Exclude labels and values from
+# explicit organization metadata such as "Organization: acme".
+org_values = set()
+for line in lines:
+    m = re.match(r"^\s*(?:organization|organisation|org)\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*$", line, re.I)
+    if m:
+        org_values.add(m.group(1))
+
+seen = set()
+for line in lines:
+    value = line.strip()
+    if not valid.fullmatch(value):
+        continue
+    if norm(value) in META or value in org_values or value in seen:
+        continue
+    seen.add(value)
+    print("plain\t" + value)
+' 2>/dev/null)
   fi
 
-  # 3. Bare name per line - what the CLI actually emits when stdout is a pipe.
-  if ((${#names[@]} == 0)) && [[ -n "$list_raw" ]]; then
-    while IFS= read -r n; do [[ -n "$n" ]] && names+=("$n"); done < <(
-      printf '%s\n' "$list_raw" \
-        | sed "s/${ESC}\[[0-9;]*[a-zA-Z]//g" \
-        | awk '{ gsub(/^[ \t]+|[ \t]+$/, ""); print }' \
-        | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*$' \
-        | grep -vxE 'NAME|STATUS|URL|CREATED|running|stopped|warm|suspended|total')
-    ((${#names[@]})) && src="plain"
-  fi
-
-  # 4. Never block the run - explain, then ask.
+  # 3. Never block the run - explain, then ask.
   if ((${#names[@]} == 0)); then
     c_warn_local "could not detect sprites automatically"
     [[ -n "$api_raw"  ]] && { echo "       api said:"; printf '%s\n' "$api_raw"  | head -4 | sed 's/^/         /'; }
@@ -326,32 +461,95 @@ for i in $(seq 1 60); do
   sleep 2
 done
 python3 - "$HOME/.codex/config.toml" "$PORT" "$MODEL" <<'PY'
-import sys,re,os
-cfg,port,model=sys.argv[1:4]
-s=open(cfg).read() if os.path.exists(cfg) else ''
-s=re.sub(r'\n# >>> ds >>>.*?# <<< ds <<<\n','\n',s,flags=re.S)
-open(cfg,'w').write(s.rstrip()+'''
+import json, os, re, sys
+
+cfg, port, model = sys.argv[1:4]
+codex_home = os.path.dirname(cfg)
+catalog = os.path.join(codex_home, "models.json")
+
+# Codex does not infer a third-party model's capabilities from /v1/models.
+# Supply the same capability fields DeepSeek documents for its Codex setup.
+# Besides the context window, this controls apply_patch, parallel tools and
+# whether Codex is allowed to inject the native web_search tool.
+entry = {
+    "slug": model,
+    "prefer_websockets": False,
+    "support_verbosity": True,
+    "default_verbosity": "low",
+    "apply_patch_tool_type": "freeform",
+    "web_search_tool_type": "text",
+    "input_modalities": ["text"],
+    "supports_image_detail_original": False,
+    "truncation_policy": {"mode": "tokens", "limit": 10000},
+    "supports_parallel_tool_calls": True,
+    "tool_mode": None,
+    "multi_agent_version": "v2",
+    "use_responses_lite": False,
+    "include_skills_usage_instructions": False,
+    "auto_review_model_override": None,
+    "context_window": 1048576,
+    "max_context_window": 1048576,
+    "effective_context_window_percent": 95,
+    "auto_compact_token_limit": None,
+    "comp_hash": "3000",
+    "reasoning_summary_format": "experimental",
+    "default_reasoning_summary": "none",
+    "display_name": model,
+    "description": "DeepSeek agentic coding model through the local Responses bridge.",
+    "default_reasoning_level": "high",
+    "supported_reasoning_levels": [
+        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+        {"effort": "high", "description": "Greater reasoning depth for complex work"},
+        {"effort": "max", "description": "Maximum reasoning depth"},
+    ],
+    "shell_type": "shell_command",
+    "visibility": "list",
+    "minimal_client_version": "0.144.0",
+    "supported_in_api": True,
+    "availability_nux": None,
+    "upgrade": None,
+    "priority": 1,
+    "base_instructions": "You are Codex, a coding agent working in the user's current workspace.",
+    "model_messages": None,
+    "experimental_supported_tools": [],
+    "supports_search_tool": True,
+    "default_service_tier": None,
+    "supports_reasoning_summaries": True,
+}
+with open(catalog, "w") as f:
+    json.dump({"models": [entry]}, f, indent=2)
+    f.write("\n")
+
+s = open(cfg).read() if os.path.exists(cfg) else ""
+s = re.sub(r'\n# >>> ds >>>.*?# <<< ds <<<\n', '\n', s, flags=re.S)
+
+# The model settings belong in the profile. In the old version they appeared
+# after [model_providers.deepseek], which made TOML treat them as provider
+# fields; grepping the file then falsely reported them as effective settings.
+block = f'''
 
 # >>> ds >>>
 [model_providers.deepseek]
 name = "DeepSeek"
-base_url = "http://127.0.0.1:%s/v1"
+base_url = "http://127.0.0.1:{port}/v1"
 env_key = "DEEPSEEK_API_KEY"
 wire_api = "responses"
-
-# codex cannot fetch metadata from a custom provider (its /v1/models parse
-# fails), so it guesses a fallback window. Pin the real values instead:
-# DeepSeek advertises max_input_tokens=1000000, max_output_tokens=8192.
-model_context_window = 1000000
-model_max_output_tokens = 8192
+request_max_retries = 2
+stream_max_retries = 2
 
 [profiles.deepseek]
-model = "%s"
+model = "{model}"
 model_provider = "deepseek"
+model_catalog_json = "{catalog}"
+model_reasoning_effort = "high"
+model_context_window = 1048576
+web_search = "disabled"
 # <<< ds <<<
-''' % (port, model))
+'''
+with open(cfg, "w") as f:
+    f.write(s.rstrip() + block)
 PY
-echo '       codex provider + profile written'
+echo '       codex provider + profile + model catalog written'
 EOF
 step "3. bridge"
 b64=$(printf 'BRIDGE_CMD=%q\n' "$BRIDGE_CMD" | base64 | tr -d '\n')
@@ -447,86 +645,187 @@ IFS= read -r -d '' S_CODEX <<'EOF' || true
 set -uo pipefail
 set -a; . "$HOME/.codex/deepseek.env"; set +a
 MODEL="${B_MODEL:?}"; W="$HOME/probe"; cd "$W"
-p(){ printf '  %-14s %-5s %s\n' "$1" "$2" "${3:-}"; echo "PROBE|$1|$2|${3:-}"; }
-CX=(codex exec --dangerously-bypass-approvals-and-sandbox
-    -c model_provider=deepseek -c "model=$MODEL" -c web_search=disabled
-    -c model_context_window=1000000 -c model_max_output_tokens=8192)
-run(){ "${CX[@]}" "$1" 2>&1; }
+p(){ printf '  %-14s %-7s %s\n' "$1" "$2" "${3:-}"; echo "PROBE|$1|$2|${3:-}"; }
+
+# Simple probes do not need high reasoning. Lower effort reduces token pressure,
+# and a small pause plus whole-command retry prevents a transient 429 from being
+# mislabeled as a missing file/edit capability.
+RATE_RETRIES="${CODEX_RATE_RETRIES:-2}"
+RATE_BACKOFF="${CODEX_RATE_BACKOFF:-20}"
+PROBE_PAUSE="${CODEX_PROBE_PAUSE:-5}"
+CX=(codex --profile deepseek exec --dangerously-bypass-approvals-and-sandbox
+    --ephemeral -c web_search=disabled -c model_reasoning_effort=low)
+
+is_rate_limited(){ grep -qiE '429 Too Many Requests|rate[ _-]?limit|exceeded retry limit.*429' <<<"$1"; }
+run(){
+  local prompt="$1" out rc attempt=0 delay="$RATE_BACKOFF"
+  while :; do
+    out=$("${CX[@]}" "$prompt" 2>&1); rc=$?
+    if ! is_rate_limited "$out"; then printf '%s\n' "$out"; return "$rc"; fi
+    if (( attempt >= RATE_RETRIES )); then printf '%s\n' "$out"; return "$rc"; fi
+    attempt=$((attempt+1))
+    echo "       provider returned 429; retry $attempt/$RATE_RETRIES after ${delay}s" >&2
+    sleep "$delay"
+    delay=$((delay*2))
+  done
+}
+nap(){ [ "$PROBE_PAUSE" = 0 ] || sleep "$PROBE_PAUSE"; }
+blocked_or_fail(){
+  local name="$1" detail="$2" out="$3"
+  if is_rate_limited "$out"; then
+    p "$name" BLOCKED "provider 429 after retries; capability not tested"
+  else
+    p "$name" FAIL "$detail"
+  fi
+  tail -10 <<<"$out" | sed 's/^/         /'
+}
 N=$RANDOM
 
 # C1 one shell command, report its output
 o=$(run "Run this command: echo ZKCONE$N
 Reply with only what it printed.")
-grep -q "ZKCONE$N" <<<"$o" && p C1-shell PASS || { p C1-shell FAIL; tail -6 <<<"$o" | sed 's/^/         /'; }
+if grep -q "ZKCONE$N" <<<"$o"; then p C1-shell PASS
+else blocked_or_fail C1-shell "command output missing" "$o"; fi
+nap
 
 # C2 chain: the second command needs the first one's output
 o=$(run "Run: echo 7
-Then run: expr <that number> \* 6
+Then run: expr <that number> \\* 6
 Reply with only the final number.")
-grep -q '42' <<<"$o" && p C2-chained PASS "used the first result" \
-  || { p C2-chained FAIL "could not feed one result into the next"; tail -6 <<<"$o" | sed 's/^/         /'; }
+if grep -q '42' <<<"$o"; then p C2-chained PASS "used the first result"
+else blocked_or_fail C2-chained "could not feed one result into the next" "$o"; fi
+nap
 
 # C3 three separate commands in one turn - the shape that broke LiteLLM
 o=$(run "Run these as three separate commands: echo AAA$N ; echo BBB$N ; echo CCC$N
 Reply with all three outputs.")
 k=0; for x in AAA BBB CCC; do grep -q "$x$N" <<<"$o" && k=$((k+1)); done
-[ "$k" = 3 ] && p C3-parallel PASS "3/3" || { p C3-parallel FAIL "$k/3"; tail -8 <<<"$o" | sed 's/^/         /'; }
+if [ "$k" = 3 ]; then p C3-parallel PASS "3/3"
+elif is_rate_limited "$o"; then blocked_or_fail C3-parallel "$k/3 outputs" "$o"
+else p C3-parallel FAIL "$k/3"; tail -10 <<<"$o" | sed 's/^/         /'; fi
+nap
 
-# C4 create a file
+# C4 create a file. A 429 is infrastructure BLOCKED, not a capability FAIL.
 rm -f made.txt
 o=$(run "Create a file named made.txt in the current directory containing exactly: MADE$N
 Create that one file and nothing else.")
-[ -f made.txt ] && grep -q "MADE$N" made.txt && p C4-create PASS "$(wc -c <made.txt) bytes" \
-  || { p C4-create FAIL "file absent or wrong"; tail -8 <<<"$o" | sed 's/^/         /'; }
+if [ -f made.txt ] && [ "$(cat made.txt)" = "MADE$N" ]; then
+  p C4-create PASS "$(wc -c <made.txt) bytes"
+else
+  blocked_or_fail C4-create "file absent or content differs" "$o"
+fi
+nap
 
-# C5 edit an existing file - a different codex tool path from create
+# C5 edit an existing file - a different Codex tool path from create
 printf 'keep this line\nOLDVALUE\nkeep this too\n' > edit.txt
+printf 'keep this line\nNEW%s\nkeep this too\n' "$N" > /tmp/c5.expected
 o=$(run "In edit.txt, replace the line OLDVALUE with NEW$N
 Change nothing else in that file.")
-if grep -q "NEW$N" edit.txt 2>/dev/null && grep -q 'keep this line' edit.txt; then
-  p C5-edit PASS "patched in place"
-else p C5-edit FAIL "edit did not apply cleanly"; tail -8 <<<"$o" | sed 's/^/         /'; fi
+if cmp -s edit.txt /tmp/c5.expected; then
+  p C5-edit PASS "patched in place; unrelated bytes preserved"
+else
+  blocked_or_fail C5-edit "edit did not apply exactly" "$o"
+fi
+nap
 
 # C6 keep going after a command fails
 o=$(run "Run: cat /definitely-not-here-$N   (this will fail, that is expected)
 Then run: echo RECOVERED$N
 Reply with only the second output.")
-grep -q "RECOVERED$N" <<<"$o" && p C6-recover PASS "continued past a failure" \
-  || { p C6-recover FAIL "gave up after one error"; tail -8 <<<"$o" | sed 's/^/         /'; }
+if grep -q "RECOVERED$N" <<<"$o"; then p C6-recover PASS "continued past a failure"
+else blocked_or_fail C6-recover "gave up after one error" "$o"; fi
+nap
 
-# C7 does codex know the real context window, or is it guessing?
+# C7 validate the loaded model catalog, not text merely present in config.toml.
+# `codex debug models` is the runtime's resolved catalog view.
+META_FILE=/tmp/c7-models.json
+codex --profile deepseek debug models >"$META_FILE" 2>&1 || true
+META=$(python3 - "$META_FILE" "$MODEL" <<'PYEOF'
+import json, sys
+path, slug = sys.argv[1:3]
+s = open(path, errors="replace").read()
+data = None
+for i, ch in enumerate(s):
+    if ch not in "[{":
+        continue
+    try:
+        data = json.loads(s[i:])
+        break
+    except Exception:
+        pass
+if data is None:
+    print("0|||||")
+    raise SystemExit
+models = data if isinstance(data, list) else data.get("models", [])
+m = next((x for x in models if isinstance(x, dict) and x.get("slug") == slug), None)
+if not m:
+    print("0|||||")
+else:
+    print("1|%s|%s|%s|%s|%s" % (
+        m.get("context_window", ""),
+        m.get("apply_patch_tool_type", ""),
+        str(m.get("supports_parallel_tool_calls", "")).lower(),
+        str(m.get("supports_search_tool", "")).lower(),
+        m.get("web_search_tool_type", ""),
+    ))
+PYEOF
+)
+IFS='|' read -r FOUND CTX PATCH PAR SEARCH WEBTYPE <<<"$META"
 o=$(run "Reply with only the word FINE.")
-# Do not just report the warning - check the pin is really loaded. `codex
-# config get` reads the effective merged configuration, so it distinguishes
-# "written to a file" from "in force".
-EFF=$(codex config get model_context_window 2>/dev/null | tr -d ' \r\n' || true)
-[ -n "$EFF" ] || EFF=$(grep -m1 '^model_context_window' "$HOME/.codex/config.toml" 2>/dev/null | tr -d ' ' | cut -d= -f2)
-if grep -qi 'model metadata for .* not found' <<<"$o"; then
-  if [ "${EFF:-0}" = "1000000" ]; then
-    p C7-metadata INFO "lookup warning is cosmetic; effective window=$EFF"
-  else
-    p C7-metadata FAIL "fallback metadata AND pin not in force (effective=${EFF:-unset})"
-  fi
+if is_rate_limited "$o"; then
+  p C7-metadata BLOCKED "provider 429; catalog parse result found=$FOUND context=${CTX:-?}"
+elif [ "$FOUND" != 1 ]; then
+  p C7-metadata FAIL "model absent from codex debug models"
+  tail -12 "$META_FILE" | sed 's/^/         /'
+elif grep -qi 'model metadata for .* not found' <<<"$o"; then
+  p C7-metadata FAIL "catalog exists but runtime still used fallback metadata"
+elif [ "$CTX" = 1048576 ] && [ "$PATCH" = freeform ] && [ "$PAR" = true ]; then
+  p C7-metadata PASS "catalog loaded: context=$CTX patch=$PATCH parallel=$PAR search=$SEARCH/$WEBTYPE"
 else
-  p C7-metadata PASS "no fallback warning; effective window=${EFF:-unknown}"
+  p C7-metadata FAIL "catalog incomplete: context=${CTX:-?} patch=${PATCH:-?} parallel=${PAR:-?} search=${SEARCH:-?}"
 fi
+nap
 
-# C8 web search on a custom provider - expected unavailable
-# SCAR: the old check accepted any /[0-9]{2}\./ and so matched the string
-# "deepseek-v4-pro" itself - it reported PASS without a search ever happening.
-# Require evidence the TOOL ran, not merely a number-shaped substring.
-o=$(codex exec --dangerously-bypass-approvals-and-sandbox \
-      -c model_provider=deepseek -c "model=$MODEL" -c web_search=live \
-      "Use your web search tool to find today's top story on a major news site.
-Reply with the headline and the URL you retrieved it from." 2>&1)
-if grep -qiE 'unsupported|not supported|unknown tool|no such tool|web_search.*invalid|tool.*not available' <<<"$o"; then
-  p C8-websearch INFO "web search unavailable on a custom provider, as expected"
-elif grep -qiE 'https?://[a-z0-9.-]+\.[a-z]{2,}' <<<"$o" && grep -qic 'search' <<<"$o" >/dev/null; then
-  p C8-websearch PASS "returned a live URL - search really ran"
-elif grep -qiE 'cannot|unable|do not have|no access' <<<"$o"; then
-  p C8-websearch INFO "model says it has no search capability"
+# C8 requires proof of an actual native tool event. A URL in prose can be
+# memorized or fabricated, so run JSONL and count item.* events whose item type
+# is web_search. The model catalog advertises supports_search_tool=true.
+run_web(){
+  local out rc attempt=0 delay="$RATE_BACKOFF"
+  while :; do
+    out=$(codex --profile deepseek --search exec \
+      --dangerously-bypass-approvals-and-sandbox --ephemeral --json \
+      -c web_search=live -c model_reasoning_effort=low \
+      "Use only Codex's native web_search tool. Do not use shell, curl, MCP, or local commands. Search for the official OpenAI Codex web-search documentation. Return its exact page title and URL. If the native tool is unavailable, reply exactly WEB_SEARCH_UNAVAILABLE." 2>&1); rc=$?
+    if ! is_rate_limited "$out"; then printf '%s\n' "$out"; return "$rc"; fi
+    if (( attempt >= RATE_RETRIES )); then printf '%s\n' "$out"; return "$rc"; fi
+    attempt=$((attempt+1))
+    echo "       web probe got 429; retry $attempt/$RATE_RETRIES after ${delay}s" >&2
+    sleep "$delay"; delay=$((delay*2))
+  done
+}
+o=$(run_web)
+WEB_EVENTS=$(python3 -c '
+import json,sys
+ids=set()
+for line in sys.stdin:
+    try: d=json.loads(line)
+    except Exception: continue
+    if str(d.get("type", "")).startswith("item."):
+        item=d.get("item") or {}
+        if item.get("type") == "web_search": ids.add(item.get("id") or str(len(ids)))
+print(len(ids))
+' <<<"$o")
+URLS=$(grep -Eo 'https?://[^"[:space:]\\]+' <<<"$o" | sort -u | wc -l | tr -d ' ')
+if is_rate_limited "$o"; then
+  p C8-websearch BLOCKED "provider 429 after retries"
+elif [ "${WEB_EVENTS:-0}" -gt 0 ]; then
+  p C8-websearch PASS "observed ${WEB_EVENTS} native web_search event(s), urls=${URLS:-0}"
+elif grep -qiE 'unsupported|not supported|unknown tool|no such tool|web_search.*invalid|tool.*not available|WEB_SEARCH_UNAVAILABLE' <<<"$o"; then
+  p C8-websearch FAIL "native web_search was not available end to end"
+  tail -14 <<<"$o" | sed 's/^/         /'
 else
-  p C8-websearch INFO "inconclusive - no URL returned and no explicit refusal"
+  p C8-websearch FAIL "no web_search event in codex exec --json output"
+  tail -14 <<<"$o" | sed 's/^/         /'
 fi
 EOF
 step "5. codex capability probes"
@@ -761,21 +1060,32 @@ printf '%s\n' "$ALL" | grep '^PROBE|' | while IFS='|' read -r _ n v d; do
   esac
 done
 FAILS=$(printf '%s\n' "$ALL" | grep -c '^PROBE|[^|]*|FAIL' || true)
-cf(){ printf '%s\n' "$ALL" | grep -c "^PROBE|$1[0-9]*-[^|]*|FAIL" || true; }
-CODEX_FAILS=$(( $(cf P) + $(cf C) )); CLAUDE_FAILS=$(( $(cf A) + $(cf L) ))
+BLOCKS=$(printf '%s\n' "$ALL" | grep -c '^PROBE|[^|]*|BLOCKED' || true)
+cv(){ printf '%s\n' "$ALL" | grep -c "^PROBE|$1[0-9]*-[^|]*|$2" || true; }
+CODEX_FAILS=$(( $(cv P FAIL) + $(cv C FAIL) ))
+CODEX_BLOCKS=$(( $(cv P BLOCKED) + $(cv C BLOCKED) ))
+CLAUDE_FAILS=$(( $(cv A FAIL) + $(cv L FAIL) ))
+CLAUDE_BLOCKS=$(( $(cv A BLOCKED) + $(cv L BLOCKED) ))
+status(){
+  local fails="$1" blocks="$2"
+  if [ "$fails" -gt 0 ]; then echo "$fails failure(s), $blocks blocked"
+  elif [ "$blocks" -gt 0 ]; then echo "no failures, $blocks blocked/inconclusive"
+  else echo 'all probes passed'; fi
+}
 
 step "HEAD TO HEAD"
-printf '  %-34s %s\n' "Codex + local Responses bridge:" "$([ "$CODEX_FAILS" = 0 ] && echo 'all probes passed' || echo "$CODEX_FAILS failure(s)")"
-printf '  %-34s %s\n' "Claude Code + native /anthropic:" "$([ "$CLAUDE_FAILS" = 0 ] && echo 'all probes passed' || echo "$CLAUDE_FAILS failure(s)")"
-if [ "$CLAUDE_FAILS" = 0 ] && [ "$CODEX_FAILS" = 0 ]; then
+printf '  %-34s %s\n' "Codex + local Responses bridge:" "$(status "$CODEX_FAILS" "$CODEX_BLOCKS")"
+printf '  %-34s %s\n' "Claude Code + native /anthropic:" "$(status "$CLAUDE_FAILS" "$CLAUDE_BLOCKS")"
+if [ "$CLAUDE_FAILS" = 0 ] && [ "$CLAUDE_BLOCKS" = 0 ] \
+   && [ "$CODEX_FAILS" = 0 ] && [ "$CODEX_BLOCKS" = 0 ]; then
   echo
   echo "  Both work. Prefer Claude Code for real use: no proxy process to keep"
   echo "  alive, nothing to translate, no keep-awake task for a bridge, and one"
   echo "  fewer component that can drop a tool result. Use Codex only if you"
   echo "  specifically need Codex."
-elif [ "$CLAUDE_FAILS" = 0 ]; then
+elif [ "$CLAUDE_FAILS" = 0 ] && [ "$CLAUDE_BLOCKS" = 0 ]; then
   echo; echo "  Use Claude Code. It needs no proxy and passed where Codex did not."
-elif [ "$CODEX_FAILS" = 0 ]; then
+elif [ "$CODEX_FAILS" = 0 ] && [ "$CODEX_BLOCKS" = 0 ]; then
   echo; echo "  Use Codex with the bridge. The native Anthropic path failed here."
 fi
 
@@ -794,7 +1104,7 @@ step "VERDICT"
 # are fixed, and `set +u` here guarantees a missed one degrades to a cosmetic
 # blank instead of destroying the only output that matters.
 set +u
-if [ "${FAILS:-1}" = 0 ]; then
+if [ "${FAILS:-1}" = 0 ] && [ "${BLOCKS:-1}" = 0 ]; then
   cat <<TXT
   Every probe passed. DeepSeek is usable in Codex for general agentic work:
   tool calls, parallel tool calls, chained reasoning, file creation, in-place
@@ -815,11 +1125,16 @@ if [ "${FAILS:-1}" = 0 ]; then
     [profiles.deepseek]
     model = "${MODEL}"
     model_provider = "deepseek"
+    model_catalog_json = "${DOLLAR}HOME/.codex/models.json"
+    model_reasoning_effort = "high"
+    model_context_window = 1048576
 
     codex --profile deepseek          # interactive
-    codex exec -c model_provider=deepseek -c model=${MODEL} "..."
+    codex --profile deepseek exec "..."
 
-  The bridge must be running before codex starts, and must outlive the run.
+  The script also writes ~/.codex/models.json. That catalog is required for
+  Codex to know the context window, patch format, parallel tools, and search
+  capability. The bridge must be running before codex starts and outlive it.
 
   Or skip the proxy entirely with Claude Code, which speaks DeepSeek natively:
 
@@ -840,6 +1155,11 @@ if [ "${FAILS:-1}" = 0 ]; then
   because Claude Code routes some internal calls by asking for opus/sonnet/
   haiku by name rather than the model you set.
 TXT
+elif [ "${FAILS:-0}" = 0 ]; then
+  echo "  No capability probe failed, but ${BLOCKS} probe(s) were BLOCKED by"
+  echo "  transient infrastructure such as HTTP 429. BLOCKED is deliberately"
+  echo "  not counted as PASS. Rerun after the provider's rate window resets,"
+  echo "  or raise CODEX_RATE_RETRIES / CODEX_RATE_BACKOFF."
 else
   echo "  ${FAILS} probe(s) failed. Read the DETAIL column: P-probes are the"
   echo "  bridge's translation, C-probes are codex end to end. A P-failure with"
