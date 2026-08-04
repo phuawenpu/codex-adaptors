@@ -23,7 +23,8 @@
 #   C5 edit        modify an existing file (a different codex tool path)
 #   C6 recover     a command fails; continue instead of giving up
 #   C7 metadata    is the real context window known, or fallback guessed?
-#   C8 websearch   expected unavailable on a custom provider - confirm
+#   C8 websearch   native DeepSeek Responses + Flash control, with a genuine
+#                  server-side web_search call and Codex JSONL tool event
 #
 # Layer 3 - ANTHROPIC PROTOCOL (raw curl to api.deepseek.com/anthropic)
 #   A1 identity    /v1/messages answers and names its model
@@ -59,6 +60,11 @@ set -uo pipefail
 # SPRITE_NAME env skips the picker; otherwise choose from `sprite list`.
 SPRITE_NAME="${SPRITE_NAME:-}"
 MODEL="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
+# DeepSeek's native Responses API currently exposes Codex + hosted web_search
+# on V4-Flash. Keep this separate from MODEL: C1-C7 deliberately exercise the
+# selected model through the local Chat->Responses translation bridge, while
+# C8 must use the native Responses transport or the hosted tool is lost.
+C8_WEB_MODEL="${C8_WEB_MODEL:-deepseek-v4-flash}"
 PORT="${BRIDGE_PORT:-8787}"
 # Ceiling on how long the sprite is held awake, in seconds. The heartbeat stops
 # at this deadline and releases the task, so an abandoned run cannot bill
@@ -328,7 +334,7 @@ step "0. sprite"
 pick_sprite
 run_limited 15 sprite api "${ORG[@]}" -s "$SPRITE_NAME" / >/dev/null \
   || note "could not query /v1/sprites/$SPRITE_NAME - continuing, exec will confirm"
-echo "zkc-verify.sh  $(date -u '+%FT%TZ')  sprite=$SPRITE_NAME  model=$MODEL  port=$PORT"
+echo "zkc-verify.sh  $(date -u '+%FT%TZ')  sprite=$SPRITE_NAME  model=$MODEL  web_model=$C8_WEB_MODEL  port=$PORT"
 sx -- bash -lc 'echo "  $(hostname) / $(whoami) / $HOME"' || { bad unreachable; exit 1; }
 STDIN_OK=0
 [[ "$(printf p | sprite exec "${ORG[@]}" -s "$SPRITE_NAME" -- cat 2>/dev/null)" == *p* ]] && STDIN_OK=1
@@ -383,7 +389,7 @@ fi
 IFS= read -r -d '' S_BRIDGE <<'EOF' || true
 set -uo pipefail
 IFS= read -r K || true
-PORT="${B_PORT:?}"; MODEL="${B_MODEL:?}"
+PORT="${B_PORT:?}"; MODEL="${B_MODEL:?}"; WEB_MODEL="${C8_MODEL:-deepseek-v4-flash}"
 . "$HOME/probe/.bridgecmd"                      # staged, holds no secret
 CMD="${BRIDGE_CMD//__KEY__/$K}"; CMD="${CMD//__MODEL__/$MODEL}"
 export DEEPSEEK_API_KEY="$K"
@@ -460,20 +466,22 @@ for i in $(seq 1 60); do
   [ "$i" = 60 ] && { echo '       NO BIND. log:'; tail -20 "$HOME/probe/bridge.log" | sed 's/^/         /'; exit 74; }
   sleep 2
 done
-python3 - "$HOME/.codex/config.toml" "$PORT" "$MODEL" <<'PY'
+python3 - "$HOME/.codex/config.toml" "$PORT" "$MODEL" "$WEB_MODEL" <<'PY'
 import json, os, re, sys
 
-cfg, port, model = sys.argv[1:4]
+cfg, port, model, web_model = sys.argv[1:5]
 codex_home = os.path.dirname(cfg)
 catalog = os.path.join(codex_home, "models.json")
 profile_cfg = os.path.join(codex_home, "deepseek.config.toml")
+web_profile_cfg = os.path.join(codex_home, "deepseek-web.config.toml")
 
 # Codex does not infer a third-party model's capabilities from /v1/models.
 # Supply the same capability fields DeepSeek documents for its Codex setup.
 # Besides the context window, this controls apply_patch, parallel tools and
 # whether Codex is allowed to inject the native web_search tool.
-entry = {
-    "slug": model,
+def make_entry(slug, description):
+    return {
+    "slug": slug,
     "prefer_websockets": False,
     "support_verbosity": True,
     "default_verbosity": "low",
@@ -495,8 +503,8 @@ entry = {
     "comp_hash": "3000",
     "reasoning_summary_format": "experimental",
     "default_reasoning_summary": "none",
-    "display_name": model,
-    "description": "DeepSeek agentic coding model through the local Responses bridge.",
+    "display_name": slug,
+    "description": description,
     "default_reasoning_level": "high",
     "supported_reasoning_levels": [
         {"effort": "low", "description": "Fast responses with lighter reasoning"},
@@ -516,9 +524,19 @@ entry = {
     "supports_search_tool": True,
     "default_service_tier": None,
     "supports_reasoning_summaries": True,
-}
+    }
+
+entries = [make_entry(
+    model,
+    "DeepSeek agentic coding model through the local Chat-to-Responses bridge.",
+)]
+if web_model != model:
+    entries.append(make_entry(
+        web_model,
+        "DeepSeek model through the native Responses API; used by the hosted web-search control.",
+    ))
 with open(catalog, "w") as f:
-    json.dump({"models": [entry]}, f, indent=2)
+    json.dump({"models": entries}, f, indent=2)
     f.write("\n")
 
 s = open(cfg).read() if os.path.exists(cfg) else ""
@@ -550,6 +568,14 @@ env_key = "DEEPSEEK_API_KEY"
 wire_api = "responses"
 request_max_retries = 2
 stream_max_retries = 2
+
+[model_providers.deepseek_native]
+name = "DeepSeek Native Responses"
+base_url = "https://api.deepseek.com/"
+env_key = "DEEPSEEK_API_KEY"
+wire_api = "responses"
+request_max_retries = 2
+stream_max_retries = 2
 # <<< ds <<<
 '''
 with open(cfg, "w") as f:
@@ -565,13 +591,27 @@ web_search = "disabled"
 '''
 with open(profile_cfg, "w") as f:
     f.write(profile_block)
+
+# Hosted web_search is a server-side Responses tool. A Chat-Completions bridge
+# cannot preserve it, so C8 uses a second profile that talks to DeepSeek's
+# native Responses endpoint. DeepSeek currently documents V4-Flash for this
+# route; C8_MODEL can be overridden later when other models gain support.
+web_profile_block = f'''model = "{web_model}"
+model_provider = "deepseek_native"
+model_catalog_json = "{catalog}"
+model_reasoning_effort = "low"
+model_context_window = 1048576
+web_search = "live"
+'''
+with open(web_profile_cfg, "w") as f:
+    f.write(web_profile_block)
 PY
-echo '       codex provider + deepseek.config.toml + model catalog written'
+echo '       bridge profile + native web-search profile + model catalog written'
 EOF
 step "3. bridge"
 b64=$(printf 'BRIDGE_CMD=%q\n' "$BRIDGE_CMD" | base64 | tr -d '\n')
 sx -- bash -lc "mkdir -p \$HOME/probe && echo $b64 | base64 -d > \$HOME/probe/.bridgecmd"
-send "$S_BRIDGE" "B_PORT=$PORT,B_MODEL=$MODEL,KEEP_MAX=$KEEPAWAKE_MAX" && ok "bridge up and held awake" || { bad "bridge failed"; exit 1; }
+send "$S_BRIDGE" "B_PORT=$PORT,B_MODEL=$MODEL,C8_MODEL=$C8_WEB_MODEL,KEEP_MAX=$KEEPAWAKE_MAX" && ok "bridge up and held awake" || { bad "bridge failed"; exit 1; }
 
 # ========================================================= 4. PROTOCOL PROBES ==
 IFS= read -r -d '' S_PROTO <<'EOF' || true
@@ -661,7 +701,7 @@ PROTO_OUT=$(send "$S_PROTO" "B_PORT=$PORT,B_MODEL=$MODEL" 2>&1); echo "$PROTO_OU
 IFS= read -r -d '' S_CODEX <<'EOF' || true
 set -uo pipefail
 set -a; . "$HOME/.codex/deepseek.env"; set +a
-MODEL="${B_MODEL:?}"; W="$HOME/probe"; cd "$W"
+MODEL="${B_MODEL:?}"; WEB_MODEL="${C8_MODEL:-deepseek-v4-flash}"; W="$HOME/probe"; cd "$W"
 p(){ printf '  %-14s %-7s %s\n' "$1" "$2" "${3:-}"; echo "PROBE|$1|$2|${3:-}"; }
 
 # Simple probes do not need high reasoning. Lower effort reduces token pressure,
@@ -677,7 +717,7 @@ is_rate_limited(){ grep -qiE '429 Too Many Requests|rate[ _-]?limit|exceeded ret
 run(){
   local prompt="$1" out rc attempt=0 delay="$RATE_BACKOFF"
   while :; do
-    out=$("${CX[@]}" "$prompt" 2>&1); rc=$?
+    out=$("${CX[@]}" "$prompt" </dev/null 2>&1); rc=$?
     if ! is_rate_limited "$out"; then printf '%s\n' "$out"; return "$rc"; fi
     if (( attempt >= RATE_RETRIES )); then printf '%s\n' "$out"; return "$rc"; fi
     attempt=$((attempt+1))
@@ -828,23 +868,74 @@ else
 fi
 nap
 
-# C8 requires proof of an actual native tool event. A URL in prose can be
-# memorized or fabricated, so run JSONL and count item.* events whose item type
-# is web_search. The model catalog advertises supports_search_tool=true.
+# C8 cannot be tested through @codeproxy/cli: that bridge converts Codex's
+# Responses request into Chat Completions, while DeepSeek web_search is a
+# hosted Responses tool. First prove the server-side tool works on DeepSeek's
+# native Responses endpoint, then require Codex to emit a real web_search item
+# through the separate deepseek-web profile. C1-C7 remain bridge probes.
+RAW_WEB=/tmp/c8-native-response.json
+RAW_STATUS=$(python3 - "$WEB_MODEL" "$RAW_WEB" <<'PYEOF'
+import json, os, sys, urllib.error, urllib.request
+
+model, path = sys.argv[1:3]
+key = os.environ.get("DEEPSEEK_API_KEY", "")
+body = {
+    "model": model,
+    "input": "Search the web for the official OpenAI Codex CLI reference page and return its title and URL.",
+    "tools": [{"type": "web_search"}],
+    "tool_choice": {"type": "web_search"},
+    "max_output_tokens": 512,
+}
+req = urllib.request.Request(
+    "https://api.deepseek.com/responses",
+    data=json.dumps(body).encode(),
+    headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+)
+try:
+    with urllib.request.urlopen(req, timeout=120) as r:
+        raw = r.read().decode("utf-8", "replace")
+        status = r.status
+except urllib.error.HTTPError as e:
+    status = e.code
+    raw = e.read().decode("utf-8", "replace")
+except Exception as e:
+    status = 0
+    raw = json.dumps({"error": str(e)})
+open(path, "w").write(raw)
+print(status)
+PYEOF
+)
+RAW_EVENTS=$(python3 - "$RAW_WEB" <<'PYEOF'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    print(0); raise SystemExit
+n = 0
+def walk(x):
+    global n
+    if isinstance(x, dict):
+        if x.get("type") == "web_search_call": n += 1
+        for v in x.values(): walk(v)
+    elif isinstance(x, list):
+        for v in x: walk(v)
+walk(data)
+print(n)
+PYEOF
+)
+
 run_web(){
   local out rc attempt=0 delay="$RATE_BACKOFF"
   while :; do
-    # --search is a root Codex option in current CLI releases. It must appear
-    # before the `exec` subcommand; placing it after `exec` makes clap reject
-    # the invocation before a session or provider request is created.
-    out=$(codex --profile deepseek --search exec \
+    out=$(codex --profile deepseek-web --search exec \
       --dangerously-bypass-approvals-and-sandbox --ephemeral --json \
       -c web_search=live -c model_reasoning_effort=low \
-      "Use only Codex's native web_search tool. Do not use shell, curl, MCP, or local commands. Search for the official OpenAI Codex web-search documentation. Return its exact page title and URL. If the native tool is unavailable, reply exactly WEB_SEARCH_UNAVAILABLE." 2>&1); rc=$?
+      "You must call the native web_search tool before answering. Search for the official OpenAI Codex CLI reference page and return its exact page title and URL. Do not use shell, curl, MCP, or local commands." \
+      </dev/null 2>&1); rc=$?
     if ! is_rate_limited "$out"; then printf '%s\n' "$out"; return "$rc"; fi
     if (( attempt >= RATE_RETRIES )); then printf '%s\n' "$out"; return "$rc"; fi
     attempt=$((attempt+1))
-    echo "       web probe got 429; retry $attempt/$RATE_RETRIES after ${delay}s" >&2
+    echo "       native web probe got 429; retry $attempt/$RATE_RETRIES after ${delay}s" >&2
     sleep "$delay"; delay=$((delay*2))
   done
 }
@@ -861,26 +952,33 @@ for line in sys.stdin:
 print(len(ids))
 ' <<<"$o")
 URLS=$(grep -Eo 'https?://[^"[:space:]\\]+' <<<"$o" | sort -u | wc -l | tr -d ' ')
-if grep -qiE "unexpected argument|Usage: codex( exec)? \[OPTIONS\]" <<<"$o"; then
-  p C8-websearch FAIL "probe invocation rejected by Codex CLI before provider contact"
+
+if [ "$RAW_STATUS" = 429 ]; then
+  p C8-websearch BLOCKED "native DeepSeek Responses preflight returned 429"
+  tail -12 "$RAW_WEB" | sed 's/^/         /'
+elif [ "$RAW_STATUS" = 0 ] || [[ "$RAW_STATUS" =~ ^5[0-9][0-9]$ ]]; then
+  p C8-websearch BLOCKED "native Responses preflight was unavailable (http=$RAW_STATUS)"
+  tail -12 "$RAW_WEB" | sed 's/^/         /'
+elif [ "$RAW_STATUS" != 200 ]; then
+  p C8-websearch FAIL "native Responses preflight failed for $WEB_MODEL (http=$RAW_STATUS)"
+  tail -12 "$RAW_WEB" | sed 's/^/         /'
+elif [ "${RAW_EVENTS:-0}" -lt 1 ]; then
+  p C8-websearch FAIL "native Responses returned 200 but no web_search_call"
+  head -c 500 "$RAW_WEB" | sed 's/^/         /'; echo
+elif grep -qiE "unexpected argument|Usage: codex( exec)? \[OPTIONS\]|error loading config" <<<"$o"; then
+  p C8-websearch FAIL "deepseek-web profile or Codex invocation was rejected"
   tail -14 <<<"$o" | sed 's/^/         /'
 elif is_rate_limited "$o"; then
-  p C8-websearch BLOCKED "provider 429 after retries"
+  p C8-websearch BLOCKED "native Codex web-search run hit 429 after retries"
 elif [ "${WEB_EVENTS:-0}" -gt 0 ]; then
-  p C8-websearch PASS "observed ${WEB_EVENTS} native web_search event(s), urls=${URLS:-0}"
-elif grep -qiE 'unsupported|not supported|unknown tool|no such tool|web_search.*invalid|tool.*not available|WEB_SEARCH_UNAVAILABLE' <<<"$o"; then
-  p C8-websearch FAIL "native web_search was not available end to end"
-  tail -14 <<<"$o" | sed 's/^/         /'
-elif [ "$MODEL" = "deepseek-v4-pro" ]; then
-  p C8-websearch FAIL "no native event; rerun with DEEPSEEK_MODEL=deepseek-v4-flash as the supported Codex control"
-  tail -14 <<<"$o" | sed 's/^/         /'
+  p C8-websearch PASS "native $WEB_MODEL: raw_calls=$RAW_EVENTS codex_events=$WEB_EVENTS urls=${URLS:-0}"
 else
-  p C8-websearch FAIL "no web_search event in codex exec --json output"
+  p C8-websearch FAIL "server search worked, but Codex emitted no web_search event"
   tail -14 <<<"$o" | sed 's/^/         /'
 fi
 EOF
 step "5. codex capability probes"
-CODEX_OUT=$(send "$S_CODEX" "B_MODEL=$MODEL" 2>&1); echo "$CODEX_OUT"
+CODEX_OUT=$(send "$S_CODEX" "B_MODEL=$MODEL,C8_MODEL=$C8_WEB_MODEL" 2>&1); echo "$CODEX_OUT"
 
 
 # ====================================================== 6. ANTHROPIC PROTOCOL ==
@@ -1125,7 +1223,7 @@ status(){
 }
 
 step "HEAD TO HEAD"
-printf '  %-34s %s\n' "Codex + local Responses bridge:" "$(status "$CODEX_FAILS" "$CODEX_BLOCKS")"
+printf '  %-42s %s\n' "Codex (bridge agent probes + native search):" "$(status "$CODEX_FAILS" "$CODEX_BLOCKS")"
 printf '  %-34s %s\n' "Claude Code + native /anthropic:" "$(status "$CLAUDE_FAILS" "$CLAUDE_BLOCKS")"
 if [ "$CLAUDE_FAILS" = 0 ] && [ "$CLAUDE_BLOCKS" = 0 ] \
    && [ "$CODEX_FAILS" = 0 ] && [ "$CODEX_BLOCKS" = 0 ]; then
@@ -1173,6 +1271,12 @@ if [ "${FAILS:-1}" = 0 ] && [ "${BLOCKS:-1}" = 0 ]; then
     env_key = "DEEPSEEK_API_KEY"
     wire_api = "responses"
 
+    [model_providers.deepseek_native]
+    name = "DeepSeek Native Responses"
+    base_url = "https://api.deepseek.com/"
+    env_key = "DEEPSEEK_API_KEY"
+    wire_api = "responses"
+
     # ~/.codex/deepseek.config.toml
     model = "${MODEL}"
     model_provider = "deepseek"
@@ -1186,6 +1290,17 @@ if [ "${FAILS:-1}" = 0 ] && [ "${BLOCKS:-1}" = 0 ]; then
   The script also writes ~/.codex/models.json. That catalog is required for
   Codex to know the context window, patch format, parallel tools, and search
   capability. The bridge must be running before codex starts and outlive it.
+
+  Hosted web search does not travel through the Chat-Completions bridge. The
+  script therefore writes a native DeepSeek Responses profile for C8:
+
+    # ~/.codex/deepseek-web.config.toml
+    model = "${C8_WEB_MODEL}"
+    model_provider = "deepseek_native"
+    model_catalog_json = "${DOLLAR}HOME/.codex/models.json"
+    web_search = "live"
+
+    codex --profile deepseek-web --search
 
   Or skip the proxy entirely with Claude Code, which speaks DeepSeek natively:
 
