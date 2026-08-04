@@ -378,12 +378,10 @@ EOF
 step "2. prepare"
 send "$S_PREP" || { bad "prepare failed"; exit 1; }
 
-if sx -- bash -lc 'codex login status' >/dev/null 2>&1; then ok "codex authenticated"
-else
-  note "device-code auth: open the URL, sign in, enter the code"
-  sx --tty -- bash -lc 'codex login --device-auth'
-  sx -- bash -lc 'codex login status' >/dev/null 2>&1 && ok authenticated || { bad "auth failed"; exit 1; }
-fi
+# A custom provider authenticated with env_key does not require ChatGPT/OpenAI
+# login. Do not run `codex login`: that authenticates the built-in OpenAI
+# provider and would make this test depend on an unrelated account.
+note "OpenAI auth skipped; Codex will use DEEPSEEK_API_KEY only"
 
 # ================================================== 3. BRIDGE + KEEP-AWAKE ==
 IFS= read -r -d '' S_BRIDGE <<'EOF' || true
@@ -565,6 +563,7 @@ provider_block = f'''
 name = "DeepSeek"
 base_url = "http://127.0.0.1:{port}/v1"
 env_key = "DEEPSEEK_API_KEY"
+requires_openai_auth = false
 wire_api = "responses"
 request_max_retries = 2
 stream_max_retries = 2
@@ -573,6 +572,7 @@ stream_max_retries = 2
 name = "DeepSeek Native Responses"
 base_url = "https://api.deepseek.com/"
 env_key = "DEEPSEEK_API_KEY"
+requires_openai_auth = false
 wire_api = "responses"
 request_max_retries = 2
 stream_max_retries = 2
@@ -741,7 +741,11 @@ N=$RANDOM
 # Fail once, clearly, if the profile/config layer cannot load. Without this
 # preflight every later capability probe reports a misleading functional FAIL.
 o=$(run "Reply with only the word CONFIG_OK.")
-if grep -qiE 'error loading config|legacy `profile|legacy profile|cannot be used while .*\[profiles\.' <<<"$o"; then
+if grep -qiE 'sign in with chatgpt|please sign in|not logged in|run `?codex login|authentication required.*openai' <<<"$o"; then
+  p C0-config FAIL "Codex unexpectedly requested OpenAI authentication"
+  tail -12 <<<"$o" | sed 's/^/         /'
+  exit 0
+elif grep -qiE 'error loading config|legacy `profile|legacy profile|cannot be used while .*\[profiles\.' <<<"$o"; then
   p C0-config FAIL "Codex rejected the profile configuration"
   tail -12 <<<"$o" | sed 's/^/         /'
   exit 0
@@ -1269,12 +1273,14 @@ if [ "${FAILS:-1}" = 0 ] && [ "${BLOCKS:-1}" = 0 ]; then
     name = "DeepSeek"
     base_url = "http://127.0.0.1:${PORT}/v1"
     env_key = "DEEPSEEK_API_KEY"
+    requires_openai_auth = false
     wire_api = "responses"
 
     [model_providers.deepseek_native]
     name = "DeepSeek Native Responses"
     base_url = "https://api.deepseek.com/"
     env_key = "DEEPSEEK_API_KEY"
+    requires_openai_auth = false
     wire_api = "responses"
 
     # ~/.codex/deepseek.config.toml
