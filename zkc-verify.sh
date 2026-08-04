@@ -466,6 +466,7 @@ import json, os, re, sys
 cfg, port, model = sys.argv[1:4]
 codex_home = os.path.dirname(cfg)
 catalog = os.path.join(codex_home, "models.json")
+profile_cfg = os.path.join(codex_home, "deepseek.config.toml")
 
 # Codex does not infer a third-party model's capabilities from /v1/models.
 # Supply the same capability fields DeepSeek documents for its Codex setup.
@@ -521,12 +522,25 @@ with open(catalog, "w") as f:
     f.write("\n")
 
 s = open(cfg).read() if os.path.exists(cfg) else ""
-s = re.sub(r'\n# >>> ds >>>.*?# <<< ds <<<\n', '\n', s, flags=re.S)
+s = re.sub(r'(?ms)^# >>> ds >>>\n.*?^# <<< ds <<<\n?', '', s)
 
-# The model settings belong in the profile. In the old version they appeared
-# after [model_providers.deepseek], which made TOML treat them as provider
-# fields; grepping the file then falsely reported them as effective settings.
-block = f'''
+# Codex 0.134+ no longer reads [profiles.NAME] from config.toml. It also
+# rejects --profile when either that legacy table or a top-level profile=
+# selector remains. Clean up artifacts from older runs before writing the new
+# split-file layout.
+s = re.sub(
+    r'(?m)^\s*profile\s*=\s*(["\'])deepseek\1\s*(?:#.*)?\n?',
+    '',
+    s,
+)
+s = re.sub(
+    r'(?ms)^\[profiles\.deepseek(?:\.[^]]+)?\]\s*\n.*?(?=^\[|\Z)',
+    '',
+    s,
+)
+
+# Shared provider definitions stay in the base config.
+provider_block = f'''
 
 # >>> ds >>>
 [model_providers.deepseek]
@@ -536,20 +550,23 @@ env_key = "DEEPSEEK_API_KEY"
 wire_api = "responses"
 request_max_retries = 2
 stream_max_retries = 2
+# <<< ds <<<
+'''
+with open(cfg, "w") as f:
+    f.write(s.rstrip() + provider_block)
 
-[profiles.deepseek]
-model = "{model}"
+# Named profiles are separate top-level config layers in Codex 0.134+.
+profile_block = f'''model = "{model}"
 model_provider = "deepseek"
 model_catalog_json = "{catalog}"
 model_reasoning_effort = "high"
 model_context_window = 1048576
 web_search = "disabled"
-# <<< ds <<<
 '''
-with open(cfg, "w") as f:
-    f.write(s.rstrip() + block)
+with open(profile_cfg, "w") as f:
+    f.write(profile_block)
 PY
-echo '       codex provider + profile + model catalog written'
+echo '       codex provider + deepseek.config.toml + model catalog written'
 EOF
 step "3. bridge"
 b64=$(printf 'BRIDGE_CMD=%q\n' "$BRIDGE_CMD" | base64 | tr -d '\n')
@@ -653,7 +670,7 @@ p(){ printf '  %-14s %-7s %s\n' "$1" "$2" "${3:-}"; echo "PROBE|$1|$2|${3:-}"; }
 RATE_RETRIES="${CODEX_RATE_RETRIES:-2}"
 RATE_BACKOFF="${CODEX_RATE_BACKOFF:-20}"
 PROBE_PAUSE="${CODEX_PROBE_PAUSE:-5}"
-CX=(codex --profile deepseek exec --dangerously-bypass-approvals-and-sandbox
+CX=(codex exec --profile deepseek --dangerously-bypass-approvals-and-sandbox
     --ephemeral -c web_search=disabled -c model_reasoning_effort=low)
 
 is_rate_limited(){ grep -qiE '429 Too Many Requests|rate[ _-]?limit|exceeded retry limit.*429' <<<"$1"; }
@@ -680,6 +697,26 @@ blocked_or_fail(){
   tail -10 <<<"$out" | sed 's/^/         /'
 }
 N=$RANDOM
+
+# Fail once, clearly, if the profile/config layer cannot load. Without this
+# preflight every later capability probe reports a misleading functional FAIL.
+o=$(run "Reply with only the word CONFIG_OK.")
+if grep -qiE 'error loading config|legacy `profile|legacy profile|cannot be used while .*\[profiles\.' <<<"$o"; then
+  p C0-config FAIL "Codex rejected the profile configuration"
+  tail -12 <<<"$o" | sed 's/^/         /'
+  exit 0
+elif is_rate_limited "$o"; then
+  p C0-config BLOCKED "provider 429 during configuration preflight"
+  tail -10 <<<"$o" | sed 's/^/         /'
+  exit 0
+elif grep -q 'CONFIG_OK' <<<"$o"; then
+  p C0-config PASS "deepseek.config.toml loaded"
+else
+  p C0-config FAIL "profile loaded but preflight response was unexpected"
+  tail -12 <<<"$o" | sed 's/^/         /'
+  exit 0
+fi
+nap
 
 # C1 one shell command, report its output
 o=$(run "Run this command: echo ZKCONE$N
@@ -736,10 +773,12 @@ if grep -q "RECOVERED$N" <<<"$o"; then p C6-recover PASS "continued past a failu
 else blocked_or_fail C6-recover "gave up after one error" "$o"; fi
 nap
 
-# C7 validate the loaded model catalog, not text merely present in config.toml.
-# `codex debug models` is the runtime's resolved catalog view.
+# C7 validate the model catalog and then verify the selected runtime profile
+# uses it. `debug models` is not a profile-aware runtime subcommand, so passing
+# --profile is an error. Supply the same catalog as a one-off config override.
 META_FILE=/tmp/c7-models.json
-codex --profile deepseek debug models >"$META_FILE" 2>&1 || true
+codex --config "model_catalog_json=\"$HOME/.codex/models.json\"" \
+  debug models >"$META_FILE" 2>&1 || true
 META=$(python3 - "$META_FILE" "$MODEL" <<'PYEOF'
 import json, sys
 path, slug = sys.argv[1:3]
@@ -774,6 +813,9 @@ IFS='|' read -r FOUND CTX PATCH PAR SEARCH WEBTYPE <<<"$META"
 o=$(run "Reply with only the word FINE.")
 if is_rate_limited "$o"; then
   p C7-metadata BLOCKED "provider 429; catalog parse result found=$FOUND context=${CTX:-?}"
+elif grep -qiE '^error:|error loading config|failed to (read|parse).*catalog' "$META_FILE"; then
+  p C7-metadata FAIL "codex debug models could not load the catalog override"
+  tail -12 "$META_FILE" | sed 's/^/         /'
 elif [ "$FOUND" != 1 ]; then
   p C7-metadata FAIL "model absent from codex debug models"
   tail -12 "$META_FILE" | sed 's/^/         /'
@@ -792,6 +834,9 @@ nap
 run_web(){
   local out rc attempt=0 delay="$RATE_BACKOFF"
   while :; do
+    # --search is a root Codex option in current CLI releases. It must appear
+    # before the `exec` subcommand; placing it after `exec` makes clap reject
+    # the invocation before a session or provider request is created.
     out=$(codex --profile deepseek --search exec \
       --dangerously-bypass-approvals-and-sandbox --ephemeral --json \
       -c web_search=live -c model_reasoning_effort=low \
@@ -816,12 +861,18 @@ for line in sys.stdin:
 print(len(ids))
 ' <<<"$o")
 URLS=$(grep -Eo 'https?://[^"[:space:]\\]+' <<<"$o" | sort -u | wc -l | tr -d ' ')
-if is_rate_limited "$o"; then
+if grep -qiE "unexpected argument|Usage: codex( exec)? \[OPTIONS\]" <<<"$o"; then
+  p C8-websearch FAIL "probe invocation rejected by Codex CLI before provider contact"
+  tail -14 <<<"$o" | sed 's/^/         /'
+elif is_rate_limited "$o"; then
   p C8-websearch BLOCKED "provider 429 after retries"
 elif [ "${WEB_EVENTS:-0}" -gt 0 ]; then
   p C8-websearch PASS "observed ${WEB_EVENTS} native web_search event(s), urls=${URLS:-0}"
 elif grep -qiE 'unsupported|not supported|unknown tool|no such tool|web_search.*invalid|tool.*not available|WEB_SEARCH_UNAVAILABLE' <<<"$o"; then
   p C8-websearch FAIL "native web_search was not available end to end"
+  tail -14 <<<"$o" | sed 's/^/         /'
+elif [ "$MODEL" = "deepseek-v4-pro" ]; then
+  p C8-websearch FAIL "no native event; rerun with DEEPSEEK_MODEL=deepseek-v4-flash as the supported Codex control"
   tail -14 <<<"$o" | sed 's/^/         /'
 else
   p C8-websearch FAIL "no web_search event in codex exec --json output"
@@ -1122,7 +1173,7 @@ if [ "${FAILS:-1}" = 0 ] && [ "${BLOCKS:-1}" = 0 ]; then
     env_key = "DEEPSEEK_API_KEY"
     wire_api = "responses"
 
-    [profiles.deepseek]
+    # ~/.codex/deepseek.config.toml
     model = "${MODEL}"
     model_provider = "deepseek"
     model_catalog_json = "${DOLLAR}HOME/.codex/models.json"
@@ -1130,7 +1181,7 @@ if [ "${FAILS:-1}" = 0 ] && [ "${BLOCKS:-1}" = 0 ]; then
     model_context_window = 1048576
 
     codex --profile deepseek          # interactive
-    codex --profile deepseek exec "..."
+    codex exec --profile deepseek "..."
 
   The script also writes ~/.codex/models.json. That catalog is required for
   Codex to know the context window, patch format, parallel tools, and search
