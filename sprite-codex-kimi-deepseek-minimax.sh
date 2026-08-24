@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# sprite-codex-kimi-code-minimax-resumable-github-yolo-v39.sh
+# sprite-codex-kimi-code-minimax-resumable-github-yolo-v40.sh
 #
 # Interactive bootstrap for one sprites.dev Sprite that:
 #   1. asks which coding agent to run (Codex or Kimi Code), retaining the
@@ -38,6 +38,13 @@
 #
 # Usage:
 #   bash sprite-codex-kimi-k3.sh
+#
+# v40 adds a first-class Codex fork mode and safe recovery from resume failures.
+# The startup menu can now run `codex fork --last`, preserving conversation
+# history under a new writable thread ID. If `codex resume --last` exits
+# non-zero (including Codex's "already has an active writer" guard), the remote
+# TTY reports whether any Codex-like process remains and offers an immediate
+# fork. It never deletes session files or automatically terminates a process.
 #
 # v39 adds the probe-verified MiniMax M3 native Responses provider as a Codex
 # option. It creates a dedicated model catalog/profile and YOLO launcher, keeps
@@ -89,7 +96,7 @@
 #   NO_AGENT_LAUNCH=1 (NO_CODEX_LAUNCH remains an alias),
 #   SPRITE_RUN_HOURS (default prompt value 8),
 #   FORCE_NEW_SESSION=1,
-#   CODEX_START_MODE=ask|resume|new,
+#   CODEX_START_MODE=ask|resume|fork|new,
 #   RESUME_CODEX_HISTORY=1 (legacy alias forcing resume),
 #   SPRITE_SESSION_STATE (override local non-secret state path),
 #   REPO_PUSH_MODE=ask|always|never, REPO_PUSH_COMMIT_MESSAGE,
@@ -278,14 +285,14 @@ RESUME_CODEX_HISTORY="${RESUME_CODEX_HISTORY:-0}"
   exit 2
 }
 case "$CODEX_START_MODE" in
-  ask|resume|new) ;;
-  *) echo "error: CODEX_START_MODE must be ask, resume, or new" >&2; exit 2 ;;
+  ask|resume|fork|new) ;;
+  *) echo "error: CODEX_START_MODE must be ask, resume, fork, or new" >&2; exit 2 ;;
 esac
 # Legacy compatibility: RESUME_CODEX_HISTORY=1 explicitly forces resume mode.
 [[ $RESUME_CODEX_HISTORY == 1 ]] && CODEX_START_MODE=resume
 # Set when the script decides how a newly created TTY should start Codex.
 # DeepSeek Thinking remains enabled whenever DeepSeek is selected.
-RESUME_CODEX_LAST=0
+CODEX_START_ACTION=new
 CODEX_MODE_SELECTED=0
 RESUME_KIMI_CODE_LAST=0
 KIMI_CODE_MODE_SELECTED=0
@@ -508,13 +515,19 @@ choose_codex_start_mode() {
 
   case "$CODEX_START_MODE" in
     resume)
-      RESUME_CODEX_LAST=1
+      CODEX_START_ACTION=resume
       CODEX_MODE_SELECTED=1
       note "$context: resuming the most recent Codex conversation"
       return 0
       ;;
+    fork)
+      CODEX_START_ACTION=fork
+      CODEX_MODE_SELECTED=1
+      note "$context: forking the most recent Codex conversation into a new writable thread"
+      return 0
+      ;;
     new)
-      RESUME_CODEX_LAST=0
+      CODEX_START_ACTION=new
       CODEX_MODE_SELECTED=1
       note "$context: starting a new Codex conversation"
       return 0
@@ -523,19 +536,20 @@ choose_codex_start_mode() {
 
   if [[ ! -t 0 ]]; then
     warn "no interactive input is available; defaulting to a new Codex conversation"
-    RESUME_CODEX_LAST=0
+    CODEX_START_ACTION=new
     CODEX_MODE_SELECTED=1
     return 0
   fi
 
   printf '\n  How should Codex start in the new TTY?\n'
   printf '    1) Resume the most recent Codex conversation\n'
-  printf '    2) Start a new Codex conversation [default]\n'
-  printf '  Select [1-2]: '
+  printf '    2) Fork the most recent conversation (same history, new writable thread)\n'
+  printf '    3) Start a new Codex conversation [default]\n'
+  printf '  Select [1-3]: '
   IFS= read -r choice || true
   case "${choice,,}" in
     1|r|resume)
-      RESUME_CODEX_LAST=1
+      CODEX_START_ACTION=resume
       note "Codex will run: codex resume --last"
       if [[ $CODEX_PROVIDER == deepseek ]]; then
         warn "resume replays the previous chat history through the current DeepSeek bridge"
@@ -547,14 +561,20 @@ choose_codex_start_mode() {
         note "resume uses the normal OpenAI Codex provider selected for this run"
       fi
       ;;
-    ''|2|n|new)
-      RESUME_CODEX_LAST=0
+    2|f|fork)
+      CODEX_START_ACTION=fork
+      note "Codex will run: codex fork --last"
+      note "the selected conversation history is preserved under a new writable thread ID"
+      note "this is the safe choice when the original thread reports an active writer"
+      ;;
+    ''|3|n|new)
+      CODEX_START_ACTION=new
       note "Codex will start a new conversation in the existing repository workspace"
       note "repository files, Git state, and uncommitted work are preserved"
       ;;
     *)
       warn "invalid selection; starting a new Codex conversation"
-      RESUME_CODEX_LAST=0
+      CODEX_START_ACTION=new
       ;;
   esac
   CODEX_MODE_SELECTED=1
@@ -3233,7 +3253,7 @@ RUN_SECONDS=${1:?run seconds required}
 TASK_NAME=${2:?task name required}
 SESSION_TAG=${3:?session tag required}
 WORKDIR=${4:?workdir required}
-RESUME_LAST=${5:-0}
+START_MODE=${5:-new}
 AGENT_KIND=${6:-codex}
 AGENT_PROVIDER=${7:-deepseek}
 KIMI_CODE_APPROVAL_MODE=${8:-normal}
@@ -3241,11 +3261,12 @@ KIMI_CODE_APPROVAL_MODE=${8:-normal}
 [[ $RUN_SECONDS =~ ^[0-9]+$ ]] && ((RUN_SECONDS > 0)) || { echo "invalid run duration: $RUN_SECONDS" >&2; exit 80; }
 [[ $TASK_NAME =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid task name: $TASK_NAME" >&2; exit 81; }
 [[ $SESSION_TAG =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid session tag: $SESSION_TAG" >&2; exit 85; }
-[[ $RESUME_LAST == 0 || $RESUME_LAST == 1 ]] || { echo "invalid agent resume mode: $RESUME_LAST" >&2; exit 83; }
 case "$AGENT_KIND" in codex|kimi-code) ;; *) echo "invalid agent kind: $AGENT_KIND" >&2; exit 84 ;; esac
 if [[ $AGENT_KIND == codex ]]; then
+  case "$START_MODE" in new|resume|fork) ;; *) echo "invalid Codex start mode: $START_MODE" >&2; exit 83 ;; esac
   case "$AGENT_PROVIDER" in openai|deepseek|kimi|minimax) ;; *) echo "invalid Codex provider: $AGENT_PROVIDER" >&2; exit 84 ;; esac
 else
+  case "$START_MODE" in new|resume) ;; *) echo "invalid Kimi Code start mode: $START_MODE" >&2; exit 83 ;; esac
   [[ $AGENT_PROVIDER == kimi-code ]] || { echo "invalid Kimi Code provider label: $AGENT_PROVIDER" >&2; exit 84; }
 fi
 case "$KIMI_CODE_APPROVAL_MODE" in normal|yolo|auto) ;; *) echo "invalid Kimi Code approval mode: $KIMI_CODE_APPROVAL_MODE" >&2; exit 84 ;; esac
@@ -3391,7 +3412,7 @@ if [[ $AGENT_KIND == kimi-code ]]; then
     yolo) kimi_args+=(--yolo) ;;
     auto) kimi_args+=(--auto) ;;
   esac
-  if [[ $RESUME_LAST == 1 ]]; then
+  if [[ $START_MODE == resume ]]; then
     kimi_args+=(--continue)
     echo "       continuing the most recent Kimi Code session"
   else
@@ -3435,24 +3456,71 @@ else:
 PYVC
 }
 
-resume_next=$RESUME_LAST
+launch_mode=$START_MODE
 update_restarts=0
+
+run_codex_mode() {
+  local mode=$1
+  case "$mode" in
+    resume)
+      echo "       resuming the most recent Codex conversation: codex resume --last"
+      "$CODEX_LAUNCHER" resume --last
+      ;;
+    fork)
+      echo "       forking the most recent Codex conversation: codex fork --last"
+      echo "       the source history remains intact; Codex will allocate a new writable thread ID"
+      "$CODEX_LAUNCHER" fork --last
+      ;;
+    new)
+      echo "       opening a new Codex conversation in the existing repository workspace"
+      echo "       repository files and Git state are preserved; previous chat history is not loaded"
+      "$CODEX_LAUNCHER"
+      ;;
+  esac
+}
+
 while :; do
   before_path=$(codex_path)
   before_version=$(codex_version)
   echo "       Codex executable before launch: ${before_path:-unknown} | ${before_version:-unknown}"
 
-  set +e
-  if [[ $resume_next == 1 ]]; then
-    echo "       resuming the most recent Codex conversation: codex resume --last"
-    "$CODEX_LAUNCHER" resume --last
+  if run_codex_mode "$launch_mode"; then
+    codex_rc=0
   else
-    echo "       opening a new Codex conversation in the existing repository workspace"
-    echo "       repository files and Git state are preserved; previous chat history is not loaded"
-    "$CODEX_LAUNCHER"
+    codex_rc=$?
   fi
-  codex_rc=$?
-  set -e
+
+  if (( codex_rc != 0 )) && [[ $launch_mode == resume ]]; then
+    echo >&2
+    echo "warning: Codex resume exited with rc=$codex_rc" >&2
+    if codex_processes=$(pgrep -af '([c]odex|[a]pp-server|[c]odeproxy)' 2>/dev/null); then
+      echo "warning: Codex-like processes are still present; they will not be terminated automatically:" >&2
+      printf '%s\n' "$codex_processes" | sed 's/^/         /' >&2
+    else
+      echo "warning: no live Codex, app-server, or codeproxy process was found" >&2
+      echo "         if Codex reported an active writer, its ownership state is stale" >&2
+    fi
+    echo "         the saved transcript and workspace have not been changed" >&2
+    if [[ -t 0 && -t 1 ]]; then
+      printf '  Fork the most recent conversation into a new writable thread now? [Y/n]: '
+      IFS= read -r fork_after_resume || true
+    else
+      fork_after_resume=n
+    fi
+    case "${fork_after_resume,,}" in
+      ''|y|yes)
+        launch_mode=fork
+        if run_codex_mode "$launch_mode"; then
+          codex_rc=0
+        else
+          codex_rc=$?
+        fi
+        ;;
+      *)
+        echo "       resume recovery cancelled; rerun and choose the Codex fork option to preserve the history under a new thread ID"
+        ;;
+    esac
+  fi
 
   # Re-resolve from scratch after Codex exits. An updater may have installed a
   # standalone ~/.local/bin/codex or changed an npm-managed executable.
@@ -3484,7 +3552,7 @@ while :; do
 
     # The just-ended TUI has already persisted its conversation. Resume it so
     # an in-app update returns the user directly to the same work.
-    resume_next=1
+    launch_mode=resume
     echo "       relaunching with the updated Codex and resuming the conversation"
     continue
   fi
@@ -3799,7 +3867,7 @@ start_native_agent_session() {
   if sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward \
     --env "SPRITE_CODEX_ENV_HEX=$ALL_CREDENTIAL_ENV" -- \
     "$remote_entry" bash "$remote_runner" "$RUN_SECONDS" "$TASK_NAME" "$SESSION_TAG" \
-      "$REMOTE_WORKDIR" "$AGENT_RESUME_LAST" "$AGENT_KIND" "$AGENT_PROVIDER" "$KIMI_CODE_APPROVAL_MODE"; then
+      "$REMOTE_WORKDIR" "$AGENT_START_MODE" "$AGENT_KIND" "$AGENT_PROVIDER" "$KIMI_CODE_APPROVAL_MODE"; then
     rc=0
   else
     rc=$?
@@ -4459,10 +4527,10 @@ fi
 step "create native detachable Sprite TTY $AGENT_LABEL session"
 if [[ $AGENT_KIND == codex ]]; then
   if [[ $CODEX_MODE_SELECTED != 1 ]]; then choose_codex_start_mode "creating a new native Sprite TTY Codex session"; fi
-  AGENT_RESUME_LAST=$RESUME_CODEX_LAST
+  AGENT_START_MODE=$CODEX_START_ACTION
 else
   if [[ $KIMI_CODE_MODE_SELECTED != 1 ]]; then choose_kimi_code_start_mode "creating a new native Sprite TTY Kimi Code session"; fi
-  AGENT_RESUME_LAST=$RESUME_KIMI_CODE_LAST
+  if [[ $RESUME_KIMI_CODE_LAST == 1 ]]; then AGENT_START_MODE=resume; else AGENT_START_MODE=new; fi
 fi
 if [[ ! -t 0 || ! -t 1 ]]; then warn "no interactive terminal is attached, so $AGENT_LABEL cannot open its TUI"; note "rerun from a terminal or set NO_AGENT_LAUNCH=1"; exit 0; fi
 
@@ -4515,5 +4583,16 @@ if start_native_agent_session "$REMOTE_ENTRY" "$REMOTE_RUNNER"; then
 else
   launch_rc=$?
 fi
-if [[ -n ${CURRENT_SESSION_ID:-} ]] && session_id_is_active "$CURRENT_SESSION_ID"; then note "$AGENT_LABEL is still running in native Sprite TTY session $CURRENT_SESSION_ID; resume state was kept"; surface_native_hold_state "$SESSION_TAG" || true; else note "no live native managed TTY was confirmed after the attachment ended"; note "resume state is retained as a history hint; rerun and choose the agent's continue/resume option if it exited"; fi
+if [[ -n ${CURRENT_SESSION_ID:-} ]] && session_id_is_active "$CURRENT_SESSION_ID"; then
+  note "$AGENT_LABEL is still running in native Sprite TTY session $CURRENT_SESSION_ID; resume state was kept"
+  surface_native_hold_state "$SESSION_TAG" || true
+else
+  note "no live native managed TTY was confirmed after the attachment ended"
+  if [[ $AGENT_KIND == codex ]]; then
+    note "conversation files remain on the Sprite"
+    note "if resume reported an active writer with no live process, rerun and choose 'Fork the most recent conversation'"
+  else
+    note "resume state is retained as a history hint; rerun and choose Kimi Code continue if it exited"
+  fi
+fi
 exit "$launch_rc"
