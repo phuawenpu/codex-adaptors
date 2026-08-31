@@ -39,6 +39,15 @@
 # Usage:
 #   bash sprite-codex-kimi-code-minimax-resumable-github-yolo-v41.sh
 #
+# v42 hardens normal OpenAI Codex authentication recovery. If the OpenAI
+# preflight fails because the currently authenticated ChatGPT account has hit a
+# usage/credit limit (or for another authentication-related error), the script
+# no longer exits immediately. In an interactive terminal it offers to rerun
+# device-code login, optionally clear the Sprite's stored Codex credentials first
+# to switch accounts, and then retries the exact same preflight. The recovery
+# loop is user-controlled and can be repeated until a working account is selected
+# or the user explicitly aborts. Non-interactive runs remain fail-fast.
+#
 # v41 adds an explicit pre-run Codex update choice. The choice is offered after
 # the Sprite session inventory is validated but before an existing Codex TTY is
 # attached or a new Codex process is launched. A live Codex session triggers a
@@ -3500,12 +3509,57 @@ OPENAI_LAUNCHER
   printf '%s' "$f"
 }
 
-check_openai_auth() {
+openai_login_status() {
   local out rc
   out=$(run_limited 20 sprite exec "${ORG[@]}" -s "$SPRITE_NAME" -- bash -lc '
 export PATH="$HOME/.local/bin:$PATH"
 "$HOME/.local/bin/sprite-codex-cli" login status 2>&1
 ' 2>&1) && rc=0 || rc=$?
+  printf '%s' "$out"
+  return "$rc"
+}
+
+run_openai_device_login() {
+  # $1=0 keeps the existing credential until the new login replaces it.
+  # $1=1 explicitly clears the Sprite's stored Codex credential first, which is
+  # useful when switching away from an account whose Codex quota is exhausted.
+  local clear_first=${1:-0} out rc
+
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    warn "no interactive terminal is available for OpenAI device-code login"
+    return 2
+  fi
+
+  if [[ $clear_first == 1 ]]; then
+    warn "clearing the stored Codex credential on Sprite '$SPRITE_NAME' before login"
+    if ! sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --no-port-forward -- \
+      bash -lc 'export PATH="$HOME/.local/bin:$PATH"; "$HOME/.local/bin/sprite-codex-cli" logout'; then
+      warn "Codex logout failed; existing credentials were not deliberately removed"
+      return 1
+    fi
+  fi
+
+  note "starting: codex login --device-auth"
+  if ! sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward -- \
+    bash -lc 'export PATH="$HOME/.local/bin:$PATH"; exec "$HOME/.local/bin/sprite-codex-cli" login --device-auth'; then
+    warn "OpenAI Codex device-code login did not complete successfully"
+    return 1
+  fi
+
+  out=$(openai_login_status) && rc=0 || rc=$?
+  [[ -z $out ]] || printf '%s\n' "$out" | sed 's/^/       /'
+  if [[ $rc == 0 && $out == *"Logged in"* ]]; then
+    ok "OpenAI Codex device-code login completed"
+    return 0
+  fi
+
+  warn "device-code flow returned, but Codex does not yet report a logged-in session"
+  return 1
+}
+
+check_openai_auth() {
+  local out rc ans=""
+  out=$(openai_login_status) && rc=0 || rc=$?
   if [[ $rc == 0 && $out == *"Logged in"* ]]; then
     printf '%s\n' "$out" | sed 's/^/       /'
     ok "normal OpenAI Codex authentication is already available on the Sprite"
@@ -3515,7 +3569,6 @@ export PATH="$HOME/.local/bin:$PATH"
   if [[ $out == *"Not logged in"* || $out == *"not logged in"* ]]; then
     warn "Codex is not logged in to OpenAI on this Sprite"
     if [[ -t 0 && -t 1 ]]; then
-      local ans=""
       printf '  Start normal Codex device-code login now? [Y/n]: '
       IFS= read -r ans || true
       case "${ans,,}" in
@@ -3524,17 +3577,9 @@ export PATH="$HOME/.local/bin:$PATH"
           return 0
           ;;
       esac
-      note "starting: codex login --device-auth"
-      sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward -- \
-        bash -lc 'export PATH="$HOME/.local/bin:$PATH"; exec "$HOME/.local/bin/sprite-codex-cli" login --device-auth' \
-        || die "OpenAI Codex device-code login failed"
-      out=$(run_limited 20 sprite exec "${ORG[@]}" -s "$SPRITE_NAME" -- bash -lc '
-export PATH="$HOME/.local/bin:$PATH"
-"$HOME/.local/bin/sprite-codex-cli" login status 2>&1
-' 2>&1 || true)
-      [[ $out == *"Logged in"* ]] || die "Codex still does not report an authenticated OpenAI session"
-      printf '%s\n' "$out" | sed 's/^/       /'
-      ok "OpenAI Codex login completed"
+      # Do not make an unsuccessful login fatal here. The OpenAI preflight below
+      # has a second, repeatable recovery menu and will show the actual failure.
+      run_openai_device_login 0 || warn "continuing to OpenAI preflight so authentication recovery can be retried there"
       return 0
     fi
     warn "no interactive terminal is available for device-code login"
@@ -3543,6 +3588,50 @@ export PATH="$HOME/.local/bin:$PATH"
 
   warn "could not determine Codex login status; normal Codex will handle authentication when launched"
   [[ -z $out ]] || printf '%s\n' "$out" | sed 's/^/       /'
+}
+
+openai_preflight_recovery() {
+  local failure_text=${1:-} choice=""
+
+  [[ -t 0 && -t 1 ]] || return 1
+
+  if grep -Eqi "you('ve| have) hit your usage limit|usage limit|purchase more credits|try again at" <<<"$failure_text"; then
+    warn "the currently authenticated OpenAI/ChatGPT account appears to have hit its Codex usage limit"
+    note "you can authenticate another account and retry without restarting this bootstrap"
+  elif grep -Eqi "not logged in|login required|authentication|unauthori[sz]ed|access token|refresh token|credentials" <<<"$failure_text"; then
+    warn "the OpenAI preflight appears to have failed for an authentication-related reason"
+  else
+    warn "the normal OpenAI Codex preflight failed before its success marker was produced"
+    note "you can still redo device-code login in case the active account/session is the cause"
+  fi
+
+  while true; do
+    printf '\n  OpenAI recovery:\n'
+    printf '    1) Run device-code login again, then retry preflight [default]\n'
+    printf '    2) Clear stored Codex login on this Sprite, device-login again, then retry\n'
+    printf '    3) Retry preflight without changing login\n'
+    printf '    4) Abort\n'
+    printf '  Select [1-4]: '
+    IFS= read -r choice || true
+    case "${choice,,}" in
+      ''|1|l|login|reauth|relogin)
+        if run_openai_device_login 0; then return 0; fi
+        warn "device-code login failed; choose another recovery action"
+        ;;
+      2|s|switch|logout)
+        if run_openai_device_login 1; then return 0; fi
+        warn "credential reset/device login failed; choose another recovery action"
+        ;;
+      3|r|retry)
+        note "retrying normal OpenAI Codex preflight with the current credential"
+        return 0
+        ;;
+      4|a|abort|q|quit|n|no)
+        return 1
+        ;;
+      *) warn "invalid selection" ;;
+    esac
+  done
 }
 
 make_session_runner() {
@@ -4983,10 +5072,17 @@ else
   CODEX_CHECK_FILE=$(mktemp)
   cleanup_files+=("$CODEX_CHECK_FILE")
   note "using the built-in OpenAI provider; hard timeout=${CODEX_PREFLIGHT_TIMEOUT:-180}s"
-  if ! sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --env "SPRITE_CODEX_ENV_HEX=$ALL_CREDENTIAL_ENV,CODEX_PREFLIGHT_TIMEOUT=$CODEX_PREFLIGHT_TIMEOUT" \
-    --dir "$REMOTE_WORKDIR" -- \
-    python3 -c "$ENV_EXEC_PY" bash -lc '
+
+  OPENAI_PREFLIGHT_ATTEMPT=0
+  while true; do
+    OPENAI_PREFLIGHT_ATTEMPT=$((OPENAI_PREFLIGHT_ATTEMPT + 1))
+    : >"$CODEX_CHECK_FILE"
+    (( OPENAI_PREFLIGHT_ATTEMPT == 1 )) || note "OpenAI preflight retry #$((OPENAI_PREFLIGHT_ATTEMPT - 1))"
+
+    if sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
+      --env "SPRITE_CODEX_ENV_HEX=$ALL_CREDENTIAL_ENV,CODEX_PREFLIGHT_TIMEOUT=$CODEX_PREFLIGHT_TIMEOUT" \
+      --dir "$REMOTE_WORKDIR" -- \
+      python3 -c "$ENV_EXEC_PY" bash -lc '
 set -o pipefail
 run_check() {
   "$HOME/.local/bin/sprite-codex-openai" exec --ephemeral \
@@ -4998,12 +5094,27 @@ else
   run_check
 fi
 ' 2>&1 | tee "$CODEX_CHECK_FILE"; then
+      OPENAI_PREFLIGHT_RC=0
+    else
+      OPENAI_PREFLIGHT_RC=$?
+    fi
+
     CODEX_CHECK=$(cat "$CODEX_CHECK_FILE")
-    die "normal OpenAI Codex could not complete the preflight; if authentication is missing, run 'codex login --device-auth' on the Sprite"
-  fi
-  CODEX_CHECK=$(cat "$CODEX_CHECK_FILE")
-  grep -q 'SPRITE_CODEX_OPENAI_OK' <<<"$CODEX_CHECK" \
-    || die "Codex ran, but its expected OpenAI preflight response was missing"
+    if [[ $OPENAI_PREFLIGHT_RC == 0 ]] && grep -q 'SPRITE_CODEX_OPENAI_OK' <<<"$CODEX_CHECK"; then
+      break
+    fi
+
+    if [[ $OPENAI_PREFLIGHT_RC == 0 ]]; then
+      warn "Codex exited successfully, but the expected OpenAI preflight marker was missing"
+    else
+      warn "normal OpenAI Codex preflight exited with status $OPENAI_PREFLIGHT_RC"
+    fi
+
+    if ! openai_preflight_recovery "$CODEX_CHECK"; then
+      die "normal OpenAI Codex preflight did not succeed and recovery was aborted"
+    fi
+  done
+
   ok "normal OpenAI Codex can access the GitHub origin"
   printf '\n%sReady.%s Sprite=%s workspace=%s provider=openai transport=normal\n' \
     "$C_GREEN" "$C_RESET" "$SPRITE_NAME" "$REMOTE_WORKDIR"
