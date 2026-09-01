@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# sprite-codex-kimi-code-minimax-resumable-github-yolo-v41.sh
+# sprite-codex-kimi-code-minimax-resumable-github-yolo-v44.sh
 #
 # Interactive bootstrap for one sprites.dev Sprite that:
 #   1. asks which coding agent to run (Codex or Kimi Code), retaining the
@@ -37,7 +37,17 @@
 # never copies that provider credential into shell-tool environment variables.
 #
 # Usage:
-#   bash sprite-codex-kimi-code-minimax-resumable-github-yolo-v41.sh
+#   bash sprite-codex-kimi-code-minimax-resumable-github-yolo-v44.sh
+#
+# v44 generalizes optional, process-scoped experiment credential access for
+# Codex. CODEX_MOONSHOT_ACCESS, CODEX_MINIMAX_ACCESS, and CODEX_DEEPSEEK_ACCESS
+# are independent ask|0|1 switches controlling whether MOONSHOT_API_KEY,
+# MINIMAX_API_KEY, and DEEPSEEK_API_KEY respectively are inherited by Codex
+# shell/tool subprocesses. Any subset can be enabled, including all three at the
+# same time, regardless of the primary Codex model provider. Interactive ask mode
+# defaults to No; non-interactive ask mode is disabled. A key required by the
+# selected provider is still supplied internally even when experiment access for
+# that key is disabled. No provider key is written to a credential file.
 #
 # v42 hardens normal OpenAI Codex authentication recovery. If the OpenAI
 # preflight fails because the currently authenticated ChatGPT account has hit a
@@ -89,15 +99,20 @@
 # v35 adds Kimi K3 through a loopback-only Moonshot gateway and the same pinned
 # Responses adapter used for other non-Responses providers. The gateway owns the
 # Moonshot key, enforces account-tier pacing, and provides Formula web search via
-# `sprite-kimi-web-search`; Codex shell commands never receive the Moonshot key.
+# `sprite-kimi-web-search`; Codex shell commands receive the Moonshot key only when
+# CODEX_MOONSHOT_ACCESS=1 is explicitly selected for that run.
 #
 # Optional non-interactive overrides:
 #   CODING_AGENT=ask|codex|kimi-code,
 #   CODEX_PROVIDER=ask|openai|deepseek|kimi|minimax (Codex mode only),
 #   SPRITE_NAME, SPRITE_ORG, GITHUB_PAT, GITHUB_REPOSITORY,
-#   FLY_API_TOKEN, FLY_APP, DEEPSEEK_API_KEY (DeepSeek mode only),
-#   MOONSHOT_API_KEY (Kimi mode only),
-#   MINIMAX_API_KEY (MiniMax mode only),
+#   FLY_API_TOKEN, FLY_APP,
+#   DEEPSEEK_API_KEY (DeepSeek provider or optional Codex experiment access),
+#   MOONSHOT_API_KEY (Kimi provider or optional Codex experiment access),
+#   MINIMAX_API_KEY (MiniMax provider or optional Codex experiment access),
+#   CODEX_DEEPSEEK_ACCESS=ask|0|1 (default ask; interactive default No),
+#   CODEX_MOONSHOT_ACCESS=ask|0|1 (default ask; interactive default No),
+#   CODEX_MINIMAX_ACCESS=ask|0|1 (default ask; interactive default No),
 #   MINIMAX_BASE_URL (default https://api.minimax.io/v1),
 #   MINIMAX_MODEL (default MiniMax-M3),
 #   SPRITE_WORKDIR, DEEPSEEK_TRANSPORT=auto|direct|bridge,
@@ -238,6 +253,9 @@ MIN_CODEX_VERSION="${MIN_CODEX_VERSION:-0.144.0}"
 CODEX_PREFLIGHT_TIMEOUT="${CODEX_PREFLIGHT_TIMEOUT:-180}"
 CODEX_UPDATE_MODE="${CODEX_UPDATE_MODE:-ask}"
 CODEX_UPDATE_LIVE_OVERRIDE="${CODEX_UPDATE_LIVE_OVERRIDE:-0}"
+CODEX_MOONSHOT_ACCESS="${CODEX_MOONSHOT_ACCESS:-ask}"
+CODEX_MINIMAX_ACCESS="${CODEX_MINIMAX_ACCESS:-ask}"
+CODEX_DEEPSEEK_ACCESS="${CODEX_DEEPSEEK_ACCESS:-ask}"
 [[ $CODEX_PREFLIGHT_TIMEOUT =~ ^[1-9][0-9]*$ ]] || {
   echo "error: CODEX_PREFLIGHT_TIMEOUT must be a positive integer number of seconds" >&2
   exit 2
@@ -250,6 +268,12 @@ esac
   echo "error: CODEX_UPDATE_LIVE_OVERRIDE must be 0 or 1" >&2
   exit 2
 }
+for _access_var in CODEX_MOONSHOT_ACCESS CODEX_MINIMAX_ACCESS CODEX_DEEPSEEK_ACCESS; do
+  case "${!_access_var}" in
+    ask|0|1) ;;
+    *) echo "error: $_access_var must be ask, 0, or 1" >&2; exit 2 ;;
+  esac
+done
 SPRITE_CONTROL_TIMEOUT="${SPRITE_CONTROL_TIMEOUT:-25}"
 SPRITE_CONNECT_TRIES="${SPRITE_CONNECT_TRIES:-3}"
 SPRITE_CONTROL_TRANSPORT="${SPRITE_CONTROL_TRANSPORT:-auto}"
@@ -1018,6 +1042,66 @@ prompt_secret() {
   fi
   [[ -n $current ]] || die "$label is required"
   printf -v "$var_name" '%s' "$current"
+}
+
+choose_codex_secret_access() {
+  local access_var=$1 key_var=$2 label=$3 choice="" current
+  [[ $AGENT_KIND == codex ]] || { printf -v "$access_var" '%s' 0; return 0; }
+  current=${!access_var}
+
+  case "$current" in
+    1)
+      note "$access_var=1: $label will be available to Codex-run experiment processes"
+      return 0
+      ;;
+    0)
+      note "$access_var=0: $label will remain hidden from Codex shell/tools"
+      return 0
+      ;;
+  esac
+
+  if [[ ! -t 0 ]]; then
+    printf -v "$access_var" '%s' 0
+    note "non-interactive run: optional $label access defaults to disabled"
+    return 0
+  fi
+
+  printf '\n  Make %s available to Codex-run experiment processes? [y/N]: ' "$key_var"
+  IFS= read -r choice || true
+  case "${choice,,}" in
+    y|yes|1) printf -v "$access_var" '%s' 1 ;;
+    ''|n|no|0) printf -v "$access_var" '%s' 0 ;;
+    *) warn "invalid selection; $label experiment access remains disabled"; printf -v "$access_var" '%s' 0 ;;
+  esac
+
+  if [[ ${!access_var} == 1 ]]; then
+    warn "$key_var will be process-scoped but readable by commands Codex launches for this run"
+    note "the bootstrap will not write the key to a credential file; do not ask Codex to print or dump its environment"
+  else
+    note "$label experiment access disabled; Codex shell/tools will not receive $key_var"
+  fi
+}
+
+build_codex_credential_env() {
+  local -a names=(
+    GH_TOKEN GITHUB_TOKEN GITHUB_REPOSITORY GH_REPO GH_HOST GH_PROMPT_DISABLED GIT_TERMINAL_PROMPT
+    FLY_API_TOKEN FLY_ACCESS_TOKEN FLY_APP
+    CODEX_MOONSHOT_ACCESS CODEX_MINIMAX_ACCESS CODEX_DEEPSEEK_ACCESS
+  )
+  local n
+  for n in "$@"; do names+=("$n"); done
+  [[ $CODEX_MOONSHOT_ACCESS == 1 ]] && names+=(MOONSHOT_API_KEY)
+  [[ $CODEX_MINIMAX_ACCESS == 1 ]] && names+=(MINIMAX_API_KEY)
+  [[ $CODEX_DEEPSEEK_ACCESS == 1 ]] && names+=(DEEPSEEK_API_KEY)
+
+  local -A seen=()
+  local -a unique=()
+  for n in "${names[@]}"; do
+    [[ -n ${seen[$n]+x} ]] && continue
+    seen[$n]=1
+    unique+=("$n")
+  done
+  make_exec_env "${unique[@]}"
 }
 
 # Parse a GitHub remote into OWNER/REPO when possible.
@@ -2749,12 +2833,33 @@ PYCFG
     rm -f "$bridge_cfg"
     bridge_cfg=""
   fi
-  unset DEEPSEEK_API_KEY
+  if [[ ${{CODEX_DEEPSEEK_ACCESS:-0}} != 1 ]]; then
+    unset DEEPSEEK_API_KEY
+  fi
 fi
 
 # YOLO mode is the Codex alias for disabling both approvals and sandboxing.
-# Use the long form so the behavior is explicit in logs and process listings.
-exec "$HOME/.local/bin/sprite-codex-cli"   --profile deepseek-v4-pro   -c shell_environment_policy.inherit=all   -c shell_environment_policy.ignore_default_excludes=true   -c 'shell_environment_policy.exclude=["DEEPSEEK_API_KEY","MOONSHOT_API_KEY","MINIMAX_API_KEY","OPENAI_API_KEY"]'   -c 'developer_instructions="This Sprite intentionally authenticates GitHub and Fly.io through process-scoped environment credentials and the normal git, gh, and fly CLIs. Sprites gateway connections are not required for these services and /v1/gateway/list must not be used to decide whether GitHub or Fly access exists. Never print, echo, cat, or otherwise reveal token values. Verify GitHub capability with $HOME/.local/bin/sprite-auth-check github, git ls-remote, or gh api. Verify Fly capability with $HOME/.local/bin/sprite-auth-check fly or fly status. GH_TOKEN, GITHUB_TOKEN, FLY_API_TOKEN, and FLY_ACCESS_TOKEN are secrets intended for command authentication only."'   --dangerously-bypass-approvals-and-sandbox "$@"
+# Build the shell-tool exclusion list from the three independent experiment-key
+# access switches. Provider keys needed by Codex itself can remain in the parent
+# process while still being excluded from tool subprocesses.
+shell_excludes='["OPENAI_API_KEY"'
+if [[ ${{CODEX_DEEPSEEK_ACCESS:-0}} == 1 ]]; then
+  : "${{DEEPSEEK_API_KEY:?CODEX_DEEPSEEK_ACCESS=1 requires DEEPSEEK_API_KEY}}"
+else
+  shell_excludes+=',"DEEPSEEK_API_KEY"'
+fi
+if [[ ${{CODEX_MOONSHOT_ACCESS:-0}} == 1 ]]; then
+  : "${{MOONSHOT_API_KEY:?CODEX_MOONSHOT_ACCESS=1 requires MOONSHOT_API_KEY}}"
+else
+  shell_excludes+=',"MOONSHOT_API_KEY"'
+fi
+if [[ ${{CODEX_MINIMAX_ACCESS:-0}} == 1 ]]; then
+  : "${{MINIMAX_API_KEY:?CODEX_MINIMAX_ACCESS=1 requires MINIMAX_API_KEY}}"
+else
+  shell_excludes+=',"MINIMAX_API_KEY"'
+fi
+shell_excludes+=']'
+exec "$HOME/.local/bin/sprite-codex-cli"   --profile deepseek-v4-pro   -c shell_environment_policy.inherit=all   -c shell_environment_policy.ignore_default_excludes=true   -c "shell_environment_policy.exclude=$shell_excludes"   -c 'developer_instructions="This Sprite intentionally authenticates GitHub and Fly.io through process-scoped environment credentials and the normal git, gh, and fly CLIs. Sprites gateway connections are not required for these services and /v1/gateway/list must not be used to decide whether GitHub or Fly access exists. Never print, echo, cat, log, dump, or otherwise reveal token values. Verify GitHub capability with $HOME/.local/bin/sprite-auth-check github, git ls-remote, or gh api. Verify Fly capability with $HOME/.local/bin/sprite-auth-check fly or fly status. GH_TOKEN, GITHUB_TOKEN, FLY_API_TOKEN, and FLY_ACCESS_TOKEN are secrets intended for command authentication only. If DEEPSEEK_API_KEY, MOONSHOT_API_KEY, or MINIMAX_API_KEY is present in a tool environment, it is an experiment credential intended only for authenticated API calls; never reveal it."'   --dangerously-bypass-approvals-and-sandbox "$@"
 '''
 os.makedirs(os.path.dirname(launcher), exist_ok=True)
 with open(launcher, "w") as fh:
@@ -2880,14 +2985,30 @@ launcher_text = f'''#!/usr/bin/env bash
 set -Eeuo pipefail
 export PATH="$HOME/.local/bin:$HOME/.fly/bin:$PATH"
 : "${{MINIMAX_API_KEY:?MINIMAX_API_KEY is required}}"
-unset DEEPSEEK_API_KEY MOONSHOT_API_KEY
+shell_excludes='["OPENAI_API_KEY"'
+if [[ ${{CODEX_DEEPSEEK_ACCESS:-0}} == 1 ]]; then
+  : "${{DEEPSEEK_API_KEY:?CODEX_DEEPSEEK_ACCESS=1 requires DEEPSEEK_API_KEY}}"
+else
+  shell_excludes+=',"DEEPSEEK_API_KEY"'
+fi
+if [[ ${{CODEX_MOONSHOT_ACCESS:-0}} == 1 ]]; then
+  : "${{MOONSHOT_API_KEY:?CODEX_MOONSHOT_ACCESS=1 requires MOONSHOT_API_KEY}}"
+else
+  shell_excludes+=',"MOONSHOT_API_KEY"'
+fi
+if [[ ${{CODEX_MINIMAX_ACCESS:-0}} == 1 ]]; then
+  : "${{MINIMAX_API_KEY:?CODEX_MINIMAX_ACCESS=1 requires MINIMAX_API_KEY}}"
+else
+  shell_excludes+=',"MINIMAX_API_KEY"'
+fi
+shell_excludes+=']'
 cd {q(workdir)}
 exec "$HOME/.local/bin/sprite-codex-cli" \\
   --profile minimax-m3 \\
   -c shell_environment_policy.inherit=all \\
   -c shell_environment_policy.ignore_default_excludes=true \\
-  -c 'shell_environment_policy.exclude=["MINIMAX_API_KEY","DEEPSEEK_API_KEY","MOONSHOT_API_KEY","OPENAI_API_KEY"]' \\
-  -c 'developer_instructions="This Sprite intentionally authenticates GitHub and Fly.io through process-scoped environment credentials and normal git, gh, and fly commands. Never print or reveal token values. Verify GitHub with $HOME/.local/bin/sprite-auth-check github, git ls-remote, or gh api. Verify Fly with $HOME/.local/bin/sprite-auth-check fly or fly status."' \\
+  -c "shell_environment_policy.exclude=$shell_excludes" \\
+  -c 'developer_instructions="This Sprite intentionally authenticates GitHub and Fly.io through process-scoped environment credentials and normal git, gh, and fly commands. Never print or reveal token values. Verify GitHub with $HOME/.local/bin/sprite-auth-check github, git ls-remote, or gh api. Verify Fly with $HOME/.local/bin/sprite-auth-check fly or fly status. If DEEPSEEK_API_KEY, MOONSHOT_API_KEY, or MINIMAX_API_KEY is present in a tool environment, it is an experiment credential intended only for authenticated API calls; never print, echo, log, dump, or otherwise reveal it."' \\
   --dangerously-bypass-approvals-and-sandbox "$@"
 '''
 with open(launcher, "w") as fh:
@@ -3452,14 +3573,31 @@ fi
 
 echo "       Kimi gateway: 127.0.0.1:$KIMI_GATEWAY_PORT (tier pacing + Formula search)" >&2
 echo "       Responses adapter: 127.0.0.1:$KIMI_BRIDGE_PORT -> $KIMI_MODEL" >&2
-unset MOONSHOT_API_KEY
+shell_excludes='["OPENAI_API_KEY"'
+if [[ ${CODEX_DEEPSEEK_ACCESS:-0} == 1 ]]; then
+  : "${DEEPSEEK_API_KEY:?CODEX_DEEPSEEK_ACCESS=1 requires DEEPSEEK_API_KEY}"
+else
+  shell_excludes+=',"DEEPSEEK_API_KEY"'
+fi
+if [[ ${CODEX_MOONSHOT_ACCESS:-0} == 1 ]]; then
+  : "${MOONSHOT_API_KEY:?CODEX_MOONSHOT_ACCESS=1 requires MOONSHOT_API_KEY}"
+else
+  unset MOONSHOT_API_KEY
+  shell_excludes+=',"MOONSHOT_API_KEY"'
+fi
+if [[ ${CODEX_MINIMAX_ACCESS:-0} == 1 ]]; then
+  : "${MINIMAX_API_KEY:?CODEX_MINIMAX_ACCESS=1 requires MINIMAX_API_KEY}"
+else
+  shell_excludes+=',"MINIMAX_API_KEY"'
+fi
+shell_excludes+=']'
 export KIMI_GATEWAY_PORT
 if "$HOME/.local/bin/sprite-codex-cli" \
     --profile kimi-k3 \
     -c shell_environment_policy.inherit=all \
     -c shell_environment_policy.ignore_default_excludes=true \
-    -c 'shell_environment_policy.exclude=["MOONSHOT_API_KEY","DEEPSEEK_API_KEY","MINIMAX_API_KEY","OPENAI_API_KEY"]' \
-    -c 'developer_instructions="This Sprite authenticates GitHub and Fly.io through process-scoped environment credentials and normal git, gh, and fly commands. Never reveal token values. For current web information, run $HOME/.local/bin/sprite-kimi-web-search with one focused query; it uses the working moonshot/web-search:latest Formula channel. Never request or declare the broken builtin_function $web_search channel."' \
+    -c "shell_environment_policy.exclude=$shell_excludes" \
+    -c 'developer_instructions="This Sprite authenticates GitHub and Fly.io through process-scoped environment credentials and normal git, gh, and fly commands. Never reveal token values. For current web information, run $HOME/.local/bin/sprite-kimi-web-search with one focused query; it uses the working moonshot/web-search:latest Formula channel. Never request or declare the broken builtin_function $web_search channel. If DEEPSEEK_API_KEY, MOONSHOT_API_KEY, or MINIMAX_API_KEY is present in a tool environment, it is an experiment credential intended only for authenticated API calls; never print, echo, log, dump, or otherwise reveal it."' \
     --dangerously-bypass-approvals-and-sandbox "$@"; then
   codex_rc=0
 else
@@ -3492,14 +3630,30 @@ cat > "$HOME/.local/bin/sprite-codex-openai" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export PATH="\$HOME/.local/bin:\$HOME/.fly/bin:\$PATH"
-unset DEEPSEEK_API_KEY MOONSHOT_API_KEY MINIMAX_API_KEY
+shell_excludes='["OPENAI_API_KEY"'
+if [[ \${CODEX_DEEPSEEK_ACCESS:-0} == 1 ]]; then
+  : "\${DEEPSEEK_API_KEY:?CODEX_DEEPSEEK_ACCESS=1 requires DEEPSEEK_API_KEY}"
+else
+  shell_excludes+=',"DEEPSEEK_API_KEY"'
+fi
+if [[ \${CODEX_MOONSHOT_ACCESS:-0} == 1 ]]; then
+  : "\${MOONSHOT_API_KEY:?CODEX_MOONSHOT_ACCESS=1 requires MOONSHOT_API_KEY}"
+else
+  shell_excludes+=',"MOONSHOT_API_KEY"'
+fi
+if [[ \${CODEX_MINIMAX_ACCESS:-0} == 1 ]]; then
+  : "\${MINIMAX_API_KEY:?CODEX_MINIMAX_ACCESS=1 requires MINIMAX_API_KEY}"
+else
+  shell_excludes+=',"MINIMAX_API_KEY"'
+fi
+shell_excludes+=']'
 cd $(printf '%q' "$WORKDIR")
 exec "\$HOME/.local/bin/sprite-codex-cli" \
   -c model_provider=openai \
   -c shell_environment_policy.inherit=all \
   -c shell_environment_policy.ignore_default_excludes=true \
-  -c 'shell_environment_policy.exclude=["DEEPSEEK_API_KEY","MOONSHOT_API_KEY","MINIMAX_API_KEY","OPENAI_API_KEY"]' \
-  -c 'developer_instructions="This Sprite intentionally authenticates GitHub and Fly.io through process-scoped environment credentials and the normal git, gh, and fly CLIs. Sprites gateway connections are not required for these services and /v1/gateway/list must not be used to decide whether GitHub or Fly access exists. Never print, echo, cat, or otherwise reveal token values. Verify GitHub capability with $HOME/.local/bin/sprite-auth-check github, git ls-remote, or gh api. Verify Fly capability with $HOME/.local/bin/sprite-auth-check fly or fly status. GH_TOKEN, GITHUB_TOKEN, FLY_API_TOKEN, and FLY_ACCESS_TOKEN are secrets intended for command authentication only."' \
+  -c "shell_environment_policy.exclude=\$shell_excludes" \
+  -c 'developer_instructions="This Sprite intentionally authenticates GitHub and Fly.io through process-scoped environment credentials and the normal git, gh, and fly CLIs. Sprites gateway connections are not required for these services and /v1/gateway/list must not be used to decide whether GitHub or Fly access exists. Never print, echo, cat, or otherwise reveal token values. Verify GitHub capability with $HOME/.local/bin/sprite-auth-check github, git ls-remote, or gh api. Verify Fly capability with $HOME/.local/bin/sprite-auth-check fly or fly status. GH_TOKEN, GITHUB_TOKEN, FLY_API_TOKEN, and FLY_ACCESS_TOKEN are secrets intended for command authentication only. If DEEPSEEK_API_KEY, MOONSHOT_API_KEY, or MINIMAX_API_KEY is present in a tool environment, it is an experiment credential intended only for authenticated API calls; never print, echo, log, dump, or otherwise reveal it."' \
   --dangerously-bypass-approvals-and-sandbox "\$@"
 EOF
 chmod 700 "$HOME/.local/bin/sprite-codex-openai"
@@ -3775,6 +3929,24 @@ case "$CODEX_PROVIDER" in
   kimi) [[ $AGENT_KIND != codex || -n ${MOONSHOT_API_KEY:-} ]] || { echo "MOONSHOT_API_KEY is missing in the managed runner" >&2; exit 90; } ;;
   minimax) [[ $AGENT_KIND != codex || -n ${MINIMAX_API_KEY:-} ]] || { echo "MINIMAX_API_KEY is missing in the managed runner" >&2; exit 91; } ;;
 esac
+if [[ $AGENT_KIND == codex ]]; then
+  _access_rc=92
+  for _spec in \
+    "CODEX_MOONSHOT_ACCESS:MOONSHOT_API_KEY:Moonshot" \
+    "CODEX_MINIMAX_ACCESS:MINIMAX_API_KEY:MiniMax" \
+    "CODEX_DEEPSEEK_ACCESS:DEEPSEEK_API_KEY:DeepSeek"; do
+    IFS=: read -r _access_var _key_var _label <<<"$_spec"
+    case "${!_access_var:-0}" in
+      1)
+        [[ -n ${!_key_var:-} ]] || { echo "$_access_var=1 but $_key_var is missing in the managed runner" >&2; exit "$_access_rc"; }
+        echo "       $_label experiment credential: injected into Codex shell/tool environment"
+        ;;
+      0) echo "       $_label experiment credential: not exposed to Codex shell/tools" ;;
+      *) echo "invalid $_access_var in managed runner: ${!_access_var:-unset}" >&2; exit "$_access_rc" ;;
+    esac
+    _access_rc=$((_access_rc + 1))
+  done
+fi
 
 # Verify the exact long-running runner environment without printing credential
 # values. These checks catch any future regression between the outer bootstrap
@@ -4795,6 +4967,17 @@ head -12 "$tmp"
 printf '%s\n' "$FLY_OUTPUT"
 ok "Fly.io target app is accessible"
 
+if [[ $AGENT_KIND == codex ]]; then
+  step "optional provider-key access for Codex experiments"
+  choose_codex_secret_access CODEX_MOONSHOT_ACCESS MOONSHOT_API_KEY "Moonshot"
+  choose_codex_secret_access CODEX_MINIMAX_ACCESS MINIMAX_API_KEY "MiniMax"
+  choose_codex_secret_access CODEX_DEEPSEEK_ACCESS DEEPSEEK_API_KEY "DeepSeek"
+
+  [[ $CODEX_MOONSHOT_ACCESS == 1 ]] && prompt_secret MOONSHOT_API_KEY "Moonshot API key for Codex experiment processes"
+  [[ $CODEX_MINIMAX_ACCESS == 1 ]] && prompt_secret MINIMAX_API_KEY "MiniMax API key for Codex experiment processes"
+  [[ $CODEX_DEEPSEEK_ACCESS == 1 ]] && prompt_secret DEEPSEEK_API_KEY "DeepSeek API key for Codex experiment processes"
+fi
+
 if [[ $AGENT_KIND == kimi-code ]]; then
   TRANSPORT=native
   ALL_CREDENTIAL_ENV=$(make_exec_env GH_TOKEN GITHUB_TOKEN GITHUB_REPOSITORY GH_REPO GH_HOST GH_PROMPT_DISABLED GIT_TERMINAL_PROMPT FLY_API_TOKEN FLY_ACCESS_TOKEN FLY_APP)
@@ -4809,7 +4992,12 @@ elif [[ $CODEX_PROVIDER == deepseek ]]; then
   step "DeepSeek credential"
   prompt_secret DEEPSEEK_API_KEY "DeepSeek API key required by Codex"
   DEEPSEEK_ENV=$(make_exec_env DEEPSEEK_API_KEY)
-  ALL_CREDENTIAL_ENV=$(make_exec_env GH_TOKEN GITHUB_TOKEN GITHUB_REPOSITORY GH_REPO GH_HOST GH_PROMPT_DISABLED GIT_TERMINAL_PROMPT FLY_API_TOKEN FLY_ACCESS_TOKEN FLY_APP DEEPSEEK_API_KEY)
+  ALL_CREDENTIAL_ENV=$(build_codex_credential_env DEEPSEEK_API_KEY)
+  if [[ $CODEX_DEEPSEEK_ACCESS == 1 ]]; then
+    warn "the DeepSeek provider key is also exposed to Codex-run experiment processes for this run"
+  else
+    note "the DeepSeek provider key remains excluded from Codex shell commands"
+  fi
   note "DeepSeek is passed per Sprite command; bridge mode uses a short-lived 0600 config that is deleted after startup"
 
   step "choose DeepSeek V4 Pro transport"
@@ -4867,8 +5055,12 @@ elif [[ $CODEX_PROVIDER == minimax ]]; then
   TRANSPORT=native-responses
   step "MiniMax M3 credential"
   prompt_secret MINIMAX_API_KEY "MiniMax API or Subscription Key required by Codex"
-  ALL_CREDENTIAL_ENV=$(make_exec_env GH_TOKEN GITHUB_TOKEN GITHUB_REPOSITORY GH_REPO GH_HOST GH_PROMPT_DISABLED GIT_TERMINAL_PROMPT FLY_API_TOKEN FLY_ACCESS_TOKEN FLY_APP MINIMAX_API_KEY)
-  note "the MiniMax key is inherited only by the Codex process and is excluded from Codex shell commands"
+  ALL_CREDENTIAL_ENV=$(build_codex_credential_env MINIMAX_API_KEY)
+  if [[ $CODEX_MINIMAX_ACCESS == 1 ]]; then
+    warn "the MiniMax provider key is also exposed to Codex-run experiment processes for this run"
+  else
+    note "the MiniMax key is inherited by Codex for provider authentication but excluded from Codex shell commands"
+  fi
   note "MiniMax uses its native Responses endpoint; no CodeProxy adapter is started"
 
   step "configure MiniMax M3 Codex provider"
@@ -4882,9 +5074,15 @@ elif [[ $CODEX_PROVIDER == kimi ]]; then
   TRANSPORT=kimi-adapter
   step "Kimi K3 credential"
   prompt_secret MOONSHOT_API_KEY "Moonshot API key required by Kimi K3"
-  ALL_CREDENTIAL_ENV=$(make_exec_env GH_TOKEN GITHUB_TOKEN GITHUB_REPOSITORY GH_REPO GH_HOST GH_PROMPT_DISABLED GIT_TERMINAL_PROMPT FLY_API_TOKEN FLY_ACCESS_TOKEN FLY_APP MOONSHOT_API_KEY)
-  note "the Moonshot key is inherited only by the Kimi gateway/adapter process tree"
-  note "Codex shell tools cannot read MOONSHOT_API_KEY; Formula search is available through a loopback helper"
+  ALL_CREDENTIAL_ENV=$(build_codex_credential_env MOONSHOT_API_KEY)
+  if [[ $CODEX_MOONSHOT_ACCESS == 1 ]]; then
+    warn "the Moonshot key is available both to the Kimi gateway and to Codex-run experiment processes for this run"
+  else
+    note "the Moonshot key is inherited only by the Kimi gateway/adapter process tree"
+    note "Codex shell tools cannot read MOONSHOT_API_KEY; Formula search is available through a loopback helper"
+  fi
+  [[ $CODEX_MINIMAX_ACCESS == 1 ]] && note "MiniMax experiment credential is also enabled for this Codex run"
+  [[ $CODEX_DEEPSEEK_ACCESS == 1 ]] && note "DeepSeek experiment credential is also enabled for this Codex run"
 
   step "configure Kimi K3 Codex provider"
   kimi_configurator=$(make_kimi_configurator)
@@ -4898,7 +5096,7 @@ elif [[ $CODEX_PROVIDER == kimi ]]; then
   ok "Codex profile $KIMI_PROFILE configured for $KIMI_MODEL"
 else
   TRANSPORT=normal
-  ALL_CREDENTIAL_ENV=$(make_exec_env GH_TOKEN GITHUB_TOKEN GITHUB_REPOSITORY GH_REPO GH_HOST GH_PROMPT_DISABLED GIT_TERMINAL_PROMPT FLY_API_TOKEN FLY_ACCESS_TOKEN FLY_APP)
+  ALL_CREDENTIAL_ENV=$(build_codex_credential_env)
 
   step "configure normal OpenAI Codex launcher"
   openai_launcher=$(make_openai_launcher)
