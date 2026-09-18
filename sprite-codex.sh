@@ -1,200 +1,89 @@
 #!/usr/bin/env bash
+# sprite-codex-v46.sh — updated 2026-09-18
 #
-# sprite-codex-kimi-code-minimax-resumable-github-yolo-v44.sh
+# Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
+# GitHub/Fly environment credentials, workspace sync, optional pushes,
+# native detachable TTY sessions, resume/fork, update and reconnect support.
 #
-# Interactive bootstrap for one sprites.dev Sprite that:
-#   1. asks which coding agent to run (Codex or Kimi Code), retaining the
-#      OpenAI, DeepSeek V4 Pro, Kimi K3, and MiniMax M3 provider choices for Codex;
-#   2. asks which existing Sprite to use (it never creates/destroys a Sprite);
-#   3. discovers live managed sessions for the selected agent from the Sprite
-#      exec/session API;
-#   4. offers an optional latest-stable Codex update, then reattaches directly
-#      to an existing native detachable Sprite TTY session before credentials;
-#   5. securely receives a repository-scoped GitHub PAT and app-scoped Fly token;
-#   6. clones/repairs the selected GitHub repository as the Sprite workspace;
-#   7. verifies Fly.io and configures the selected custom model provider;
-#   8. recursively uploads host ./workspace/ into <Sprite repo>/workspace/;
-#   9. compares/pushes repository changes according to the configured policy;
-#  10. launches the selected agent directly inside a native `sprite exec --tty`
-#      session, with independent Codex and Kimi Code session identities;
-#  11. keeps a bounded Tasks API heartbeat while the agent runner is alive;
-#  12. preserves the native Sprite TTY session across local disconnects and
-#      reattaches to the SAME session ID after non-zero transport failures.
-#
-# v32 introduced—and v34 retains—the tmux-free normal interactive path. Sprites TTY
-# sessions are themselves detachable (`Ctrl+\\`) and reattachable through
-# `sprite sessions attach <id>`. This avoids tmux mouse/copy-mode/key-binding
-# interference and eliminates the nested Sprite-TTY -> tmux-client session layer.
-# A small legacy tmux guard remains only to detect/attach a live v31-or-earlier
-# managed tmux session so v34 never starts a duplicate Codex during migration.
-#
-# GitHub, Fly.io, DeepSeek, Moonshot, and MiniMax credentials are not persisted as credential files
-# by this script. They are JSON-serialized, hex-encoded into one delimiter-safe
-# `SPRITE_CODEX_ENV_HEX` value, decoded in the Sprite process, and inherited only
-# by the managed runner/agent process tree. OpenAI mode uses Codex's normal auth
-# store on the Sprite. Kimi Code likewise owns its standard ~/.kimi-code login
-# state when the user chooses OAuth or an API key through /login; the bootstrap
-# never copies that provider credential into shell-tool environment variables.
+# v46 fixes reuse of an existing Sprite with stale/unwritable upload paths.
+# All file transfers now use non-TTY exec stdin, a fresh private remote directory,
+# and SHA-256 validation before execution/extraction. No --file upload API is used.
+# Existing session selection, duplicate guards and detachable TTY behavior remain.
+# v45 custom-provider defaults (unchanged by this fix):
+#   DeepSeek: deepseek-flash (DeepSeek V4.1 Flash)
+#   MiniMax:  MiniMax-M3
+#   Moonshot: kimi-k3
+# All three use native Responses APIs. No CodeProxy or Formula gateway is
+# installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-kimi-code-minimax-resumable-github-yolo-v44.sh
+#   bash sprite-codex-v46.sh                        # existing interactive workflow
+#   bash sprite-codex-v46.sh --show-models          # no API calls
+#   bash sprite-codex-v46.sh --test-models          # host API tests only
+#   bash sprite-codex-v46.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v46.sh --test-models-before-run
+#   bash sprite-codex-v46.sh --test-models --json-output ./model-tests.json
 #
-# v44 generalizes optional, process-scoped experiment credential access for
-# Codex. CODEX_MOONSHOT_ACCESS, CODEX_MINIMAX_ACCESS, and CODEX_DEEPSEEK_ACCESS
-# are independent ask|0|1 switches controlling whether MOONSHOT_API_KEY,
-# MINIMAX_API_KEY, and DEEPSEEK_API_KEY respectively are inherited by Codex
-# shell/tool subprocesses. Any subset can be enabled, including all three at the
-# same time, regardless of the primary Codex model provider. Interactive ask mode
-# defaults to No; non-interactive ask mode is disabled. A key required by the
-# selected provider is still supplied internally even when experiment access for
-# that key is disabled. No provider key is written to a credential file.
+# API tests validate completed replies, SSE streaming and a two-request function
+# call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
+# credentials, 2=configuration/report error, 130=interrupted. Tests may incur API
+# charges. Test-only paths do not install Codex, touch repositories or attach to,
+# create or terminate agent sessions. They do not require GitHub/Fly credentials.
+# Remote tests transfer one temporary, secret-free Python helper and may wake a
+# cold Sprite. --json-output is a Sprite path when testing on a Sprite.
 #
-# v42 hardens normal OpenAI Codex authentication recovery. If the OpenAI
-# preflight fails because the currently authenticated ChatGPT account has hit a
-# usage/credit limit (or for another authentication-related error), the script
-# no longer exits immediately. In an interactive terminal it offers to rerun
-# device-code login, optionally clear the Sprite's stored Codex credentials first
-# to switch accounts, and then retries the exact same preflight. The recovery
-# loop is user-controlled and can be repeated until a working account is selected
-# or the user explicitly aborts. Non-interactive runs remain fail-fast.
+# Provider settings:
+#   DEEPSEEK_API_KEY, MINIMAX_API_KEY, MOONSHOT_API_KEY (KIMI_API_KEY is an alias)
+#   DEEPSEEK_MODEL, MINIMAX_MODEL, KIMI_MODEL (MOONSHOT_MODEL is an alias)
+#   DEEPSEEK_BASE_URL, MINIMAX_BASE_URL, MOONSHOT_BASE_URL
+#   DEEPSEEK_CONTEXT_WINDOW, MINIMAX_CONTEXT_WINDOW, KIMI_CONTEXT_WINDOW
+#   DEEPSEEK_REASONING_EFFORT, MINIMAX_REASONING_EFFORT, KIMI_REASONING_EFFORT
+#   CODEX_PROVIDER=ask|openai|deepseek|minimax|kimi|moonshot
+#   MODEL_TEST_MODE=ask|always|never (ask defaults to No; noninteractive skips)
+#   MODEL_TEST_TIMEOUT=180, MODEL_TEST_MAX_TOKENS=4096, MODEL_TEST_RETRIES=0
+#   MODEL_TEST_JSON=/path/report.json
+#   KIMI_MIN_REQUEST_INTERVAL_MS=20000 (test request pacing only)
+#   MODEL_TEST_ALLOW_LOCALHOST=1 permits HTTP only to localhost in test-only mode;
+#     intended for offline regression tests, never for production credentials.
 #
-# v41 adds an explicit pre-run Codex update choice. The choice is offered after
-# the Sprite session inventory is validated but before an existing Codex TTY is
-# attached or a new Codex process is launched. A live Codex session triggers a
-# prominent warning and requires an explicit UPDATE override (or the documented
-# non-interactive override). The updater installs the latest stable npm release
-# into a versioned user directory and atomically selects it, so it does not
-# rewrite the files backing an already-running Codex process. It never touches
-# ~/.codex conversations or the local Sprite resume-state JSON; resume/fork/new
-# selection and the existing post-update resume logic remain unchanged.
-#
-# v40 adds a first-class Codex fork mode and safe recovery from resume failures.
-# The startup menu can now run `codex fork --last`, preserving conversation
-# history under a new writable thread ID. If `codex resume --last` exits
-# non-zero (including Codex's "already has an active writer" guard), the remote
-# TTY reports whether any Codex-like process remains and offers an immediate
-# fork. It never deletes session files or automatically terminates a process.
-#
-# v39 adds the probe-verified MiniMax M3 native Responses provider as a Codex
-# option. It creates a dedicated model catalog/profile and YOLO launcher, keeps
-# MINIMAX_API_KEY process-scoped and hidden from Codex shell tools, and verifies
-# Codex plus GitHub access before starting the detachable Sprite TTY.
-#
-# v38 fixes Kimi Code installation detection when the official installer adds
-# ~/.kimi-code/bin to a shell startup file. The bootstrap now recognizes that
-# directory immediately, recovers an already-installed binary after a prior
-# setup failure, and reports focused path/permission diagnostics on failure.
-#
-# v37 adds the official Kimi Code CLI as a first-class agent alongside Codex.
-# The two agents use distinct native Sprite TTY tags, task holds, and local
-# resume-state files while deliberately sharing the same repository checkout.
-# When one agent is already live, the second defaults to reuse mode so it does
-# not fetch, overlay, upload, commit, or push underneath the active peer.
-#
-# v36 makes Formula web search a bounded multi-round agent loop. K3 may request
-# another batch of web_search calls after inspecting the first results; the
-# gateway now continues until K3 returns a real final answer instead of exposing
-# that intermediate planning message as a successful search result.
-#
-# v35 adds Kimi K3 through a loopback-only Moonshot gateway and the same pinned
-# Responses adapter used for other non-Responses providers. The gateway owns the
-# Moonshot key, enforces account-tier pacing, and provides Formula web search via
-# `sprite-kimi-web-search`; Codex shell commands receive the Moonshot key only when
-# CODEX_MOONSHOT_ACCESS=1 is explicitly selected for that run.
-#
-# Optional non-interactive overrides:
-#   CODING_AGENT=ask|codex|kimi-code,
-#   CODEX_PROVIDER=ask|openai|deepseek|kimi|minimax (Codex mode only),
-#   SPRITE_NAME, SPRITE_ORG, GITHUB_PAT, GITHUB_REPOSITORY,
-#   FLY_API_TOKEN, FLY_APP,
-#   DEEPSEEK_API_KEY (DeepSeek provider or optional Codex experiment access),
-#   MOONSHOT_API_KEY (Kimi provider or optional Codex experiment access),
-#   MINIMAX_API_KEY (MiniMax provider or optional Codex experiment access),
-#   CODEX_DEEPSEEK_ACCESS=ask|0|1 (default ask; interactive default No),
-#   CODEX_MOONSHOT_ACCESS=ask|0|1 (default ask; interactive default No),
-#   CODEX_MINIMAX_ACCESS=ask|0|1 (default ask; interactive default No),
-#   MINIMAX_BASE_URL (default https://api.minimax.io/v1),
-#   MINIMAX_MODEL (default MiniMax-M3),
-#   SPRITE_WORKDIR, DEEPSEEK_TRANSPORT=auto|direct|bridge,
-#   MOONSHOT_BASE_URL (default https://api.moonshot.ai/v1),
-#   KIMI_MODEL (default kimi-k3), KIMI_FORMULA_URI,
-#   KIMI_TIER, KIMI_MIN_REQUEST_INTERVAL_MS, KIMI_REQUEST_TIMEOUT,
-#   KIMI_FORMULA_MAX_ROUNDS (default 10, allowed 2..20),
-#   KIMI_MAX_COMPLETION_TOKENS, KIMI_BRIDGE_PORT, KIMI_GATEWAY_PORT,
-#   MIN_CODEX_VERSION (default 0.144.0), CODEX_PREFLIGHT_TIMEOUT (default 180),
-#   CODEX_UPDATE_MODE=ask|always|never (default ask),
-#   CODEX_UPDATE_LIVE_OVERRIDE=1 (with mode=always; permits a live non-interactive update),
-#   SPRITE_CONTROL_TIMEOUT (default 25), SPRITE_CONNECT_TRIES (default 3),
-#   SPRITE_CONTROL_TRANSPORT=auto|websocket|http-post (default auto),
+# Existing overrides retained:
+#   CODING_AGENT=ask|codex|kimi-code, SPRITE_NAME, SPRITE_ORG, SPRITE_WORKDIR,
+#   GITHUB_PAT, GITHUB_REPOSITORY, FLY_API_TOKEN, FLY_APP,
+#   CODEX_{DEEPSEEK,MINIMAX,MOONSHOT}_ACCESS=ask|0|1,
+#   MIN_CODEX_VERSION=0.144.0, CODEX_PREFLIGHT_TIMEOUT=180,
+#   CODEX_UPDATE_MODE=ask|always|never, CODEX_UPDATE_LIVE_OVERRIDE=0|1,
+#   SPRITE_CONTROL_TIMEOUT=25, SPRITE_CONNECT_TRIES=3,
+#   SPRITE_UPLOAD_TIMEOUT=120, SPRITE_UPLOAD_TMPDIR=/absolute/remote/path,
+#   SPRITE_CONTROL_TRANSPORT=auto|websocket|http-post,
 #   KIMI_CODE_START_MODE=ask|continue|new,
 #   KIMI_CODE_APPROVAL_MODE=normal|yolo|auto,
 #   SHARED_WORKSPACE_MODE=auto|reuse|sync,
-#   NO_AGENT_LAUNCH=1 (NO_CODEX_LAUNCH remains an alias),
-#   SPRITE_RUN_HOURS (default prompt value 8),
-#   FORCE_NEW_SESSION=1,
-#   CODEX_START_MODE=ask|resume|fork|new,
-#   RESUME_CODEX_HISTORY=1 (legacy alias forcing resume),
-#   SPRITE_SESSION_STATE (override local non-secret state path),
+#   NO_AGENT_LAUNCH=1 (NO_CODEX_LAUNCH remains an alias), SPRITE_RUN_HOURS,
+#   FORCE_NEW_SESSION=1, CODEX_START_MODE=ask|resume|fork|new,
+#   RESUME_CODEX_HISTORY=1, SPRITE_SESSION_STATE,
 #   REPO_PUSH_MODE=ask|always|never, REPO_PUSH_COMMIT_MESSAGE,
-#   STARTUP_REPO_PUSH_MODE=ask|always|never,
-#   EXIT_AFTER_STARTUP_REPO_PUSH=1,
-#   TTY_AUTO_REATTACH=1|0 (default 1),
-#   TTY_REATTACH_ATTEMPTS (default 12; 0 means unlimited),
-#   TTY_REATTACH_CONFIRM_TRIES (default 8), TTY_REATTACH_DELAY (default 3s).
+#   STARTUP_REPO_PUSH_MODE=ask|always|never, EXIT_AFTER_STARTUP_REPO_PUSH=1,
+#   TTY_AUTO_REATTACH=1|0, TTY_REATTACH_ATTEMPTS=12,
+#   TTY_REATTACH_CONFIRM_TRIES=8, TTY_REATTACH_DELAY=3.
+# DEEPSEEK_TRANSPORT=auto|direct is accepted; bridge is retired with a clear error.
+# Old Kimi gateway/Formula settings have no effect in the native provider path.
 #
-# v34 changes (Codex shell-tool GitHub/Fly authentication):
-#   a. Fixes OpenAI-mode credential visibility inside Codex shell tools. Codex
-#      normally filters environment names containing KEY/SECRET/TOKEN, so the
-#      parent Codex process could have GitHub/Fly credentials while agent-run
-#      git/gh/fly commands did not. Both providers now opt into the intended
-#      process environment while explicitly excluding provider API secrets.
-#   b. Adds the documented Fly FLY_ACCESS_TOKEN alias plus GH_REPO/GH_HOST and
-#      non-interactive Git/GitHub CLI hints to the managed environment.
-#   c. Sanitizes inherited secret-looking Sprite variables before starting the
-#      runner; only secrets explicitly supplied by this launcher survive.
-#   d. Adds sprite-auth-check, which reports credential presence/capability only
-#      and never prints raw credential values. The runner verifies GitHub and
-#      Fly capability in the exact long-running environment before Codex starts.
-#   e. Adds session-scoped Codex developer instructions: GitHub/Fly use normal
-#      git/gh/fly process credentials here, not Sprites gateway connections.
-#
-# v33 changes (errexit correctness + native-session guard hardening):
-#   a. Removes host-side `set +e` / `set -e` return-code capture. Bash shell
-#      options are global inside functions, so v32's legacy migration guard could
-#      re-enable errexit and then `return 1` for the normal "no legacy tmux"
-#      result, terminating the entire script immediately after Sprite selection.
-#   b. Native attach, existing-session selection, legacy migration, initial TTY
-#      launch, and post-connect legacy checks now capture status with `if ...`;
-#      none of these paths mutate the caller's errexit state.
-#   c. An invalid existing-native-session menu selection is an error; it can no
-#      longer fall through toward a new-session workflow.
-#   d. Native /exec inventory is validated before session selection/replacement,
-#      and is validated again immediately before launch. Unknown inventory is
-#      never interpreted as "there are no managed sessions".
-#
-# v32 changes (native Sprite TTY session manager):
-#   a. New Codex runs execute directly in a native detachable Sprite TTY. There
-#      is no tmux server/client, mouse mode, tmux status line, or tmux copy mode.
-#   b. Live session inventory comes from the Sprite exec API. The deterministic
-#      runner tag `sprite-codex-native-<workspace-hash>` identifies managed runs;
-#      saved JSON state is only a hint and never invents a live session.
-#   c. Reattachment uses `sprite sessions attach <id>` in a throwaway local
-#      Sprite context, so the user's project .sprite file is not modified.
-#   d. Non-zero local transport failures automatically rediscover/reattach the
-#      same active session. rc=0 is treated as an intentional/clean detach because
-#      native Ctrl+\\ is handled locally and cannot write a remote detach marker.
-#   e. The runner stores non-secret hold state on the Sprite filesystem instead
-#      of in tmux metadata. Hard-cap release is durable and surfaced later when
-#      control access is available. No background process writes tmux UI state.
-#   f. v31-and-earlier deterministic tmux sessions are detected before a new
-#      native session starts. A live legacy session is attachable but never killed
-#      or replaced automatically unless FORCE_NEW_SESSION=1 is explicitly used.
-#   g. `SPRITE_RUN_HOURS` now accurately means the Tasks API heartbeat duration.
-#      A running native TTY session is itself Sprite activity, so releasing the
-#      Tasks hold does not promise that the Sprite will immediately become idle.
-#
-# One-Sprite design: every remote operation targets exactly one selected Sprite.
+# Security: custom-provider keys are environment-only; test reports never contain
+# raw response/reasoning bodies or keys. Normal Codex YOLO behavior is retained.
+# API keys remain excluded from Codex shell/tools unless explicitly enabled.
+# Sprite's JSON/hex environment transport is encoding, not encryption: the packed
+# secret-equivalent value may appear in local process arguments. Do not use -x.
+# OpenAI and Kimi Code CLI retain their own normal authentication stores.
 # The script never invokes `sprite create` or `sprite destroy`.
+#
+# Documentation verified 2026-09-18:
+# https://api-docs.deepseek.com/
+# https://api-docs.deepseek.com/guides/responses_api/
+# https://platform.minimax.io/docs/guides/text-generation
+# https://platform.minimax.io/docs/api-reference/responses-create
+# https://platform.kimi.ai/docs/guide/kimi-k3-quickstart
+# https://platform.kimi.ai/docs/guide/codex-kimi
+# https://learn.chatgpt.com/docs/config-file/config-advanced
 
 if [[ -z ${BASH_VERSION:-} ]]; then
   echo "error: run this script with bash" >&2
@@ -207,47 +96,122 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 set -Eeuo pipefail
+set +x
 umask 077
 
-MODEL="deepseek-v4-pro"
-PROFILE="deepseek-v4-pro"
-BRIDGE_PORT="8787"
-MINIMAX_MODEL="${MINIMAX_MODEL:-MiniMax-M3}"
-MINIMAX_PROFILE="minimax-m3"
-MINIMAX_BASE_URL="${MINIMAX_BASE_URL:-https://api.minimax.io/v1}"
-MINIMAX_BASE_URL="${MINIMAX_BASE_URL%/}"
-KIMI_MODEL="${KIMI_MODEL:-kimi-k3}"
-KIMI_PROFILE="kimi-k3"
-KIMI_BRIDGE_PORT="${KIMI_BRIDGE_PORT:-8788}"
-KIMI_GATEWAY_PORT="${KIMI_GATEWAY_PORT:-8789}"
-MOONSHOT_BASE_URL="${MOONSHOT_BASE_URL:-https://api.moonshot.ai/v1}"
-KIMI_FORMULA_URI="${KIMI_FORMULA_URI:-moonshot/web-search:latest}"
-KIMI_REQUEST_TIMEOUT="${KIMI_REQUEST_TIMEOUT:-180}"
-KIMI_MAX_COMPLETION_TOKENS="${KIMI_MAX_COMPLETION_TOKENS:-32768}"
-KIMI_FORMULA_MAX_ROUNDS="${KIMI_FORMULA_MAX_ROUNDS:-10}"
-KIMI_TIER="${KIMI_TIER:-0}"
-case "$KIMI_TIER" in
-  0) _kimi_default_interval=20000 ;;
-  1) _kimi_default_interval=300 ;;
-  2) _kimi_default_interval=120 ;;
-  *) _kimi_default_interval=100 ;;
-esac
-KIMI_MIN_REQUEST_INTERVAL_MS="${KIMI_MIN_REQUEST_INTERVAL_MS:-$_kimi_default_interval}"
-[[ $MINIMAX_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "error: unsafe MINIMAX_MODEL" >&2; exit 2; }
-[[ $MINIMAX_BASE_URL =~ ^https://[A-Za-z0-9._:-]+(/[A-Za-z0-9._~:/?#@!()+,\;%=-]*)?$ ]] || { echo "error: MINIMAX_BASE_URL must be a valid HTTPS URL" >&2; exit 2; }
-[[ $KIMI_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$ ]] || { echo "error: unsafe KIMI_MODEL" >&2; exit 2; }
-[[ $MOONSHOT_BASE_URL =~ ^https?://[A-Za-z0-9._:-]+(/.*)?$ ]] || { echo "error: unsafe MOONSHOT_BASE_URL" >&2; exit 2; }
-for _v in KIMI_REQUEST_TIMEOUT KIMI_MAX_COMPLETION_TOKENS KIMI_FORMULA_MAX_ROUNDS KIMI_TIER KIMI_MIN_REQUEST_INTERVAL_MS KIMI_BRIDGE_PORT KIMI_GATEWAY_PORT; do
-  [[ ${!_v} =~ ^[0-9]+$ ]] || { echo "error: $_v must be a non-negative integer" >&2; exit 2; }
+show_usage() {
+  cat <<'HELP'
+Usage: bash sprite-codex-v46.sh [option] [--json-output PATH]
+
+  (no option)               Normal Sprite bootstrap; optional model-test prompt.
+  --test-models             Test DeepSeek, MiniMax and Moonshot from this host.
+  --test-models-sprite      Test all three from one selected Sprite.
+  --test-models-before-run  Require host tests to pass, then run normal bootstrap.
+  --show-models             Display configured model IDs and base URLs; no calls.
+  --help, -h                Display this help.
+
+Keys: DEEPSEEK_API_KEY, MINIMAX_API_KEY, MOONSHOT_API_KEY.
+Missing keys are prompted with hidden input on a terminal, otherwise fail.
+Tests: completed reply, SSE stream, function-call/result round trip.
+Model IDs: DEEPSEEK_MODEL, MINIMAX_MODEL, KIMI_MODEL (or MOONSHOT_MODEL).
+CODEX_PROVIDER=moonshot is an alias for CODEX_PROVIDER=kimi.
+
+Existing Sprites are reused. New agent runs get native detachable TTY sessions;
+this same managed agent/project, when already live, is reattached, not duplicated.
+FORCE_NEW_SESSION=1 means confirmed replacement, NOT a parallel session.
+SHARED_WORKSPACE_MODE=reuse skips repository sync/upload/commit/push.
+SPRITE_UPLOAD_TIMEOUT=120 bounds each payload reception (not setup/agent runtime).
+SPRITE_UPLOAD_TMPDIR=/absolute/path selects an existing writable remote temp base;
+otherwise the remote TMPDIR or /tmp is used. Transfers use exec stdin, not --file.
+
+MODEL_TEST_MODE=ask|always|never controls tests in the normal workflow.
+MODEL_TEST_TIMEOUT=180     Hard deadline in seconds per HTTP attempt.
+MODEL_TEST_MAX_TOKENS=4096  Per-request output budget, including reasoning.
+MODEL_TEST_RETRIES=0       Optional retries for 429/502/503/504; 0..3.
+MODEL_TEST_JSON=PATH       Optional report (0600, atomic replace).
+KIMI_MIN_REQUEST_INTERVAL_MS=20000 controls Moonshot pacing in tests only.
+
+Test-only modes need Bash 4+ and Unix Python 3.9+; Sprite tests also need sprite.
+Full bootstrap additionally needs normal Sprite/GitHub/Fly access. Native Codex
+configuration requires Python 3.11+ on the Sprite, or Python with tomli installed.
+--json-output is a remote path with --test-models-sprite, local otherwise.
+Tests make billable API calls; no agent, GitHub or Fly credentials are needed.
+All three must pass for exit 0. Failures/missing keys exit 1; bad arguments exit 2.
+HELP
+}
+
+RUN_MODE=bootstrap
+MODEL_TEST_MODE="${MODEL_TEST_MODE:-ask}"
+MODEL_TEST_JSON="${MODEL_TEST_JSON:-}"
+_MODE_SELECTED=0
+while (($#)); do
+  case "$1" in
+    --help|-h) show_usage; exit 0 ;;
+    --test-models|--test-models-sprite|--test-models-before-run|--show-models)
+      (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
+      _MODE_SELECTED=1
+      case "$1" in
+        --test-models) RUN_MODE=test-local ;;
+        --test-models-sprite) RUN_MODE=test-sprite ;;
+        --test-models-before-run) MODEL_TEST_MODE=always ;;
+        --show-models) RUN_MODE=show ;;
+      esac
+      shift ;;
+    --json-output)
+      [[ $# -ge 2 && -n $2 && $2 != --* ]] || { echo "error: --json-output requires a path" >&2; exit 2; }
+      MODEL_TEST_JSON=$2; shift 2 ;;
+    *) printf 'error: unknown argument: %s\n' "$1" >&2; show_usage >&2; exit 2 ;;
+  esac
 done
-(( KIMI_REQUEST_TIMEOUT >= 1 )) || { echo "error: KIMI_REQUEST_TIMEOUT must be positive" >&2; exit 2; }
-(( KIMI_MAX_COMPLETION_TOKENS >= 1024 )) || { echo "error: KIMI_MAX_COMPLETION_TOKENS must be at least 1024" >&2; exit 2; }
-(( KIMI_FORMULA_MAX_ROUNDS >= 2 && KIMI_FORMULA_MAX_ROUNDS <= 20 )) || { echo "error: KIMI_FORMULA_MAX_ROUNDS must be 2..20" >&2; exit 2; }
-(( KIMI_MIN_REQUEST_INTERVAL_MS >= 100 && KIMI_MIN_REQUEST_INTERVAL_MS <= 60000 )) || { echo "error: KIMI_MIN_REQUEST_INTERVAL_MS must be 100..60000" >&2; exit 2; }
-(( KIMI_BRIDGE_PORT >= 1024 && KIMI_BRIDGE_PORT <= 65535 && KIMI_GATEWAY_PORT >= 1024 && KIMI_GATEWAY_PORT <= 65535 )) || { echo "error: KIMI ports must be in 1024..65535" >&2; exit 2; }
-(( KIMI_BRIDGE_PORT != KIMI_GATEWAY_PORT && KIMI_BRIDGE_PORT != BRIDGE_PORT && KIMI_GATEWAY_PORT != BRIDGE_PORT )) || { echo "error: KIMI_BRIDGE_PORT, KIMI_GATEWAY_PORT, and DeepSeek port $BRIDGE_PORT must differ" >&2; exit 2; }
-if (( KIMI_TIER == 0 && KIMI_MIN_REQUEST_INTERVAL_MS < 20000 )); then
-  echo "warning: Tier 0 documents 3 RPM; an interval below 20000ms may receive 429 responses" >&2
+case "$MODEL_TEST_MODE" in ask|always|never) ;; *) echo "error: MODEL_TEST_MODE must be ask, always or never" >&2; exit 2 ;; esac
+
+# Single source of truth for generation, tests, menus and remote launchers.
+DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-flash}"
+MINIMAX_MODEL="${MINIMAX_MODEL:-MiniMax-M3}"
+KIMI_MODEL="${KIMI_MODEL:-${MOONSHOT_MODEL:-kimi-k3}}"
+MODEL="$DEEPSEEK_MODEL"
+PROFILE="sprite-deepseek"
+MINIMAX_PROFILE="sprite-minimax"
+KIMI_PROFILE="sprite-kimi"
+DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
+MINIMAX_BASE_URL="${MINIMAX_BASE_URL:-https://api.minimax.io/v1}"
+MOONSHOT_BASE_URL="${MOONSHOT_BASE_URL:-https://api.moonshot.ai/v1}"
+DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL%/}"
+MINIMAX_BASE_URL="${MINIMAX_BASE_URL%/}"
+MOONSHOT_BASE_URL="${MOONSHOT_BASE_URL%/}"
+MOONSHOT_API_KEY="${MOONSHOT_API_KEY:-${KIMI_API_KEY:-}}"
+DEEPSEEK_CONTEXT_WINDOW="${DEEPSEEK_CONTEXT_WINDOW:-1048576}"
+MINIMAX_CONTEXT_WINDOW="${MINIMAX_CONTEXT_WINDOW:-1000000}"
+KIMI_CONTEXT_WINDOW="${KIMI_CONTEXT_WINDOW:-1048576}"
+DEEPSEEK_REASONING_EFFORT="${DEEPSEEK_REASONING_EFFORT:-high}"
+MINIMAX_REASONING_EFFORT="${MINIMAX_REASONING_EFFORT:-high}"
+KIMI_REASONING_EFFORT="${KIMI_REASONING_EFFORT:-high}"
+KIMI_MIN_REQUEST_INTERVAL_MS="${KIMI_MIN_REQUEST_INTERVAL_MS:-20000}"
+MODEL_TEST_TIMEOUT="${MODEL_TEST_TIMEOUT:-180}"
+MODEL_TEST_MAX_TOKENS="${MODEL_TEST_MAX_TOKENS:-4096}"
+MODEL_TEST_RETRIES="${MODEL_TEST_RETRIES:-0}"
+MODEL_TEST_ALLOW_LOCALHOST="${MODEL_TEST_ALLOW_LOCALHOST:-0}"
+MODEL_TEST_PROMPT=0
+
+if [[ $RUN_MODE == show ]]; then
+  printf 'Defaults verified: 2026-09-18; configured models (not live availability)\n'
+  printf '%-10s %-25s %s\n' 'Provider' 'Model' 'API base URL'
+  printf '%-10s %-25s %s\n' DeepSeek "$DEEPSEEK_MODEL" "$DEEPSEEK_BASE_URL" MiniMax "$MINIMAX_MODEL" "$MINIMAX_BASE_URL" Moonshot "$KIMI_MODEL" "$MOONSHOT_BASE_URL"
+  exit 0
+fi
+for _v in DEEPSEEK_MODEL MINIMAX_MODEL KIMI_MODEL; do
+  [[ ${!_v} =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "error: invalid $_v" >&2; exit 2; }
+done
+for _v in DEEPSEEK_CONTEXT_WINDOW MINIMAX_CONTEXT_WINDOW KIMI_CONTEXT_WINDOW; do
+  [[ ${!_v} =~ ^[1-9][0-9]{3,6}$ ]] || { echo "error: invalid $_v" >&2; exit 2; }
+done
+for _v in DEEPSEEK_REASONING_EFFORT KIMI_REASONING_EFFORT; do
+  case "${!_v}" in low|high|max) ;; *) echo "error: $_v must be low, high or max" >&2; exit 2 ;; esac
+done
+case "$MINIMAX_REASONING_EFFORT" in low|high) ;; *) echo "error: MINIMAX_REASONING_EFFORT must be low or high" >&2; exit 2 ;; esac
+[[ $MODEL_TEST_ALLOW_LOCALHOST == 0 || $MODEL_TEST_ALLOW_LOCALHOST == 1 ]] || { echo "error: MODEL_TEST_ALLOW_LOCALHOST must be 0 or 1" >&2; exit 2; }
+if [[ $RUN_MODE == bootstrap && $MODEL_TEST_ALLOW_LOCALHOST == 1 ]]; then
+  echo "error: localhost HTTP is permitted only in test-only mode" >&2; exit 2
 fi
 MIN_CODEX_VERSION="${MIN_CODEX_VERSION:-0.144.0}"
 CODEX_PREFLIGHT_TIMEOUT="${CODEX_PREFLIGHT_TIMEOUT:-180}"
@@ -274,6 +238,14 @@ for _access_var in CODEX_MOONSHOT_ACCESS CODEX_MINIMAX_ACCESS CODEX_DEEPSEEK_ACC
     *) echo "error: $_access_var must be ask, 0, or 1" >&2; exit 2 ;;
   esac
 done
+SPRITE_UPLOAD_TIMEOUT="${SPRITE_UPLOAD_TIMEOUT:-120}"
+SPRITE_UPLOAD_TMPDIR="${SPRITE_UPLOAD_TMPDIR:-}"
+[[ $SPRITE_UPLOAD_TIMEOUT =~ ^[1-9][0-9]{0,4}$ ]] || {
+  echo "error: SPRITE_UPLOAD_TIMEOUT must be a positive integer (seconds, at most 99999)" >&2; exit 2;
+}
+[[ -z $SPRITE_UPLOAD_TMPDIR || $SPRITE_UPLOAD_TMPDIR == /* ]] || {
+  echo "error: SPRITE_UPLOAD_TMPDIR must be an absolute path on the Sprite" >&2; exit 2;
+}
 SPRITE_CONTROL_TIMEOUT="${SPRITE_CONTROL_TIMEOUT:-25}"
 SPRITE_CONNECT_TRIES="${SPRITE_CONNECT_TRIES:-3}"
 SPRITE_CONTROL_TRANSPORT="${SPRITE_CONTROL_TRANSPORT:-auto}"
@@ -308,13 +280,17 @@ case "$CODING_AGENT" in
   *) echo "error: CODING_AGENT must be ask, codex, or kimi-code" >&2; exit 2 ;;
 esac
 CODEX_PROVIDER="${CODEX_PROVIDER:-ask}"
+[[ $CODEX_PROVIDER == moonshot ]] && CODEX_PROVIDER=kimi
 case "$CODEX_PROVIDER" in
   ask|openai|deepseek|kimi|minimax) ;;
   *) echo "error: CODEX_PROVIDER must be ask, openai, deepseek, kimi, or minimax" >&2; exit 2 ;;
 esac
-TRANSPORT="${DEEPSEEK_TRANSPORT:-auto}"
+TRANSPORT="${DEEPSEEK_TRANSPORT:-direct}"
 NO_AGENT_LAUNCH="${NO_AGENT_LAUNCH:-${NO_CODEX_LAUNCH:-0}}"
 FORCE_NEW_SESSION="${FORCE_NEW_SESSION:-0}"
+[[ $FORCE_NEW_SESSION == 0 || $FORCE_NEW_SESSION == 1 ]] || {
+  echo "error: FORCE_NEW_SESSION must be 0 or 1" >&2; exit 2;
+}
 CODEX_START_MODE="${CODEX_START_MODE:-ask}"
 KIMI_CODE_START_MODE="${KIMI_CODE_START_MODE:-ask}"
 KIMI_CODE_APPROVAL_MODE="${KIMI_CODE_APPROVAL_MODE:-normal}"
@@ -371,8 +347,9 @@ esac
 }
 
 case "$TRANSPORT" in
-  auto|direct|bridge) ;;
-  *) echo "error: DEEPSEEK_TRANSPORT must be auto, direct, or bridge" >&2; exit 2 ;;
+  auto|direct) ;;
+  bridge) echo "error: DEEPSEEK_TRANSPORT=bridge is retired; use the native Responses API (direct)" >&2; exit 2 ;;
+  *) echo "error: DEEPSEEK_TRANSPORT must be auto or direct" >&2; exit 2 ;;
 esac
 
 ORG=()
@@ -485,24 +462,24 @@ choose_codex_provider() {
 
   if [[ ! -t 0 ]]; then
     CODEX_PROVIDER=deepseek
-    note "no interactive input; defaulting to DeepSeek V4 Pro for backward compatibility"
+    note "no interactive input; defaulting to DeepSeek ($DEEPSEEK_MODEL)"
     return 0
   fi
 
   printf '\n  Which provider should Codex use?\n'
   printf '    1) OpenAI - normal Codex provider/authentication\n'
-  printf '    2) DeepSeek V4 Pro [default]\n'
-  printf '    3) Kimi K3 (Moonshot API + Formula web search)\n'
-  printf '    4) MiniMax M3 (native Responses API)\n'
+  printf '    2) DeepSeek - %s [default]\n' "$DEEPSEEK_MODEL"
+  printf '    3) Moonshot - %s (native Responses + web search)\n' "$KIMI_MODEL"
+  printf '    4) MiniMax - %s (native Responses API)\n' "$MINIMAX_MODEL"
   printf '  Select [1-4]: '
   IFS= read -r choice || true
   case "${choice,,}" in
     1|o|openai) CODEX_PROVIDER=openai ;;
     ''|2|d|deepseek) CODEX_PROVIDER=deepseek ;;
-    3|k|kimi|kimi-k3) CODEX_PROVIDER=kimi ;;
+    3|k|kimi|moonshot|kimi-k3) CODEX_PROVIDER=kimi ;;
     4|m|minimax|minimax-m3) CODEX_PROVIDER=minimax ;;
     *)
-      warn "invalid selection; defaulting to DeepSeek V4 Pro"
+      warn "invalid selection; defaulting to DeepSeek ($DEEPSEEK_MODEL)"
       CODEX_PROVIDER=deepseek
       ;;
   esac
@@ -610,11 +587,11 @@ choose_codex_start_mode() {
       CODEX_START_ACTION=resume
       note "Codex will run: codex resume --last"
       if [[ $CODEX_PROVIDER == deepseek ]]; then
-        warn "resume replays the previous chat history through the current DeepSeek bridge"
+        note "resume replays the previous chat history through the selected DeepSeek native Responses provider"
       elif [[ $CODEX_PROVIDER == kimi ]]; then
-        warn "resume replays the previous chat history through the current Kimi K3 adapter"
+        note "resume replays the previous chat history through the selected Moonshot native Responses provider"
       elif [[ $CODEX_PROVIDER == minimax ]]; then
-        note "resume uses the MiniMax M3 native Responses provider selected for this run"
+        note "resume uses the MiniMax native Responses provider selected for this run"
       else
         note "resume uses the normal OpenAI Codex provider selected for this run"
       fi
@@ -1019,8 +996,160 @@ if not encoded:
     raise SystemExit("missing encoded environment")
 values = json.loads(bytes.fromhex(encoded).decode("utf-8"))
 env = os.environ.copy()
+allowed = {str(k) for k in values}
+for name in list(env):
+    if any(word in name.upper() for word in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY")) and name not in allowed:
+        env.pop(name, None)
 env.update({str(k): str(v) for k, v in values.items()})
 os.execvpe(sys.argv[1], sys.argv[1:], env)'
+
+# Transfer bytes through the exec process itself. The old --file path tried to
+# overwrite fixed /tmp names BEFORE the remote command could run, so chmod/sudo
+# inside that command could not repair it. This receiver and its consumer run
+# under the same remote identity. Nothing touches a previous invocation's files.
+#
+# Usage: run_remote_file LOCAL_FILE ENV_HEX REMOTE_CWD -- COMMAND [ARGS...]
+# Replace each exact @SPRITE_PAYLOAD@ argument with the verified private file.
+# No eval, source text in URL arguments, or automatic retry after execution.
+run_remote_file() {
+  local source=$1 env_hex=$2 workdir=$3 metadata size digest receiver
+  shift 3
+  [[ ${1:-} == -- ]] && shift
+  (($#)) || { echo "error: run_remote_file needs a remote command" >&2; return 2; }
+  [[ -f $source && -r $source ]] || { echo "error: local payload is not readable: $source" >&2; return 2; }
+  metadata=$(python3 - "$source" <<'PAYLOAD_META_PY'
+import hashlib, sys
+size = 0
+h = hashlib.sha256()
+with open(sys.argv[1], "rb") as f:
+    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+        size += len(chunk)
+        h.update(chunk)
+print(size, h.hexdigest())
+PAYLOAD_META_PY
+  ) || return 2
+  read -r size digest <<<"$metadata"
+  local -a options=(--no-port-forward)
+  [[ -z $env_hex ]] || options+=(--env "SPRITE_CODEX_ENV_HEX=$env_hex")
+  [[ -z $workdir ]] || options+=(--dir "$workdir")
+  receiver=$(cat <<'PAYLOAD_RECEIVER'
+set -Eeuo pipefail
+set +x
+umask 077
+size=$1; expected=$2; receive_timeout=$3; base=$4; decoder=$5
+shift 5
+[[ $size =~ ^[0-9]+$ && $expected =~ ^[a-f0-9]{64}$ ]] || exit 95
+[[ $receive_timeout =~ ^[1-9][0-9]*$ ]] || exit 95
+base=${base:-${TMPDIR:-/tmp}}
+[[ $base == /* && -d $base ]] || {
+  printf 'error: remote temporary base must be an existing absolute directory: %s\n' "$base" >&2
+  exit 96
+}
+for cmd in mktemp head sha256sum timeout; do
+  command -v "$cmd" >/dev/null 2>&1 || {
+    printf 'error: payload reception requires remote command: %s\n' "$cmd" >&2
+    exit 96
+  }
+done
+stage=$(mktemp -d -- "${base%/}/sprite-codex.XXXXXXXXXX") || {
+  printf 'error: cannot create a private transfer directory under %s (uid=%s)\n' "$base" "$(id -u)" >&2
+  printf 'Set SPRITE_UPLOAD_TMPDIR to a writable remote directory; no ownership or permissions were changed.\n' >&2
+  exit 96
+}
+cleanup_payload() { rm -rf -- "$stage" 2>/dev/null || true; }
+trap cleanup_payload EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+payload="$stage/payload"
+# Read the known byte count, not EOF: a CLI that delays stdin EOF cannot leave
+# reception hanging. Never execute a partially received shell/Python program.
+if ! timeout "$receive_timeout" head -c "$size" >"$payload"; then
+  echo 'error: remote payload reception failed or timed out; command was NOT run' >&2
+  exit 97
+fi
+actual=$(sha256sum -- "$payload")
+actual=${actual%% *}
+if [[ $actual != "$expected" ]]; then
+  echo 'error: remote payload checksum mismatch; command was NOT run' >&2
+  exit 97
+fi
+chmod 600 "$payload"
+command_args=()
+found=0
+for arg in "$@"; do
+  if [[ $arg == @SPRITE_PAYLOAD@ ]]; then
+    command_args+=("$payload")
+    found=1
+  else
+    command_args+=("$arg")
+  fi
+done
+(( found )) || { echo 'error: missing payload placeholder' >&2; exit 95; }
+# Environment decoding takes place only after reception and verification. The
+# helper sees /dev/null on stdin, never script bytes or the operator's terminal.
+# Keep this parent shell alive so its EXIT trap removes only this private stage.
+if [[ -n ${SPRITE_CODEX_ENV_HEX:-} ]]; then
+  python3 -c "$decoder" "${command_args[@]}" </dev/null
+else
+  "${command_args[@]}" </dev/null
+fi
+PAYLOAD_RECEIVER
+  )
+  # Deliberately do not use run_limited/sx: those redirect stdin to /dev/null.
+  # Non-TTY WebSocket exec carries the file stream. Existing short control calls
+  # can still use the configured HTTP-POST fallback independently.
+  sprite exec "${ORG[@]}" -s "$SPRITE_NAME" "${options[@]}" -- \
+    bash -c "$receiver" sprite-codex-transfer "$size" "$digest" \
+      "$SPRITE_UPLOAD_TIMEOUT" "$SPRITE_UPLOAD_TMPDIR" "$ENV_EXEC_PY" "$@" <"$source"
+}
+
+# Install a new immutable pair of native entrypoints. They retain SESSION_TAG
+# in their names for native session discovery, but never truncate a live runner.
+install_native_entrypoints() {
+  local runner_source=$1 entry_source=$2 installer request_id
+  request_id=$(python3 -c 'import secrets; print(secrets.token_hex(12))') || return 1
+  REMOTE_RUNNER="$REMOTE_HOME/.local/bin/${SESSION_TAG}-runner-${request_id}"
+  REMOTE_ENTRY="$REMOTE_HOME/.local/bin/${SESSION_TAG}-entry-${request_id}"
+  installer=$(mktemp)
+  cleanup_files+=("$installer")
+  python3 - "$runner_source" "$entry_source" "$REMOTE_RUNNER" "$REMOTE_ENTRY" >"$installer" <<'BUILD_ENTRY_INSTALLER_PY'
+import json, pathlib, sys
+sources = sys.argv[1:3]
+destinations = sys.argv[3:5]
+items = [[dst, pathlib.Path(src).read_bytes().hex()] for src, dst in zip(sources, destinations)]
+print("#!/usr/bin/env python3\nimport os, tempfile\nitems = " + repr(items))
+print(r"""
+created = []
+try:
+    for path, encoded in items:
+        directory = os.path.dirname(path)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".sprite-entry-", dir=directory)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(bytes.fromhex(encoded))
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(temporary, 0o700)
+            # link is atomic and refuses any pre-existing destination, including
+            # symlinks. Each install has fresh names; never overwrite a live file.
+            os.link(temporary, path)
+            created.append(path)
+        finally:
+            os.unlink(temporary)
+except BaseException:
+    for path in created:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    raise
+print("       installed new private native runner/entrypoint pair")
+""")
+BUILD_ENTRY_INSTALLER_PY
+  [[ -s $installer ]] || return 1
+  run_remote_file "$installer" "" "" -- python3 @SPRITE_PAYLOAD@
+}
 
 sx_env() {
   local env_hex=$1
@@ -1546,9 +1675,8 @@ PYREQUEST
   step "update Codex CLI to the latest stable release"
   note "the update is credential-free and does not read or modify ~/.codex conversation files"
   note "the selected release is installed separately, then ~/.local/bin/codex is switched atomically"
-  if sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-      --file "$helper:/tmp/sprite-codex-update-$request_id.sh" -- \
-      bash "/tmp/sprite-codex-update-$request_id.sh" "$request_id"; then
+  cleanup_files+=("$helper")
+  if run_remote_file "$helper" "" "" -- bash @SPRITE_PAYLOAD@ "$request_id"; then
     CODEX_UPDATE_COMPLETED=1
     ok "latest stable Codex was selected on Sprite $SPRITE_NAME"
     return 0
@@ -1845,22 +1973,7 @@ fi
 echo "       Codex executable inventory:"
 "$HOME/.local/bin/sprite-codex-cli" --sprite-codex-inventory | sed 's/^/         /'
 echo "       active Codex: $codex_path_after | $codex_version_after"
-# npx is needed by the DeepSeek and Kimi Responses adapters. OpenAI and MiniMax
-# use direct providers and do not install bridge-only tooling.
-if [[ $CODEX_PROVIDER == deepseek || $CODEX_PROVIDER == kimi ]]; then
-  if command -v npx >/dev/null 2>&1; then
-    echo "       npx already installed; skipping"
-  else
-    echo "       npx is missing; installing it for the custom-provider adapter"
-    npm install -g npx >/dev/null 2>&1 || npm install -g --prefix "$HOME/.local" npx >/dev/null
-    hash -r
-  fi
-  command -v npx >/dev/null 2>&1 || { echo "npx installation failed" >&2; exit 44; }
-elif [[ $CODEX_PROVIDER == openai ]]; then
-  echo "       OpenAI mode selected; npx/CodeProxy adapter tooling is not required"
-else
-  echo "       MiniMax native Responses mode selected; npx/CodeProxy adapter tooling is not required"
-fi
+echo "       custom providers use native Responses; no npx/CodeProxy adapter is needed"
 else
   kimi_install_marker="$HOME/.config/sprite-codex/kimi-code-official-installed"
   kimi_official_path="$HOME/.kimi-code/bin/kimi"
@@ -2253,12 +2366,9 @@ GITHUB_REMOTE
 run_github_bootstrap() {
   local env_hex=$1 helper
   helper=$(make_github_bootstrap)
-  sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --file "$helper:/tmp/sprite-codex-github.sh" \
-    --env "SPRITE_CODEX_ENV_HEX=$env_hex" \
-    --dir "$REMOTE_WORKDIR" -- \
-    python3 -c "$ENV_EXEC_PY" \
-      bash /tmp/sprite-codex-github.sh "$REMOTE_WORKDIR" "$GITHUB_REPOSITORY"
+  cleanup_files+=("$helper")
+  run_remote_file "$helper" "$env_hex" "$REMOTE_WORKDIR" -- \
+    bash @SPRITE_PAYLOAD@ "$REMOTE_WORKDIR" "$GITHUB_REPOSITORY"
 }
 
 # Fetch and compare the active Sprite worktree with its same-named branch on
@@ -2589,1032 +2699,199 @@ startup_repo_rescue() {
   fi
 }
 
-make_codex_configurator() {
-  local f
-  f=$(mktemp)
-  cleanup_files+=("$f")
-  cat >"$f" <<'PY'
+make_native_configurator() {
+  NATIVE_CONFIGURATOR=$(mktemp)
+  cleanup_files+=("$NATIVE_CONFIGURATOR")
+  cat >"$NATIVE_CONFIGURATOR" <<'NATIVE_CONFIG_PY'
 #!/usr/bin/env python3
-import json, os, re, stat, sys, time
-
-workdir, transport, port = sys.argv[1:4]
-home = os.path.expanduser("~")
-codex_home = os.path.join(home, ".codex")
-os.makedirs(codex_home, exist_ok=True)
-base_cfg = os.path.join(codex_home, "config.toml")
-profile_cfg = os.path.join(codex_home, "deepseek-v4-pro.config.toml")
-catalog = os.path.join(codex_home, "models.json")
-launcher = os.path.join(home, ".local", "bin", "sprite-codex-deepseek-v4-pro")
-
-entry = {
-    "slug": "deepseek-v4-pro",
-    "prefer_websockets": False,
-    "support_verbosity": True,
-    "default_verbosity": "low",
-    "apply_patch_tool_type": "freeform",
-    "web_search_tool_type": "text",
-    "input_modalities": ["text"],
-    "supports_image_detail_original": False,
-    "truncation_policy": {"mode": "tokens", "limit": 10000},
-    "supports_parallel_tool_calls": True,
-    "tool_mode": None,
-    "multi_agent_version": "v2",
-    "use_responses_lite": False,
-    "include_skills_usage_instructions": False,
-    "auto_review_model_override": None,
-    "context_window": 1048576,
-    "max_context_window": 1048576,
-    "effective_context_window_percent": 95,
-    "auto_compact_token_limit": None,
-    "comp_hash": "3000",
-    "reasoning_summary_format": "experimental",
-    "default_reasoning_summary": "none",
-    "display_name": "DeepSeek-V4-Pro",
-    "description": "DeepSeek V4 Pro configured for Codex on a Sprite.",
-    "default_reasoning_level": "high",
-    "supported_reasoning_levels": [
-        {"effort": "low", "description": "Fast responses with lighter reasoning"},
-        {"effort": "high", "description": "Greater reasoning depth for complex work"},
-        {"effort": "max", "description": "Maximum reasoning depth"},
-    ],
-    "shell_type": "shell_command",
-    "visibility": "list",
-    "minimal_client_version": "0.144.0",
-    "supported_in_api": True,
-    "availability_nux": None,
-    "upgrade": None,
-    "priority": 1,
-    "base_instructions": "You are Codex, a coding agent working in the user's current workspace. The workspace is already connected to GitHub through its HTTPS origin and an environment-backed Git credential helper. Use ordinary git commands for fetch, pull, commit, and push. Do not ask the user to configure the Sprites GitHub gateway.",
-    "model_messages": None,
-    "experimental_supported_tools": [],
-    "supports_search_tool": True,
-    "default_service_tier": None,
-    "supports_reasoning_summaries": True,
-}
-with open(catalog, "w") as fh:
-    json.dump({"models": [entry]}, fh, indent=2)
-    fh.write("\n")
-os.chmod(catalog, 0o600)
-
-old = ""
-if os.path.exists(base_cfg):
-    old = open(base_cfg, errors="replace").read()
-    backup_dir = os.path.join(codex_home, "backup-sprite-codex")
-    os.makedirs(backup_dir, exist_ok=True)
-    backup = os.path.join(backup_dir, f"config.toml.{int(time.time())}.bak")
-    open(backup, "w").write(old)
-
-for marker in ("sprite-deepseek-v4-pro", "sprite-kimi-k3", "sprite-minimax-m3"):
-    old = re.sub(rf'(?ms)^# >>> {re.escape(marker)} >>>\n.*?^# <<< {re.escape(marker)} <<<\n?', '', old)
-base_url = "https://api.deepseek.com" if transport == "direct" else f"http://127.0.0.1:{port}/v1"
-q = json.dumps
-auth_lines = 'env_key = "DEEPSEEK_API_KEY"\nrequires_openai_auth = false' if transport == "direct" else 'requires_openai_auth = false'
-block = f'''# >>> sprite-deepseek-v4-pro >>>
-[model_providers.sprite_deepseek_v4_pro]
-name = "DeepSeek V4 Pro ({transport})"
-base_url = {q(base_url)}
-{auth_lines}
-wire_api = "responses"
-request_max_retries = 2
-stream_max_retries = 2
-
-[projects.{q(workdir)}]
-trust_level = "trusted"
-# <<< sprite-deepseek-v4-pro <<<
-'''
-with open(base_cfg, "w") as fh:
-    fh.write(old.rstrip() + "\n\n" + block)
-os.chmod(base_cfg, 0o600)
-
-profile = f'''model = "deepseek-v4-pro"
-model_provider = "sprite_deepseek_v4_pro"
-model_catalog_json = {q(catalog)}
-# Keep DeepSeek thinking enabled. Do not add a bridge-level thinking=disabled
-# override; the compatibility recovery below starts a fresh chat rather than
-# weakening the model.
-model_reasoning_effort = "high"
-model_context_window = 1048576
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-web_search = "disabled"
-
-[shell_environment_policy]
-inherit = "all"
-ignore_default_excludes = true
-exclude = ["DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "MINIMAX_API_KEY", "OPENAI_API_KEY"]
-'''
-with open(profile_cfg, "w") as fh:
-    fh.write(profile)
-os.chmod(profile_cfg, 0o600)
-
-launcher_text = f'''#!/usr/bin/env bash
-set -Eeuo pipefail
-export PATH="$HOME/.local/bin:$HOME/.fly/bin:$PATH"
-: "${{DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}}"
-cd {q(workdir)}
-started_bridge=0
-bridge_pid=""
-bridge_cfg=""
-cleanup_bridge() {{
-  if [[ "$started_bridge" == 1 && -n "$bridge_pid" ]]; then
-    kill -- "-$bridge_pid" 2>/dev/null || kill "$bridge_pid" 2>/dev/null || true
-  fi
-  [[ -z "$bridge_cfg" ]] || rm -f "$bridge_cfg" 2>/dev/null || true
-}}
-trap cleanup_bridge EXIT INT TERM
-
-if [[ {q(transport)} == bridge ]]; then
-  pidfile="$HOME/.config/sprite-codex/bridge.pid"
-  logfile="$HOME/.config/sprite-codex/bridge.log"
-  bridge_tcp_ready() {{
-    python3 - {port} <<'PYREADY'
-import socket, sys
-sock = socket.socket()
-sock.settimeout(1.0)
+"""Install a secret-free native Responses provider and modern Codex profile."""
+import hashlib
+import json
+import os
+import re
+import shlex
+import sys
+import tempfile
+import time
+import urllib.parse
 try:
-    sock.connect(("127.0.0.1", int(sys.argv[1])))
-except OSError:
-    raise SystemExit(1)
-finally:
-    sock.close()
-PYREADY
-  }}
-  # A listening TCP port is not enough: older/wrong proxy builds may bind but
-  # return 404 for the Responses route Codex needs. POST an intentionally
-  # incomplete request; any HTTP response except 000/404 proves the route exists.
-  bridge_responses_ready() {{
-    local code
-    code=$(curl -sS -o /tmp/sprite-codeproxy-route-check.json -w '%{{http_code}}' \
-      --max-time 8 -X POST "http://127.0.0.1:{port}/v1/responses" \
-      -H 'content-type: application/json' -d '{{}}' 2>/dev/null || true)
-    [[ "$code" =~ ^[0-9]{{3}}$ && "$code" != 000 && "$code" != 404 ]]
-  }}
-  if [[ -f "$pidfile" ]]; then
-    oldpid=$(cat "$pidfile" 2>/dev/null || true)
-    if [[ -n "$oldpid" ]] && kill -0 "$oldpid" 2>/dev/null \
-       && bridge_tcp_ready && bridge_responses_ready \
-       && grep -q 'Upstream format: anthropic' "$logfile" 2>/dev/null \
-       && grep -q 'Upstream URL: https://api.deepseek.com/anthropic/v1/messages' "$logfile" 2>/dev/null; then
-      bridge_pid="$oldpid"
-    else
-      if [[ -n "$oldpid" ]] && kill -0 "$oldpid" 2>/dev/null; then
-        kill -- "-$oldpid" 2>/dev/null || kill "$oldpid" 2>/dev/null || true
-        sleep 1
-      fi
-      rm -f "$pidfile"
-    fi
-  fi
-  if [[ -z "$bridge_pid" ]]; then
-    if bridge_tcp_ready; then
-      echo "port {port} is already serving an untracked or incompatible process; refusing to send the DeepSeek key" >&2
-      exit 71
-    fi
-    bridge_cfg=$(mktemp "$HOME/.config/sprite-codex/codeproxy.XXXXXX.json")
-    python3 - "$bridge_cfg" <<'PYCFG'
-import json, os, sys
-cfg = {{
-  "version": "1.0",
-  "currentUpstream": "deepseek",
-  "reasoningEffort": "high",
-  "thinking": {{"type": "enabled", "budget_tokens": 32768}},
-  "upstreams": {{
-    "deepseek": {{
-      "baseUrl": "https://api.deepseek.com/anthropic/v1/messages",
-      "format": "anthropic",
-      "apiKey": os.environ["DEEPSEEK_API_KEY"],
-      "model": "deepseek-v4-pro",
-      "apiVersion": "2023-06-01",
-      "reasoningEffort": "high",
-      "thinking": {{"type": "enabled", "budget_tokens": 32768}}
-    }}
-  }}
-}}
-with open(sys.argv[1], "w") as f: json.dump(cfg, f)
-os.chmod(sys.argv[1], 0o600)
-PYCFG
-    # Pin the proxy version: an older cached build can bind successfully yet not
-    # expose /v1/responses. The config itself explicitly declares Anthropic.
-    setsid npx -y @codeproxy/cli@0.2.9 \
-      --config "$bridge_cfg" \
-      --host 127.0.0.1 --port {port} \
-      >"$logfile" 2>&1 </dev/null &
-    bridge_pid=$!
-    printf '%s\n' "$bridge_pid" > "$pidfile"
-    started_bridge=1
-    for i in $(seq 1 60); do
-      if bridge_tcp_ready; then
-        if bridge_responses_ready; then
-          echo "       DeepSeek Anthropic bridge is serving /v1/responses on 127.0.0.1:{port}" >&2
-          break
-        fi
-        # A bound server returning 404 is the wrong proxy/version; fail now with
-        # the route response and log rather than letting Codex retry mysteriously.
-        if [[ $i -ge 5 ]]; then
-          echo "DeepSeek bridge bound but /v1/responses is unavailable. Route response:" >&2
-          cat /tmp/sprite-codeproxy-route-check.json >&2 2>/dev/null || true
-          echo >&2
-          echo "tail of $logfile:" >&2
-          tail -30 "$logfile" >&2 || true
-          exit 73
-        fi
-      fi
-      if ! kill -0 "$bridge_pid" 2>/dev/null; then
-        echo "DeepSeek bridge exited before binding; tail of $logfile:" >&2
-        tail -30 "$logfile" >&2 || true
-        exit 72
-      fi
-      if [[ $i == 60 ]]; then
-        echo "DeepSeek bridge did not bind within 120 seconds; tail of $logfile:" >&2
-        tail -30 "$logfile" >&2 || true
-        exit 72
-      fi
-      sleep 2
-    done
-    rm -f "$bridge_cfg"
-    bridge_cfg=""
-  fi
-  if [[ ${{CODEX_DEEPSEEK_ACCESS:-0}} != 1 ]]; then
-    unset DEEPSEEK_API_KEY
-  fi
-fi
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        raise SystemExit("Native provider setup needs Python 3.11+ on the Sprite, or the tomli package.")
 
-# YOLO mode is the Codex alias for disabling both approvals and sandboxing.
-# Build the shell-tool exclusion list from the three independent experiment-key
-# access switches. Provider keys needed by Codex itself can remain in the parent
-# process while still being excluded from tool subprocesses.
-shell_excludes='["OPENAI_API_KEY"'
-if [[ ${{CODEX_DEEPSEEK_ACCESS:-0}} == 1 ]]; then
-  : "${{DEEPSEEK_API_KEY:?CODEX_DEEPSEEK_ACCESS=1 requires DEEPSEEK_API_KEY}}"
-else
-  shell_excludes+=',"DEEPSEEK_API_KEY"'
-fi
-if [[ ${{CODEX_MOONSHOT_ACCESS:-0}} == 1 ]]; then
-  : "${{MOONSHOT_API_KEY:?CODEX_MOONSHOT_ACCESS=1 requires MOONSHOT_API_KEY}}"
-else
-  shell_excludes+=',"MOONSHOT_API_KEY"'
-fi
-if [[ ${{CODEX_MINIMAX_ACCESS:-0}} == 1 ]]; then
-  : "${{MINIMAX_API_KEY:?CODEX_MINIMAX_ACCESS=1 requires MINIMAX_API_KEY}}"
-else
-  shell_excludes+=',"MINIMAX_API_KEY"'
-fi
-shell_excludes+=']'
-exec "$HOME/.local/bin/sprite-codex-cli"   --profile deepseek-v4-pro   -c shell_environment_policy.inherit=all   -c shell_environment_policy.ignore_default_excludes=true   -c "shell_environment_policy.exclude=$shell_excludes"   -c 'developer_instructions="This Sprite intentionally authenticates GitHub and Fly.io through process-scoped environment credentials and the normal git, gh, and fly CLIs. Sprites gateway connections are not required for these services and /v1/gateway/list must not be used to decide whether GitHub or Fly access exists. Never print, echo, cat, log, dump, or otherwise reveal token values. Verify GitHub capability with $HOME/.local/bin/sprite-auth-check github, git ls-remote, or gh api. Verify Fly capability with $HOME/.local/bin/sprite-auth-check fly or fly status. GH_TOKEN, GITHUB_TOKEN, FLY_API_TOKEN, and FLY_ACCESS_TOKEN are secrets intended for command authentication only. If DEEPSEEK_API_KEY, MOONSHOT_API_KEY, or MINIMAX_API_KEY is present in a tool environment, it is an experiment credential intended only for authenticated API calls; never reveal it."'   --dangerously-bypass-approvals-and-sandbox "$@"
-'''
-os.makedirs(os.path.dirname(launcher), exist_ok=True)
-with open(launcher, "w") as fh:
-    fh.write(launcher_text)
-os.chmod(launcher, 0o700)
 
-print(f"       transport={transport}")
-if transport == "bridge":
-    print("       upstream=DeepSeek Anthropic Messages /v1/messages (thinking preserved)")
-print(f"       provider base_url={base_url}")
-print(f"       profile={profile_cfg}")
-print(f"       launcher={launcher}")
-PY
-  printf '%s' "$f"
-}
+def atomic_write(path, text, mode=0o600):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".sprite-native-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(text)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
-make_minimax_configurator() {
-  local f
-  f=$(mktemp)
-  cleanup_files+=("$f")
-  cat >"$f" <<'PY'
-#!/usr/bin/env python3
-import json, os, re, sys, time
 
-workdir, model, base_url = sys.argv[1:4]
-home = os.path.expanduser("~")
-codex_home = os.path.join(home, ".codex")
-catalog_dir = os.path.join(codex_home, "model-catalogs")
-base_cfg = os.path.join(codex_home, "config.toml")
-profile_cfg = os.path.join(codex_home, "minimax-m3.config.toml")
-catalog = os.path.join(catalog_dir, "minimax-m3.json")
-launcher = os.path.join(home, ".local", "bin", "sprite-codex-minimax-m3")
-os.makedirs(catalog_dir, exist_ok=True)
-os.makedirs(os.path.dirname(launcher), exist_ok=True)
-
-# This catalog is intentionally kept aligned with the standalone MiniMax probe
-# that was validated against MiniMax's native OpenAI-compatible Responses API.
-entry = {
-    "slug": model,
-    "display_name": model,
-    "description": "MiniMax M3 through the native Responses API",
-    "default_reasoning_level": "high",
-    "supported_reasoning_levels": [
-        {"effort": "none", "description": "Thinking off"},
-        {"effort": "high", "description": "Adaptive thinking"},
-    ],
-    "shell_type": "shell_command",
-    "visibility": "list",
-    "supported_in_api": True,
-    "priority": 0,
-    "base_instructions": (
-        "You are Codex, a coding agent based on MiniMax-M3. Work in the current "
-        "Sprite repository workspace, inspect files carefully, make requested "
-        "changes, and verify your work. GitHub and Fly.io are available through "
-        "ordinary process-scoped command credentials; never reveal token values."
-    ),
-    "supports_reasoning_summaries": True,
-    "default_reasoning_summary": "none",
-    "support_verbosity": False,
-    "truncation_policy": {"mode": "bytes", "limit": 10000},
-    "supports_parallel_tool_calls": True,
-    "experimental_supported_tools": [],
-    "input_modalities": ["text", "image"],
-}
-with open(catalog, "w") as fh:
-    json.dump({"models": [entry]}, fh, indent=2)
-    fh.write("\n")
-os.chmod(catalog, 0o600)
-
-old = ""
-if os.path.exists(base_cfg):
-    old = open(base_cfg, errors="replace").read()
-    backup_dir = os.path.join(codex_home, "backup-sprite-codex")
-    os.makedirs(backup_dir, exist_ok=True)
-    backup = os.path.join(backup_dir, f"config.toml.{int(time.time())}.bak")
-    open(backup, "w").write(old)
-
-# Only one managed custom-provider block should own the project trust table at
-# a time. Removing all managed blocks prevents duplicate TOML project tables
-# when the same Sprite later switches among DeepSeek, Kimi, and MiniMax.
-for marker in ("sprite-deepseek-v4-pro", "sprite-kimi-k3", "sprite-minimax-m3"):
-    old = re.sub(rf'(?ms)^# >>> {re.escape(marker)} >>>\n.*?^# <<< {re.escape(marker)} <<<\n?', '', old)
-q = json.dumps
-block = f'''# >>> sprite-minimax-m3 >>>
-[model_providers.sprite_minimax_m3]
-name = "MiniMax M3 (native Responses)"
-base_url = {q(base_url)}
-env_key = "MINIMAX_API_KEY"
+def main():
+    workdir, provider, model, base, context, effort = sys.argv[1:7]
+    keys = {"deepseek": "DEEPSEEK_API_KEY", "minimax": "MINIMAX_API_KEY", "kimi": "MOONSHOT_API_KEY"}
+    if provider not in keys or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", model):
+        raise SystemExit("Invalid provider or model")
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+        raise SystemExit("API base URL must be HTTPS, with no credentials, query, or fragment")
+    if not workdir.startswith("/") or not context.isdigit() or not 4096 <= int(context) <= 2097152:
+        raise SystemExit("Invalid workspace or context window")
+    if effort not in ("low", "high", "max") or (provider == "minimax" and effort == "max"):
+        raise SystemExit("Invalid reasoning effort")
+    home = os.path.expanduser("~")
+    codex_home = os.path.join(home, ".codex")
+    profile_name = "sprite-" + provider
+    provider_id = "sprite_native_" + provider
+    profile_path = os.path.join(codex_home, profile_name + ".config.toml")
+    catalog_path = os.path.join(codex_home, "model-catalogs", profile_name + ".json")
+    launcher = os.path.join(home, ".local", "bin", "sprite-codex-" + provider)
+    base_path = os.path.join(codex_home, "config.toml")
+    q = lambda text: json.dumps(text, ensure_ascii=False)
+    old = open(base_path, encoding="utf-8").read() if os.path.exists(base_path) else ""
+    edited = old
+    # Legacy v44 blocks each owned the same project trust table. Remove only
+    # explicitly marked bootstrap blocks; never discard unrelated user config.
+    markers = ("sprite-deepseek-v4-pro", "sprite-kimi-k3", "sprite-minimax-m3", "sprite-native-" + provider)
+    for marker in markers:
+        edited = re.sub(r"(?ms)^# >>> " + re.escape(marker) + r" >>>\n.*?^# <<< " + re.escape(marker) + r" <<<\n?", "", edited)
+    try:
+        previous = tomllib.loads(edited)
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit("Existing unmanaged Codex TOML is invalid; no files changed: " + str(exc))
+    if provider_id in previous.get("model_providers", {}):
+        raise SystemExit("Unmanaged provider name collision: " + provider_id + "; no files changed")
+    block = f'''# >>> sprite-native-{provider} >>>
+[model_providers.{provider_id}]
+name = {q(provider + ' / ' + model + ' (native Responses)')}
+base_url = {q(base.rstrip('/'))}
+env_key = {q(keys[provider])}
 requires_openai_auth = false
 wire_api = "responses"
 request_max_retries = 2
 stream_max_retries = 2
 stream_idle_timeout_ms = 300000
-
+# <<< sprite-native-{provider} <<<
+'''
+    # Parse before deciding whether a project table exists (quoted TOML keys and
+    # inline tables must work as well). Preserve any explicit user trust policy.
+    if workdir not in previous.get("projects", {}):
+        project_hash = hashlib.sha256(workdir.encode()).hexdigest()[:16]
+        block += f'''\n# >>> sprite-project-{project_hash} >>>
 [projects.{q(workdir)}]
 trust_level = "trusted"
-# <<< sprite-minimax-m3 <<<
+# <<< sprite-project-{project_hash} <<<
 '''
-with open(base_cfg, "w") as fh:
-    fh.write(old.rstrip() + "\n\n" + block)
-os.chmod(base_cfg, 0o600)
-
-profile = f'''model = {q(model)}
-model_provider = "sprite_minimax_m3"
-model_catalog_json = {q(catalog)}
-model_reasoning_effort = "high"
+    combined = edited.rstrip() + "\n\n" + block
+    instructions = (
+        "You are Codex, a coding agent working in the current Sprite repository. "
+        "Inspect files, make requested changes and verify your work. "
+        "GitHub and Fly.io use process-scoped environment credentials and ordinary git, gh and fly commands, "
+        "not Sprites gateway connections. Never print, echo, log or dump credentials. "
+        "Verify GitHub using $HOME/.local/bin/sprite-auth-check github, git ls-remote or gh api. "
+        "Verify Fly using $HOME/.local/bin/sprite-auth-check fly or fly status. "
+        "Provider API keys exposed to tools are optional experiment credentials for authenticated API calls only."
+    )
+    if provider == "kimi":
+        instructions += " Use the native web_search tool for fresh information; no Formula or local proxy helper is required."
+    entry = {
+        "slug": model, "display_name": model,
+        "description": provider + " through the native Responses API",
+        "default_reasoning_level": effort,
+        "supported_reasoning_levels": ([{"effort": "none", "description": "Thinking off"}, {"effort": "high", "description": "Adaptive thinking"}]
+                                       if provider == "minimax" else [{"effort": level, "description": level.capitalize() + " reasoning"} for level in ("low", "high", "max")]),
+        "shell_type": "shell_command", "visibility": "list", "supported_in_api": True,
+        "priority": 0, "base_instructions": instructions,
+        # Codex uses this capability flag to send reasoning.effort at all.
+        "supports_reasoning_summaries": True, "default_reasoning_summary": "none",
+        "support_verbosity": False, "prefer_websockets": False,
+        "truncation_policy": {"mode": "bytes", "limit": 10000},
+        "supports_parallel_tool_calls": True, "experimental_supported_tools": [],
+        "input_modalities": ["text", "image"], "context_window": int(context),
+        "max_context_window": int(context), "effective_context_window_percent": 90,
+    }
+    if provider != "minimax":
+        entry["apply_patch_tool_type"] = "freeform"
+    # The optional legacy Pro model is text-only. Unknown overrides retain the
+    # provider defaults; operators must also override context when appropriate.
+    if provider == "deepseek" and model == "deepseek-v4-pro":
+        entry["input_modalities"] = ["text"]
+    profile = f'''# Managed by sprite-codex v45. No API key values are stored here.
+model = {q(model)}
+model_provider = {q(provider_id)}
+model_catalog_json = {q(catalog_path)}
+model_reasoning_effort = {q(effort)}
 model_reasoning_summary = "none"
-model_context_window = 1000000
-web_search = "disabled"
+model_context_window = {context}
+web_search = {q('live' if provider == 'kimi' else 'disabled')}
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 
 [shell_environment_policy]
 inherit = "all"
 ignore_default_excludes = true
-exclude = ["MINIMAX_API_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "OPENAI_API_KEY"]
+exclude = ["DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "KIMI_API_KEY", "MINIMAX_API_KEY", "OPENAI_API_KEY"]
 '''
-with open(profile_cfg, "w") as fh:
-    fh.write(profile)
-os.chmod(profile_cfg, 0o600)
-
-launcher_text = f'''#!/usr/bin/env bash
+    # Check generated TOML before changing any files.
+    tomllib.loads(combined)
+    tomllib.loads(profile)
+    launcher_text = '''#!/usr/bin/env bash
 set -Eeuo pipefail
+set +x
 export PATH="$HOME/.local/bin:$HOME/.fly/bin:$PATH"
-: "${{MINIMAX_API_KEY:?MINIMAX_API_KEY is required}}"
-shell_excludes='["OPENAI_API_KEY"'
-if [[ ${{CODEX_DEEPSEEK_ACCESS:-0}} == 1 ]]; then
-  : "${{DEEPSEEK_API_KEY:?CODEX_DEEPSEEK_ACCESS=1 requires DEEPSEEK_API_KEY}}"
-else
-  shell_excludes+=',"DEEPSEEK_API_KEY"'
-fi
-if [[ ${{CODEX_MOONSHOT_ACCESS:-0}} == 1 ]]; then
-  : "${{MOONSHOT_API_KEY:?CODEX_MOONSHOT_ACCESS=1 requires MOONSHOT_API_KEY}}"
-else
-  shell_excludes+=',"MOONSHOT_API_KEY"'
-fi
-if [[ ${{CODEX_MINIMAX_ACCESS:-0}} == 1 ]]; then
-  : "${{MINIMAX_API_KEY:?CODEX_MINIMAX_ACCESS=1 requires MINIMAX_API_KEY}}"
-else
-  shell_excludes+=',"MINIMAX_API_KEY"'
-fi
+: "${KEY_REQUIRED:?KEY_REQUIRED is required}"
+shell_excludes='["OPENAI_API_KEY","KIMI_API_KEY"'
+for spec in 'CODEX_DEEPSEEK_ACCESS:DEEPSEEK_API_KEY' 'CODEX_MINIMAX_ACCESS:MINIMAX_API_KEY' 'CODEX_MOONSHOT_ACCESS:MOONSHOT_API_KEY'; do
+  IFS=: read -r access key <<<"$spec"
+  if [[ ${!access:-0} == 1 ]]; then
+    [[ -n ${!key:-} ]] || { printf '%s=1 requires %s\\n' "$access" "$key" >&2; exit 2; }
+  else
+    shell_excludes+=',"'"$key"'"'
+  fi
+done
 shell_excludes+=']'
-cd {q(workdir)}
+cd -- WORKDIR_VALUE
 exec "$HOME/.local/bin/sprite-codex-cli" \\
-  --profile minimax-m3 \\
+  --profile PROFILE_VALUE \\
+  -c MODEL_OVERRIDE -c PROVIDER_OVERRIDE \\
   -c shell_environment_policy.inherit=all \\
   -c shell_environment_policy.ignore_default_excludes=true \\
   -c "shell_environment_policy.exclude=$shell_excludes" \\
-  -c 'developer_instructions="This Sprite intentionally authenticates GitHub and Fly.io through process-scoped environment credentials and normal git, gh, and fly commands. Never print or reveal token values. Verify GitHub with $HOME/.local/bin/sprite-auth-check github, git ls-remote, or gh api. Verify Fly with $HOME/.local/bin/sprite-auth-check fly or fly status. If DEEPSEEK_API_KEY, MOONSHOT_API_KEY, or MINIMAX_API_KEY is present in a tool environment, it is an experiment credential intended only for authenticated API calls; never print, echo, log, dump, or otherwise reveal it."' \\
+  -c INSTRUCTION_VALUE \\
   --dangerously-bypass-approvals-and-sandbox "$@"
 '''
-with open(launcher, "w") as fh:
-    fh.write(launcher_text)
-os.chmod(launcher, 0o700)
+    replacements = {"KEY_REQUIRED": keys[provider], "WORKDIR_VALUE": shlex.quote(workdir),
+                    "PROFILE_VALUE": shlex.quote(profile_name), "MODEL_OVERRIDE": shlex.quote("model=" + q(model)),
+                    "PROVIDER_OVERRIDE": shlex.quote("model_provider=" + q(provider_id)),
+                    "INSTRUCTION_VALUE": shlex.quote("developer_instructions=" + q(instructions))}
+    for token, value in replacements.items():
+        launcher_text = launcher_text.replace(token, value)
+    if old and old != combined:
+        backup = os.path.join(codex_home, "backup-sprite-codex", "config.toml.%s.%s.bak" % (time.time_ns(), os.getpid()))
+        atomic_write(backup, old)
+    atomic_write(catalog_path, json.dumps({"models": [entry]}, indent=2) + "\n")
+    atomic_write(profile_path, profile)
+    atomic_write(base_path, combined)
+    atomic_write(launcher, launcher_text, 0o700)
+    for label, value in (("model", model), ("provider", provider_id), ("base_url", base), ("profile", profile_path), ("catalog", catalog_path), ("launcher", launcher)):
+        print("       %s=%s" % (label, value))
+    print("       transport=native Responses; no proxy or key-bearing config file")
+    print("       mode=yolo (existing approvals/sandbox behavior retained)")
 
-print(f"       provider base_url={base_url}")
-print(f"       model={model}")
-print(f"       profile={profile_cfg}")
-print(f"       catalog={catalog}")
-print(f"       launcher={launcher}")
-print("       mode=yolo (approvals disabled; sandbox disabled)")
-PY
-  printf '%s' "$f"
-}
 
-make_kimi_configurator() {
-  local f
-  f=$(mktemp)
-  cleanup_files+=("$f")
-  cat >"$f" <<'KIMI_SETUP'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-umask 077
-
-WORKDIR=${1:?workdir required}
-KIMI_MODEL=${2:?model required}
-MOONSHOT_BASE_URL=${3:?base URL required}
-KIMI_FORMULA_URI=${4:?formula URI required}
-BRIDGE_PORT=${5:?bridge port required}
-GATEWAY_PORT=${6:?gateway port required}
-REQUEST_TIMEOUT=${7:?timeout required}
-MAX_COMPLETION_TOKENS=${8:?max tokens required}
-MIN_REQUEST_INTERVAL_MS=${9:?request interval required}
-FORMULA_MAX_ROUNDS=${10:?formula max rounds required}
-
-mkdir -p "$HOME/.local/bin" "$HOME/.config/sprite-codex" "$HOME/.codex"
-RUNTIME_ENV="$HOME/.config/sprite-codex/kimi-k3-runtime.env"
-{
-  printf 'KIMI_WORKDIR=%q\n' "$WORKDIR"
-  printf 'KIMI_MODEL=%q\n' "$KIMI_MODEL"
-  printf 'MOONSHOT_BASE_URL=%q\n' "$MOONSHOT_BASE_URL"
-  printf 'KIMI_FORMULA_URI=%q\n' "$KIMI_FORMULA_URI"
-  printf 'KIMI_BRIDGE_PORT=%q\n' "$BRIDGE_PORT"
-  printf 'KIMI_GATEWAY_PORT=%q\n' "$GATEWAY_PORT"
-  printf 'KIMI_REQUEST_TIMEOUT=%q\n' "$REQUEST_TIMEOUT"
-  printf 'KIMI_MAX_COMPLETION_TOKENS=%q\n' "$MAX_COMPLETION_TOKENS"
-  printf 'KIMI_MIN_REQUEST_INTERVAL_MS=%q\n' "$MIN_REQUEST_INTERVAL_MS"
-  printf 'KIMI_FORMULA_MAX_ROUNDS=%q\n' "$FORMULA_MAX_ROUNDS"
-} > "$RUNTIME_ENV"
-chmod 600 "$RUNTIME_ENV"
-
-python3 - "$WORKDIR" "$KIMI_MODEL" "$BRIDGE_PORT" <<'PYCONFIG'
-import json, os, re, sys, time
-workdir, model, bridge_port = sys.argv[1:4]
-home = os.path.expanduser("~")
-codex_home = os.path.join(home, ".codex")
-base_cfg = os.path.join(codex_home, "config.toml")
-profile_cfg = os.path.join(codex_home, "kimi-k3.config.toml")
-catalog = os.path.join(codex_home, "kimi-k3-models.json")
-os.makedirs(codex_home, exist_ok=True)
-
-entry = {
-    "slug": model,
-    "prefer_websockets": False,
-    "support_verbosity": False,
-    "default_verbosity": "low",
-    "apply_patch_tool_type": "freeform",
-    "web_search_tool_type": "text",
-    "input_modalities": ["text"],
-    "supports_image_detail_original": False,
-    "truncation_policy": {"mode": "tokens", "limit": 10000},
-    "supports_parallel_tool_calls": False,
-    "tool_mode": None,
-    "multi_agent_version": "v2",
-    "use_responses_lite": False,
-    "include_skills_usage_instructions": False,
-    "auto_review_model_override": None,
-    "context_window": 1048576,
-    "max_context_window": 1048576,
-    "effective_context_window_percent": 90,
-    "auto_compact_token_limit": None,
-    "comp_hash": "kimi-k3",
-    "reasoning_summary_format": "experimental",
-    "default_reasoning_summary": "none",
-    "display_name": "Kimi K3",
-    "description": "Kimi K3 through the Moonshot Chat Completions API and a local Responses adapter.",
-    "default_reasoning_level": "high",
-    "supported_reasoning_levels": [
-        {"effort": "low", "description": "Lower latency"},
-        {"effort": "high", "description": "Normal Kimi K3 thinking"},
-    ],
-    "shell_type": "shell_command",
-    "visibility": "list",
-    "minimal_client_version": "0.144.0",
-    "supported_in_api": True,
-    "availability_nux": None,
-    "upgrade": None,
-    "priority": 1,
-    "base_instructions": (
-        "You are Codex, a coding agent in the user's repository. GitHub and Fly.io "
-        "are available through ordinary process-scoped command credentials. For fresh "
-        "web information, run $HOME/.local/bin/sprite-kimi-web-search with one focused "
-        "query; it uses Moonshot's Formula web-search channel. Never use $web_search."
-    ),
-    "model_messages": None,
-    "experimental_supported_tools": [],
-    "supports_search_tool": False,
-    "default_service_tier": None,
-    "supports_reasoning_summaries": False,
-}
-with open(catalog, "w") as fh:
-    json.dump({"models": [entry]}, fh, indent=2)
-    fh.write("\n")
-os.chmod(catalog, 0o600)
-
-old = ""
-if os.path.exists(base_cfg):
-    old = open(base_cfg, errors="replace").read()
-    backup_dir = os.path.join(codex_home, "backup-sprite-codex")
-    os.makedirs(backup_dir, exist_ok=True)
-    backup = os.path.join(backup_dir, f"config.toml.{int(time.time())}.bak")
-    open(backup, "w").write(old)
-for marker in ("sprite-deepseek-v4-pro", "sprite-kimi-k3", "sprite-minimax-m3"):
-    old = re.sub(rf'(?ms)^# >>> {re.escape(marker)} >>>\n.*?^# <<< {re.escape(marker)} <<<\n?', '', old)
-q = json.dumps
-block = f'''# >>> sprite-kimi-k3 >>>
-[model_providers.sprite_kimi_k3]
-name = "Kimi K3 (Moonshot via local adapter)"
-base_url = "http://127.0.0.1:{bridge_port}/v1"
-wire_api = "responses"
-requires_openai_auth = false
-request_max_retries = 2
-stream_max_retries = 2
-stream_idle_timeout_ms = 300000
-
-[projects.{q(workdir)}]
-trust_level = "trusted"
-# <<< sprite-kimi-k3 <<<
-'''
-with open(base_cfg, "w") as fh:
-    fh.write(old.rstrip() + "\n\n" + block)
-os.chmod(base_cfg, 0o600)
-
-profile = f'''model = {q(model)}
-model_provider = "sprite_kimi_k3"
-model_catalog_json = {q(catalog)}
-model_context_window = 1048576
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-web_search = "disabled"
-
-[shell_environment_policy]
-inherit = "all"
-ignore_default_excludes = true
-exclude = ["MOONSHOT_API_KEY", "DEEPSEEK_API_KEY", "MINIMAX_API_KEY", "OPENAI_API_KEY"]
-'''
-with open(profile_cfg, "w") as fh:
-    fh.write(profile)
-os.chmod(profile_cfg, 0o600)
-PYCONFIG
-
-cat > "$HOME/.local/bin/sprite-kimi-gateway.py" <<'PYGATEWAY'
-#!/usr/bin/env python3
-import hashlib, json, os, sys, threading, time, urllib.error, urllib.parse, urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-KEY = os.environ.get("MOONSHOT_API_KEY", "")
-BASE = os.environ.get("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1").rstrip("/")
-MODEL = os.environ.get("KIMI_MODEL", "kimi-k3")
-FORMULA = os.environ.get("KIMI_FORMULA_URI", "moonshot/web-search:latest")
-TIMEOUT = int(os.environ.get("KIMI_REQUEST_TIMEOUT", "180"))
-MAXTOK = int(os.environ.get("KIMI_MAX_COMPLETION_TOKENS", "32768"))
-FORMULA_MAX_ROUNDS = int(os.environ.get("KIMI_FORMULA_MAX_ROUNDS", "10"))
-INTERVAL = int(os.environ.get("KIMI_MIN_REQUEST_INTERVAL_MS", "20000")) / 1000.0
-PORT = int(os.environ.get("KIMI_GATEWAY_PORT", "8789"))
-if not KEY:
-    raise SystemExit("MOONSHOT_API_KEY is required")
-
-upstream_lock = threading.Lock()
-last_start = [0.0]
-formula_tools = [None]
-
-def paced_start():
-    wait = INTERVAL - (time.monotonic() - last_start[0])
-    if wait > 0:
-        time.sleep(wait)
-    last_start[0] = time.monotonic()
-
-def upstream_json(method, path, body=None):
-    data = json.dumps(body, separators=(",", ":")).encode() if body is not None else None
-    req = urllib.request.Request(BASE + path, data=data, method=method)
-    req.add_header("Authorization", "Bearer " + KEY)
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    with upstream_lock:
-        paced_start()
-        try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-                status = response.status
-                raw = response.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-            raw = exc.read().decode("utf-8", "replace")
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        parsed = {"error": {"message": raw[:1000]}}
-    if status < 200 or status >= 300:
-        message = parsed.get("error", {}).get("message", parsed) if isinstance(parsed, dict) else parsed
-        raise RuntimeError(f"Moonshot HTTP {status}: {message}")
-    return parsed
-
-def get_formula_tools():
-    if formula_tools[0] is not None:
-        return formula_tools[0]
-    encoded = urllib.parse.quote(FORMULA, safe="")
-    body = upstream_json("GET", f"/formulas/{encoded}/tools")
-    tools = body.get("tools") if isinstance(body, dict) else body
-    if isinstance(tools, dict):
-        tools = tools.get("tools")
-    if not isinstance(tools, list) or not tools:
-        raise RuntimeError("Moonshot Formula returned no web-search tools")
-    formula_tools[0] = tools
-    return tools
-
-def usage_totals(usages):
-    totals = {}
-    for usage in usages:
-        if not isinstance(usage, dict):
-            continue
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
-            value = usage.get(key)
-            if isinstance(value, int) and not isinstance(value, bool):
-                totals[key] = totals.get(key, 0) + value
-    return totals
-
-def formula_search(query, max_rounds=FORMULA_MAX_ROUNDS):
-    tools = get_formula_tools()
-    messages = [{"role": "user", "content": query + " Use the web_search tool and synthesize a sourced answer."}]
-    encoded = urllib.parse.quote(FORMULA, safe="")
-    search_calls = 0
-    search_rounds = 0
-    usages = []
-
-    for round_number in range(1, max_rounds + 1):
-        response = upstream_json("POST", "/chat/completions",
-                                 {"model": MODEL, "messages": messages, "tools": tools,
-                                  "max_completion_tokens": MAXTOK})
-        choices = response.get("choices") or []
-        if not choices or not isinstance(choices[0], dict):
-            raise RuntimeError("Kimi Formula returned no completion choice")
-        choice = choices[0]
-        message = choice.get("message") or {}
-        if not isinstance(message, dict):
-            raise RuntimeError("Kimi Formula returned an invalid assistant message")
-        finish_reason = choice.get("finish_reason")
-        usages.append(response.get("usage"))
-        calls = message.get("tool_calls") or []
-
-        if calls:
-            if not isinstance(calls, list):
-                raise RuntimeError("Kimi Formula returned invalid tool_calls")
-            if round_number == max_rounds:
-                raise RuntimeError(
-                    "Kimi Formula reached max_rounds=%d while requesting more web searches" % max_rounds)
-
-            # K3 Preserved Thinking requires the complete assistant message,
-            # including reasoning_content and every tool call, in the next turn.
-            messages.append(message)
-            search_rounds += 1
-            sys.stderr.write("Formula round %d: executing %d web_search call(s)\n" %
-                             (round_number, len(calls)))
-
-            for call in calls:
-                if not isinstance(call, dict) or not call.get("id"):
-                    raise RuntimeError("Formula model returned a tool call without an id")
-                fn = call.get("function") or {}
-                if fn.get("name") != "web_search":
-                    raise RuntimeError("Formula model requested unexpected tool: " + str(fn.get("name")))
-                arguments = fn.get("arguments")
-                if isinstance(arguments, dict):
-                    arguments = json.dumps(arguments, separators=(",", ":"))
-                if not isinstance(arguments, str):
-                    raise RuntimeError("Formula web_search arguments must be JSON")
-                try:
-                    parsed_arguments = json.loads(arguments)
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError("Formula web_search arguments are invalid JSON: %s" % exc)
-                if not isinstance(parsed_arguments, dict):
-                    raise RuntimeError("Formula web_search arguments must decode to an object")
-
-                fiber = upstream_json("POST", f"/formulas/{encoded}/fibers",
-                                      {"name": "web_search", "arguments": arguments})
-                context = fiber.get("context") or {}
-                output = context.get("output") or context.get("encrypted_output") or ""
-                if fiber.get("status") != "succeeded" or not output:
-                    raise RuntimeError("Formula fiber did not return usable output")
-                messages.append({"role": "tool", "tool_call_id": call["id"],
-                                 "name": "web_search", "content": output})
-                search_calls += 1
-            continue
-
-        if finish_reason == "tool_calls":
-            raise RuntimeError("Kimi Formula finished with tool_calls but supplied no tool calls")
-        text = message.get("content") or ""
-        if not isinstance(text, str) or not text.strip():
-            raise RuntimeError("Kimi Formula returned no final content (finish_reason=%s)" % finish_reason)
-        if finish_reason != "stop":
-            raise RuntimeError("Kimi Formula did not complete its answer (finish_reason=%s)" % finish_reason)
-        return {"content": text, "search_calls": search_calls,
-                "search_rounds": search_rounds, "rounds": round_number,
-                "finish_reason": finish_reason, "usage": response.get("usage"),
-                "usage_total": usage_totals(usages)}
-
-    raise RuntimeError("Kimi Formula exhausted its search loop without a final answer")
-
-class Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.0"
-    server_version = "sprite-kimi-gateway/1"
-
-    def log_message(self, fmt, *args):
-        sys.stderr.write("%s %s\n" % (self.log_date_time_string(), fmt % args))
-
-    def send_json(self, status, obj):
-        data = json.dumps(obj, ensure_ascii=False).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self):
-        if self.path == "/health":
-            self.send_json(200, {"ok": True, "model": MODEL, "formula": FORMULA, "base": BASE,
-                                 "formula_max_rounds": FORMULA_MAX_ROUNDS,
-                                 "key_fingerprint": hashlib.sha256(KEY.encode()).hexdigest()[:16]})
-        elif self.path in ("/", "/help"):
-            self.send_json(200, {
-                "service": "sprite-kimi-gateway",
-                "formula_search": {
-                    "method": "POST", "path": "/formula-search",
-                    "body": {"query": "required string", "max_rounds": "optional integer, 2..%d" % FORMULA_MAX_ROUNDS},
-                    "timeout_note": "Tier pacing and multi-round searches can take several minutes"
-                },
-                "health": {"method": "GET", "path": "/health"}
-            })
-        else:
-            self.forward()
-
-    def do_POST(self):
-        if self.path == "/formula-search":
-            try:
-                length = int(self.headers.get("content-length", "0"))
-                payload = json.loads(self.rfile.read(length) or b"{}")
-                query = str(payload.get("query") or "").strip()
-                if not query:
-                    raise ValueError("query is required")
-                requested_rounds = payload.get("max_rounds", payload.get("maxIterations", FORMULA_MAX_ROUNDS))
-                if isinstance(requested_rounds, bool):
-                    raise ValueError("max_rounds must be an integer")
-                try:
-                    requested_rounds = int(requested_rounds)
-                except (TypeError, ValueError):
-                    raise ValueError("max_rounds must be an integer")
-                if requested_rounds < 2 or requested_rounds > FORMULA_MAX_ROUNDS:
-                    raise ValueError("max_rounds must be 2..%d" % FORMULA_MAX_ROUNDS)
-                self.send_json(200, formula_search(query, requested_rounds))
-            except Exception as exc:
-                self.send_json(502, {"error": {"message": str(exc)}})
-        else:
-            self.forward()
-
-    def forward(self):
-        if not self.path.startswith("/v1/"):
-            self.send_json(404, {"error": {"message": "not found"}})
-            return
-        try:
-            length = int(self.headers.get("content-length", "0"))
-            data = self.rfile.read(length) if length else None
-            if self.path.rstrip("/") == "/v1/chat/completions" and data:
-                payload = json.loads(data)
-                requested = payload.pop("max_tokens", 0) or payload.get("max_completion_tokens", 0) or 0
-                payload["max_completion_tokens"] = max(int(requested), MAXTOK)
-                data = json.dumps(payload, separators=(",", ":")).encode()
-            # CodeProxy addresses this gateway as an OpenAI-style `/v1` root,
-            # while BASE already includes Moonshot's `/v1` API prefix.
-            upstream_path = self.path[3:] if self.path.startswith("/v1/") else self.path
-            req = urllib.request.Request(BASE + upstream_path, data=data, method=self.command)
-            req.add_header("Authorization", "Bearer " + KEY)
-            for name in ("Content-Type", "Accept"):
-                value = self.headers.get(name)
-                if value:
-                    req.add_header(name, value)
-            with upstream_lock:
-                paced_start()
-                try:
-                    response = urllib.request.urlopen(req, timeout=TIMEOUT)
-                except urllib.error.HTTPError as exc:
-                    response = exc
-                self.send_response(response.status)
-                content_type = response.headers.get("content-type")
-                if content_type:
-                    self.send_header("Content-Type", content_type)
-                self.send_header("Connection", "close")
-                self.end_headers()
-                while True:
-                    chunk = response.read(65536)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-                response.close()
-        except Exception as exc:
-            if not self.wfile.closed:
-                try:
-                    self.send_json(502, {"error": {"message": str(exc)}})
-                except Exception:
-                    pass
-
-ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
-PYGATEWAY
-chmod 700 "$HOME/.local/bin/sprite-kimi-gateway.py"
-
-cat > "$HOME/.local/bin/sprite-kimi-web-search" <<'PYSEARCH'
-#!/usr/bin/env python3
-import json, os, sys, urllib.error, urllib.request
-query = " ".join(sys.argv[1:]).strip()
-if not query and not sys.stdin.isatty():
-    query = sys.stdin.read().strip()
-if not query:
-    raise SystemExit("usage: sprite-kimi-web-search <focused query>")
-port = os.environ.get("KIMI_GATEWAY_PORT", "8789")
-request = urllib.request.Request(
-    "http://127.0.0.1:%s/formula-search" % port,
-    data=json.dumps({"query": query}).encode(), method="POST",
-    headers={"content-type": "application/json"})
-try:
-    with urllib.request.urlopen(request, timeout=900) as response:
-        body = json.load(response)
-except urllib.error.HTTPError as exc:
-    try:
-        body = json.load(exc)
-        message = body.get("error", {}).get("message", body)
-    except Exception:
-        message = exc.read().decode("utf-8", "replace")
-    raise SystemExit("Kimi Formula search failed: %s" % message)
-print(body.get("content") or "")
-PYSEARCH
-chmod 700 "$HOME/.local/bin/sprite-kimi-web-search"
-
-cat > "$HOME/.local/bin/sprite-codex-kimi-k3" <<'KIMI_LAUNCHER'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-export PATH="$HOME/.local/bin:$HOME/.fly/bin:$PATH"
-RUNTIME_ENV="$HOME/.config/sprite-codex/kimi-k3-runtime.env"
-[[ -f $RUNTIME_ENV ]] || { echo "missing Kimi runtime configuration: $RUNTIME_ENV" >&2; exit 74; }
-# shellcheck disable=SC1090
-source "$RUNTIME_ENV"
-: "${MOONSHOT_API_KEY:?MOONSHOT_API_KEY is required}"
-export KIMI_MODEL KIMI_GATEWAY_PORT KIMI_REQUEST_TIMEOUT
-cd "$KIMI_WORKDIR"
-
-GATEWAY="$HOME/.local/bin/sprite-kimi-gateway.py"
-GATEWAY_PIDFILE="$HOME/.config/sprite-codex/kimi-gateway.pid"
-GATEWAY_LOG="$HOME/.config/sprite-codex/kimi-gateway.log"
-BRIDGE_PIDFILE="$HOME/.config/sprite-codex/kimi-codeproxy.pid"
-BRIDGE_LOG="$HOME/.config/sprite-codex/kimi-codeproxy.log"
-started_gateway=0
-started_bridge=0
-
-tcp_ready() {
-  python3 - "$1" <<'PYREADY'
-import socket,sys
-s=socket.socket(); s.settimeout(1)
-try: s.connect(("127.0.0.1",int(sys.argv[1])))
-except OSError: raise SystemExit(1)
-finally: s.close()
-PYREADY
-}
-gateway_ready() {
-  local health
-  health=$(curl -fsS --max-time 3 "http://127.0.0.1:$KIMI_GATEWAY_PORT/health" 2>/dev/null || true)
-  python3 - "$health" "$KIMI_MODEL" "$KIMI_FORMULA_URI" "$MOONSHOT_BASE_URL" <<'PYHEALTH'
-import hashlib,json,os,sys
-try: d=json.loads(sys.argv[1])
-except Exception: raise SystemExit(1)
-fingerprint=hashlib.sha256(os.environ.get("MOONSHOT_API_KEY","").encode()).hexdigest()[:16]
-raise SystemExit(0 if d.get("ok") and d.get("model")==sys.argv[2] and d.get("formula")==sys.argv[3] and d.get("base").rstrip("/")==sys.argv[4].rstrip("/") and d.get("key_fingerprint")==fingerprint else 1)
-PYHEALTH
-}
-bridge_ready() {
-  local pid=""
-  [[ -f $BRIDGE_PIDFILE ]] && pid=$(cat "$BRIDGE_PIDFILE" 2>/dev/null || true)
-  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null \
-    && tcp_ready "$KIMI_BRIDGE_PORT" \
-    && grep -q 'Proxy listening on http://127.0.0.1:'"$KIMI_BRIDGE_PORT" "$BRIDGE_LOG" 2>/dev/null \
-    && grep -q 'Upstream format: openai-chat' "$BRIDGE_LOG" 2>/dev/null \
-    && grep -q 'Upstream URL: http://127.0.0.1:'"$KIMI_GATEWAY_PORT"'/v1' "$BRIDGE_LOG" 2>/dev/null
-}
-kill_managed() {
-  local file=$1 pid=""
-  [[ -f $file ]] && pid=$(cat "$file" 2>/dev/null || true)
-  if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
-    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-    sleep 1
-  fi
-  rm -f "$file"
-}
-cleanup_started_services() {
-  if [[ $started_bridge == 1 ]]; then started_bridge=0; kill_managed "$BRIDGE_PIDFILE"; fi
-  if [[ $started_gateway == 1 ]]; then started_gateway=0; kill_managed "$GATEWAY_PIDFILE"; fi
-}
-trap cleanup_started_services EXIT
-trap 'cleanup_started_services; exit 0' INT TERM
-
-if ! gateway_ready; then
-  kill_managed "$BRIDGE_PIDFILE"
-  kill_managed "$GATEWAY_PIDFILE"
-  tcp_ready "$KIMI_GATEWAY_PORT" && { echo "Kimi gateway port $KIMI_GATEWAY_PORT belongs to an incompatible process" >&2; exit 75; }
-  setsid env \
-    MOONSHOT_API_KEY="$MOONSHOT_API_KEY" MOONSHOT_BASE_URL="$MOONSHOT_BASE_URL" \
-    KIMI_MODEL="$KIMI_MODEL" KIMI_FORMULA_URI="$KIMI_FORMULA_URI" \
-    KIMI_GATEWAY_PORT="$KIMI_GATEWAY_PORT" KIMI_REQUEST_TIMEOUT="$KIMI_REQUEST_TIMEOUT" \
-    KIMI_MAX_COMPLETION_TOKENS="$KIMI_MAX_COMPLETION_TOKENS" \
-    KIMI_FORMULA_MAX_ROUNDS="$KIMI_FORMULA_MAX_ROUNDS" \
-    KIMI_MIN_REQUEST_INTERVAL_MS="$KIMI_MIN_REQUEST_INTERVAL_MS" \
-    python3 "$GATEWAY" >"$GATEWAY_LOG" 2>&1 </dev/null &
-  gateway_pid=$!
-  printf '%s\n' "$gateway_pid" > "$GATEWAY_PIDFILE"
-  started_gateway=1
-  for _ in $(seq 1 30); do gateway_ready && break; kill -0 "$gateway_pid" 2>/dev/null || break; sleep 1; done
-  gateway_ready || { echo "Kimi gateway failed to start; log follows:" >&2; tail -30 "$GATEWAY_LOG" >&2 || true; exit 76; }
-fi
-
-if ! bridge_ready; then
-  kill_managed "$BRIDGE_PIDFILE"
-  tcp_ready "$KIMI_BRIDGE_PORT" && { echo "Kimi adapter port $KIMI_BRIDGE_PORT belongs to an incompatible process" >&2; exit 77; }
-  bridge_cfg=$(mktemp "$HOME/.config/sprite-codex/kimi-codeproxy.XXXXXX.json")
-  python3 - "$bridge_cfg" <<'PYPROXYCFG'
-import json,os,sys
-cfg={
-  "version":"1.0", "currentUpstream":"kimi-k3",
-  "reasoningEffort":"high", "timeoutMs":int(os.environ.get("KIMI_REQUEST_TIMEOUT","180"))*1000,
-  "upstreams":{"kimi-k3":{
-    "baseUrl":"http://127.0.0.1:%s/v1" % os.environ["KIMI_GATEWAY_PORT"],
-    "format":"openai-chat", "apiKey":"local-kimi-gateway", "model":os.environ["KIMI_MODEL"]
-  }}
-}
-with open(sys.argv[1],"w") as f: json.dump(cfg,f)
-os.chmod(sys.argv[1],0o600)
-PYPROXYCFG
-  setsid npx -y @codeproxy/cli@0.2.9 --config "$bridge_cfg" \
-    --host 127.0.0.1 --port "$KIMI_BRIDGE_PORT" >"$BRIDGE_LOG" 2>&1 </dev/null &
-  bridge_pid=$!
-  printf '%s\n' "$bridge_pid" > "$BRIDGE_PIDFILE"
-  started_bridge=1
-  for _ in $(seq 1 60); do bridge_ready && break; kill -0 "$bridge_pid" 2>/dev/null || break; sleep 2; done
-  rm -f "$bridge_cfg"
-  bridge_ready || { echo "Kimi Responses adapter failed to start; log follows:" >&2; tail -30 "$BRIDGE_LOG" >&2 || true; exit 78; }
-fi
-
-echo "       Kimi gateway: 127.0.0.1:$KIMI_GATEWAY_PORT (tier pacing + Formula search)" >&2
-echo "       Responses adapter: 127.0.0.1:$KIMI_BRIDGE_PORT -> $KIMI_MODEL" >&2
-shell_excludes='["OPENAI_API_KEY"'
-if [[ ${CODEX_DEEPSEEK_ACCESS:-0} == 1 ]]; then
-  : "${DEEPSEEK_API_KEY:?CODEX_DEEPSEEK_ACCESS=1 requires DEEPSEEK_API_KEY}"
-else
-  shell_excludes+=',"DEEPSEEK_API_KEY"'
-fi
-if [[ ${CODEX_MOONSHOT_ACCESS:-0} == 1 ]]; then
-  : "${MOONSHOT_API_KEY:?CODEX_MOONSHOT_ACCESS=1 requires MOONSHOT_API_KEY}"
-else
-  unset MOONSHOT_API_KEY
-  shell_excludes+=',"MOONSHOT_API_KEY"'
-fi
-if [[ ${CODEX_MINIMAX_ACCESS:-0} == 1 ]]; then
-  : "${MINIMAX_API_KEY:?CODEX_MINIMAX_ACCESS=1 requires MINIMAX_API_KEY}"
-else
-  shell_excludes+=',"MINIMAX_API_KEY"'
-fi
-shell_excludes+=']'
-export KIMI_GATEWAY_PORT
-if "$HOME/.local/bin/sprite-codex-cli" \
-    --profile kimi-k3 \
-    -c shell_environment_policy.inherit=all \
-    -c shell_environment_policy.ignore_default_excludes=true \
-    -c "shell_environment_policy.exclude=$shell_excludes" \
-    -c 'developer_instructions="This Sprite authenticates GitHub and Fly.io through process-scoped environment credentials and normal git, gh, and fly commands. Never reveal token values. For current web information, run $HOME/.local/bin/sprite-kimi-web-search with one focused query; it uses the working moonshot/web-search:latest Formula channel. Never request or declare the broken builtin_function $web_search channel. If DEEPSEEK_API_KEY, MOONSHOT_API_KEY, or MINIMAX_API_KEY is present in a tool environment, it is an experiment credential intended only for authenticated API calls; never print, echo, log, dump, or otherwise reveal it."' \
-    --dangerously-bypass-approvals-and-sandbox "$@"; then
-  codex_rc=0
-else
-  codex_rc=$?
-fi
-exit "$codex_rc"
-KIMI_LAUNCHER
-chmod 700 "$HOME/.local/bin/sprite-codex-kimi-k3"
-
-printf '       model=%s\n' "$KIMI_MODEL"
-printf '       provider=Kimi K3 via @codeproxy/cli Responses adapter\n'
-printf '       Moonshot base=%s\n' "$MOONSHOT_BASE_URL"
-printf '       Formula=%s (helper: %s)\n' "$KIMI_FORMULA_URI" "$HOME/.local/bin/sprite-kimi-web-search"
-printf '       pacing=%sms between Moonshot request starts\n' "$MIN_REQUEST_INTERVAL_MS"
-printf '       launcher=%s\n' "$HOME/.local/bin/sprite-codex-kimi-k3"
-KIMI_SETUP
-  printf '%s' "$f"
+if __name__ == "__main__":
+    main()
+NATIVE_CONFIG_PY
 }
 
 make_openai_launcher() {
@@ -3630,7 +2907,7 @@ cat > "$HOME/.local/bin/sprite-codex-openai" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export PATH="\$HOME/.local/bin:\$HOME/.fly/bin:\$PATH"
-shell_excludes='["OPENAI_API_KEY"'
+shell_excludes='["OPENAI_API_KEY","KIMI_API_KEY"'
 if [[ \${CODEX_DEEPSEEK_ACCESS:-0} == 1 ]]; then
   : "\${DEEPSEEK_API_KEY:?CODEX_DEEPSEEK_ACCESS=1 requires DEEPSEEK_API_KEY}"
 else
@@ -3914,9 +3191,9 @@ cd "$WORKDIR"
 CODEX_PROVIDER="$AGENT_PROVIDER"
 case "$CODEX_PROVIDER" in
   openai) CODEX_LAUNCHER="$HOME/.local/bin/sprite-codex-openai" ;;
-  deepseek) CODEX_LAUNCHER="$HOME/.local/bin/sprite-codex-deepseek-v4-pro" ;;
-  kimi) CODEX_LAUNCHER="$HOME/.local/bin/sprite-codex-kimi-k3" ;;
-  minimax) CODEX_LAUNCHER="$HOME/.local/bin/sprite-codex-minimax-m3" ;;
+  deepseek) CODEX_LAUNCHER="$HOME/.local/bin/sprite-codex-deepseek" ;;
+  kimi) CODEX_LAUNCHER="$HOME/.local/bin/sprite-codex-kimi" ;;
+  minimax) CODEX_LAUNCHER="$HOME/.local/bin/sprite-codex-minimax" ;;
 esac
 if [[ $AGENT_KIND == codex ]]; then
   echo "       Codex provider: $CODEX_PROVIDER"
@@ -4653,11 +3930,502 @@ PY
   note "approx Tasks-hold deadline (UTC):   $(date -u -d "@$_run_deadline_preview" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || date -u -r "$_run_deadline_preview" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || echo "$_run_deadline_preview")"
 }
 
+make_model_test_helper() {
+  MODEL_TEST_HELPER=$(mktemp)
+  cleanup_files+=("$MODEL_TEST_HELPER")
+  cat >"$MODEL_TEST_HELPER" <<'MODEL_TEST_PY'
+#!/usr/bin/env python3
+"""Bounded native-Responses smoke tests. No SDK, shell tools or generated code.
+
+Defaults are injected by the Bash launcher, which is the single source of truth.
+All three providers run independently. A successful HTTP status alone is not PASS.
+"""
+import contextlib
+import datetime
+import getpass
+import json
+import os
+import re
+import secrets
+import signal
+import socket
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+SPECS = (
+    ("deepseek", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY", "DEEPSEEK_REASONING_EFFORT"),
+    ("minimax", "MINIMAX_MODEL", "MINIMAX_BASE_URL", "MINIMAX_API_KEY", "MINIMAX_REASONING_EFFORT"),
+    ("moonshot", "KIMI_MODEL", "MOONSHOT_BASE_URL", "MOONSHOT_API_KEY", "KIMI_REASONING_EFFORT"),
+)
+MAX_BYTES = 8 * 1024 * 1024
+MAX_LINE = 1024 * 1024
+
+
+class ProbeError(Exception):
+    pass
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward a provider credential to a redirect target.
+        return None
+
+
+def positive_int(env, name, default, minimum=1, maximum=3600):
+    value = env.get(name, str(default))
+    if not re.fullmatch(r"[0-9]+", value):
+        raise ProbeError(name + " must be an integer")
+    number = int(value)
+    if not minimum <= number <= maximum:
+        raise ProbeError("%s must be %s..%s" % (name, minimum, maximum))
+    return number
+
+
+def validate_base(base, allow_local=False):
+    try:
+        url = urllib.parse.urlsplit(base)
+        port = url.port
+    except ValueError:
+        raise ProbeError("invalid API base URL")
+    local = allow_local and url.scheme == "http" and url.hostname in ("localhost", "127.0.0.1", "::1")
+    if not ((url.scheme == "https" or local) and url.hostname):
+        raise ProbeError("API base URLs must use HTTPS (HTTP is allowed only for explicit localhost tests)")
+    if url.username is not None or url.password is not None or url.query or url.fragment:
+        raise ProbeError("API base URL must not contain credentials, a query or a fragment")
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in base) or "\\" in base:
+        raise ProbeError("invalid characters in API base URL")
+    if port is not None and not 1 <= port <= 65535:
+        raise ProbeError("invalid API port")
+    return base.rstrip("/")
+
+
+def sanitizer(keys):
+    keys = sorted((key for key in keys if key), key=len, reverse=True)
+
+    def clean(value):
+        text = str(value)
+        for key in keys:
+            text = text.replace(key, "[REDACTED]")
+        text = re.sub(r"(?i)bearer\s+[^\s\"']+", "Bearer [REDACTED]", text)
+        text = re.sub(r"(?i)((?:api[_-]?key|token|password)\s*[=:]\s*)[^\s,;]+", r"\1[REDACTED]", text)
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+        text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+        return text[:360]
+
+    return clean
+
+
+@contextlib.contextmanager
+def deadline(seconds):
+    # A socket timeout alone is only an idle timeout. SIGALRM also bounds a
+    # slowly trickling stream; this tool runs on Unix Bash/Python on host/Sprite.
+    if not hasattr(signal, "setitimer"):
+        raise ProbeError("hard timeouts require Unix Python (Linux/macOS/WSL)")
+
+    def expired(signum, frame):
+        raise TimeoutError("request exceeded its wall-clock deadline")
+
+    old_handler = signal.signal(signal.SIGALRM, expired)
+    old_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+        if old_timer[0]:
+            signal.setitimer(signal.ITIMER_REAL, *old_timer)
+
+
+def output_text(body):
+    pieces = []
+    for item in body.get("output", []):
+        if isinstance(item, dict) and item.get("type") == "message" and item.get("role", "assistant") == "assistant":
+            for part in item.get("content", []):
+                if isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                    pieces.append(part["text"])
+    if pieces:
+        return "".join(pieces).strip()
+    text = body.get("output_text")
+    return text.strip() if isinstance(text, str) else ""
+
+
+def checked_response(body):
+    if not isinstance(body, dict) or body.get("object") != "response":
+        raise ProbeError("HTTP succeeded but body is not a Responses API response object")
+    if body.get("error"):
+        raise ProbeError("API response contains an error: " + str(body["error"]))
+    if body.get("status") != "completed":
+        raise ProbeError("response did not complete: status=%s details=%s" % (body.get("status"), body.get("incomplete_details")))
+    if not isinstance(body.get("output"), list):
+        raise ProbeError("response output is not an array")
+    if not isinstance(body.get("model"), str) or not body["model"]:
+        raise ProbeError("response does not identify the model that served it")
+    return body
+
+
+def stream_response(response):
+    if "text/event-stream" not in response.headers.get("Content-Type", "").lower():
+        raise ProbeError("stream request did not return text/event-stream")
+    event_name, data_lines, deltas = "", [], []
+    received, count = 0, 0
+    while True:
+        line = response.readline(MAX_LINE + 1)
+        received += len(line)
+        if len(line) > MAX_LINE or received > MAX_BYTES:
+            raise ProbeError("stream exceeded safety size limit")
+        if not line:
+            raise ProbeError("stream ended without a terminal response.completed event")
+        text = line.decode("utf-8", "strict").rstrip("\r\n")
+        if text == "":
+            if not data_lines:
+                event_name = ""
+                continue
+            raw = "\n".join(data_lines)
+            data_lines = []
+            if raw == "[DONE]":
+                raise ProbeError("stream ended with [DONE] but no completed Responses object")
+            event = json.loads(raw)
+            if not isinstance(event, dict):
+                raise ProbeError("invalid SSE event")
+            kind = event.get("type") or event_name
+            event_name = ""
+            count += 1
+            if kind == "response.output_text.delta":
+                delta = event.get("delta")
+                if not isinstance(delta, str):
+                    raise ProbeError("invalid output_text delta")
+                deltas.append(delta)
+            elif kind in ("response.failed", "response.incomplete", "error"):
+                raise ProbeError("stream failure: " + str(event.get("error") or kind))
+            elif kind == "response.completed":
+                body = checked_response(event.get("response"))
+                if not deltas:
+                    raise ProbeError("completed stream contained no output_text deltas")
+                if "".join(deltas).strip() != output_text(body):
+                    raise ProbeError("streamed text differs from the completed response")
+                return body, count
+        elif text.startswith("data:"):
+            data_lines.append(text[5:].lstrip(" "))
+        elif text.startswith("event:"):
+            event_name = text[6:].strip()
+        # Comments/keepalives, id and retry fields are intentionally ignored.
+
+
+class Client:
+    def __init__(self, provider, env, key, clean):
+        self.provider, self.key, self.clean = provider, key, clean
+        spec = next(row for row in SPECS if row[0] == provider)
+        self.model = env[spec[1]]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", self.model):
+            raise ProbeError("invalid " + spec[1])
+        self.base = validate_base(env[spec[2]], env.get("MODEL_TEST_ALLOW_LOCALHOST") == "1")
+        self.effort = env[spec[4]]
+        if self.effort not in ("low", "high", "max") or (provider == "minimax" and self.effort == "max"):
+            raise ProbeError("unsupported reasoning effort")
+        self.timeout = positive_int(env, "MODEL_TEST_TIMEOUT", 180)
+        self.max_tokens = positive_int(env, "MODEL_TEST_MAX_TOKENS", 4096, 256, 131072)
+        self.retries = positive_int(env, "MODEL_TEST_RETRIES", 0, 0, 3)
+        self.interval = positive_int(env, "KIMI_MIN_REQUEST_INTERVAL_MS", 20000, 0, 60000) / 1000 if provider == "moonshot" else 0
+        self.last_start = 0.0
+        self.last_status = None
+        self.usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        self.models = set()
+        self.requests = 0
+        self.opener = urllib.request.build_opener(NoRedirect())
+
+    def record(self, body):
+        if not isinstance(body, dict):
+            return
+        if isinstance(body.get("model"), str):
+            self.models.add(self.clean(body["model"]))
+        usage = body.get("usage")
+        if isinstance(usage, dict):
+            for key in self.usage:
+                value = usage.get(key)
+                if type(value) is int and value >= 0:
+                    self.usage[key] += value
+
+    def request(self, items, tools=None, stream=False):
+        body = {"model": self.model, "input": items, "stream": stream,
+                "reasoning": {"effort": self.effort}, "max_output_tokens": self.max_tokens,
+                "store": False}
+        if tools is not None:
+            body.update(tools=tools, tool_choice="auto")
+        data = json.dumps(body).encode("utf-8")
+        self.last_status = None
+        for attempt in range(self.retries + 1):
+            time.sleep(max(0, self.interval - (time.monotonic() - self.last_start)))
+            self.last_start = time.monotonic()
+            request = urllib.request.Request(self.base + "/responses", data=data, method="POST", headers={
+                "Authorization": "Bearer " + self.key, "Content-Type": "application/json",
+                "Accept": "text/event-stream" if stream else "application/json",
+                "User-Agent": "sprite-codex-model-test/45"})
+            self.requests += 1
+            try:
+                with deadline(self.timeout):
+                    with self.opener.open(request, timeout=self.timeout) as response:
+                        self.last_status = response.status
+                        if stream:
+                            result, _ = stream_response(response)
+                        else:
+                            raw = response.read(MAX_BYTES + 1)
+                            if len(raw) > MAX_BYTES:
+                                raise ProbeError("response exceeded safety size limit")
+                            result = json.loads(raw)
+                        self.record(result)
+                        return checked_response(result)
+            except urllib.error.HTTPError as exc:
+                self.last_status = exc.code
+                # Even error bodies can trickle forever; read them under a deadline.
+                with contextlib.closing(exc):
+                    try:
+                        with deadline(min(5, self.timeout)):
+                            error = json.loads(exc.read(16384))
+                        detail = error.get("error", error)
+                        if isinstance(detail, dict):
+                            detail = detail.get("message") or detail.get("code") or "API rejected request"
+                    except (ValueError, TimeoutError, OSError, AttributeError):
+                        detail = "API returned a non-JSON or unreadable error body"
+                if exc.code in (429, 502, 503, 504) and attempt < self.retries:
+                    hint = exc.headers.get("Retry-After", "")
+                    delay = min(60, max(1, int(hint))) if hint.isdigit() else min(60, 2 ** (attempt + 1))
+                    time.sleep(delay)
+                    continue
+                category = {400: "request/model compatibility", 401: "authentication", 402: "balance/quota",
+                            403: "permission/model access", 404: "model or endpoint unavailable", 429: "rate limit"}.get(exc.code, "API/transport error")
+                raise ProbeError("HTTP %s (%s): %s" % (exc.code, category, self.clean(detail))) from None
+        raise ProbeError("request retry budget exhausted")
+
+
+def probe(client, name):
+    if name in ("completion", "streaming"):
+        marker = "SPRITE_MODEL_OK" if name == "completion" else "SPRITE_STREAM_OK"
+        result = client.request([{"role": "user", "content": "Reply with exactly " + marker + ". No punctuation, markdown or explanation."}], stream=name == "streaming")
+        if output_text(result) != marker:
+            raise ProbeError("completed response did not return the exact test marker (not a successful smoke test)")
+        return "completed response verified" if name == "completion" else "text deltas and completed SSE event verified"
+    tool = {"type": "function", "name": "sprite_probe", "description": "Fetch a private one-time connectivity verification value.",
+            "parameters": {"type": "object", "properties": {"label": {"type": "string", "enum": ["connectivity"]}},
+                           "required": ["label"], "additionalProperties": False}}
+    items = [{"role": "user", "content": "Call sprite_probe with label connectivity. You cannot know its value without calling it. After receiving the tool result, reply with exactly the value field, with no other text. Call the tool once."}]
+    result = client.request(items, tools=[tool])
+    calls = [item for item in result["output"] if isinstance(item, dict) and item.get("type") == "function_call"]
+    if len(calls) != 1:
+        raise ProbeError("expected exactly one function call; received %s" % len(calls))
+    call = calls[0]
+    if call.get("name") != "sprite_probe" or not isinstance(call.get("call_id"), str) or not call["call_id"]:
+        raise ProbeError("unexpected tool name or missing call_id")
+    arguments = call.get("arguments")
+    if not isinstance(arguments, str) or json.loads(arguments) != {"label": "connectivity"}:
+        raise ProbeError("function arguments failed schema/value validation")
+    marker = "TOOL_OK_" + secrets.token_hex(12)
+    # Preserve every returned output item, including reasoning/encrypted_content.
+    # All providers support stateless replay; do not rely on previous_response_id.
+    items += result["output"]
+    items.append({"type": "function_call_output", "call_id": call["call_id"], "output": json.dumps({"value": marker})})
+    final = client.request(items, tools=[tool])
+    if any(item.get("type") in ("function_call", "custom_tool_call") for item in final["output"] if isinstance(item, dict)):
+        raise ProbeError("model requested another tool instead of completing the round trip")
+    if output_text(final) != marker:
+        raise ProbeError("model did not use the one-time value supplied only in the tool result")
+    return "function arguments, call_id, reasoning replay and tool-result round trip verified"
+
+
+def write_report(path, report):
+    path = os.path.abspath(os.path.expanduser(path))
+    parent = os.path.dirname(path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".model-tests-", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(report, out, indent=2)
+            out.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def main():
+    env = os.environ.copy()
+    if env.get("MODEL_TEST_PROMPT", "0") == "1":
+        for _, _, _, name, _ in SPECS:
+            if not env.get(name):
+                try:
+                    env[name] = getpass.getpass(name + " (hidden; Enter marks it missing): ")
+                except EOFError:
+                    env[name] = ""
+    clean = sanitizer([env.get(spec[3], "") for spec in SPECS])
+    report = {"schema_version": 1, "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "defaults_verified_on": "2026-09-18", "scope": "native Responses API; not a Codex CLI or coding-quality benchmark", "providers": []}
+    print("Testing all three providers over their native Responses APIs.", flush=True)
+    print("Live API calls may incur charges. Keys and raw model/reasoning output are not logged.", flush=True)
+    all_ok = True
+    for provider, model_var, base_var, key_var, _ in SPECS:
+        row = {"provider": provider, "model": clean(env.get(model_var, "")), "tests": [], "passed": False}
+        report["providers"].append(row)
+        print("\n%s | %s" % (provider.upper(), row["model"]), flush=True)
+        try:
+            key = env.get(key_var, "")
+            if not key.strip():
+                raise ProbeError(key_var + " is missing")
+            if any(c in key for c in ("\r", "\n", "\x00")):
+                raise ProbeError(key_var + " contains invalid header characters")
+            client = Client(provider, env, key, clean)
+            row["endpoint"] = client.base + "/responses"
+        except (ProbeError, KeyError) as exc:
+            row["error"] = clean(exc)
+            row["tests"] = [{"name": name, "status": "FAIL", "detail": clean(exc)} for name in ("completion", "streaming", "tools")]
+            print("  FAIL  " + row["error"], flush=True)
+            all_ok = False
+            continue
+        for name in ("completion", "streaming", "tools"):
+            started = time.monotonic()
+            print("  RUN   " + name, flush=True)
+            client.last_status = None
+            try:
+                detail = probe(client, name)
+                result = {"name": name, "status": "PASS", "detail": detail}
+            except (ProbeError, TimeoutError, socket.timeout, urllib.error.URLError, ValueError, OSError) as exc:
+                result = {"name": name, "status": "FAIL", "detail": clean(exc)}
+            except Exception as exc:
+                # No traceback or potentially sensitive response objects in reports.
+                result = {"name": name, "status": "FAIL", "detail": "unexpected response shape: " + type(exc).__name__}
+            result["seconds"] = round(time.monotonic() - started, 3)
+            result["http_status"] = client.last_status
+            row["tests"].append(result)
+            print("  %-5s %-11s %7.3fs  %s" % (result["status"], name, result["seconds"], result["detail"]), flush=True)
+        row["served_models"] = sorted(client.models)
+        row["usage"] = client.usage
+        row["request_attempts"] = client.requests
+        row["passed"] = all(test["status"] == "PASS" for test in row["tests"])
+        all_ok = all_ok and row["passed"]
+    report["passed"] = all_ok
+    print("\nSUMMARY", flush=True)
+    for row in report["providers"]:
+        print("  %-9s %-24s %s" % (row["provider"], row["model"], "PASS" if row["passed"] else "FAIL"), flush=True)
+    path = env.get("MODEL_TEST_JSON", "")
+    if path:
+        try:
+            write_report(path, report)
+            print("JSON report: " + clean(path), flush=True)
+        except OSError as exc:
+            print("Report write failed: " + clean(exc), file=sys.stderr)
+            print("SPRITE_MODEL_TEST_RC=2", flush=True)
+            return 2
+    # The marker lets the host recover this result if Sprite loses its exit frame.
+    print("SPRITE_MODEL_TEST_RC=%d" % (0 if all_ok else 1), flush=True)
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\nModel tests interrupted.", file=sys.stderr)
+        raise SystemExit(130)
+MODEL_TEST_PY
+}
+
+MODEL_TEST_ENV_NAMES=(
+  DEEPSEEK_MODEL MINIMAX_MODEL KIMI_MODEL
+  DEEPSEEK_BASE_URL MINIMAX_BASE_URL MOONSHOT_BASE_URL
+  DEEPSEEK_REASONING_EFFORT MINIMAX_REASONING_EFFORT KIMI_REASONING_EFFORT
+  MODEL_TEST_TIMEOUT MODEL_TEST_MAX_TOKENS MODEL_TEST_RETRIES MODEL_TEST_ALLOW_LOCALHOST
+  MODEL_TEST_PROMPT KIMI_MIN_REQUEST_INTERVAL_MS
+)
+
+collect_model_test_keys() {
+  local name value
+  for name in DEEPSEEK_API_KEY MINIMAX_API_KEY MOONSHOT_API_KEY; do
+    if [[ -z ${!name:-} && -t 0 ]]; then
+      printf '  %s, hidden (Enter marks it missing): ' "$name"
+      IFS= read -rs value || value=""
+      printf '\n'
+      printf -v "$name" '%s' "$value"
+    fi
+  done
+}
+
+run_model_tests_local() {
+  local rc
+  need_local python3
+  collect_model_test_keys
+  make_model_test_helper
+  (
+    export "${MODEL_TEST_ENV_NAMES[@]}" MODEL_TEST_JSON
+    export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" MINIMAX_API_KEY="${MINIMAX_API_KEY:-}" MOONSHOT_API_KEY="${MOONSHOT_API_KEY:-}"
+    python3 "$MODEL_TEST_HELPER"
+  ) && rc=0 || rc=$?
+  return "$rc"
+}
+
+run_model_tests_sprite() {
+  local name packed output cli_rc remote_rc
+  local -a names=("${MODEL_TEST_ENV_NAMES[@]}")
+  need_local sprite
+  need_local python3
+  pick_sprite
+  collect_model_test_keys
+  make_model_test_helper
+  [[ -z $MODEL_TEST_JSON ]] || names+=(MODEL_TEST_JSON)
+  for name in DEEPSEEK_API_KEY MINIMAX_API_KEY MOONSHOT_API_KEY; do
+    [[ -z ${!name:-} ]] || names+=("$name")
+  done
+  packed=$(make_exec_env "${names[@]}")
+  output=$(mktemp)
+  cleanup_files+=("$output")
+  note "test-only execution on $SPRITE_NAME; no agent/session/repository changes"
+  note "Sprite environment transport is secret-equivalent and may appear in local process arguments"
+  if run_remote_file "$MODEL_TEST_HELPER" "$packed" "" -- \
+    python3 @SPRITE_PAYLOAD@ 2>&1 | tee "$output"; then
+    cli_rc=0
+  else
+    cli_rc=$?
+  fi
+  remote_rc=$(sed -n 's/^SPRITE_MODEL_TEST_RC=\([012]\)$/\1/p' "$output" | tail -1)
+  if [[ $remote_rc =~ ^[012]$ ]]; then
+    return "$remote_rc"
+  fi
+  warn "remote test result was not confirmed (transport rc=$cli_rc); requests were not retried"
+  return 1
+}
+
+maybe_test_models_before_run() {
+  local choice="" should_test=0
+  case "$MODEL_TEST_MODE" in
+    never) return 0 ;;
+    always) should_test=1 ;;
+    ask)
+      if [[ -t 0 ]]; then
+        printf '\n  Test DeepSeek, MiniMax and Moonshot APIs from this host first? (billable) [y/N]: '
+        IFS= read -r choice || true
+        case "${choice,,}" in y|yes) should_test=1 ;; esac
+      fi ;;
+  esac
+  if (( should_test )); then
+    run_model_tests_local || die "one or more model API tests failed; bootstrap has not started"
+  fi
+  return 0
+}
+
+# Test-only dispatch precedes sprite/GitHub/Fly setup and every session action.
+case "$RUN_MODE" in
+  test-local) run_model_tests_local; exit $? ;;
+  test-sprite) run_model_tests_sprite; exit $? ;;
+esac
+
 step "local prerequisites"
 need_local sprite
 need_local python3
 need_local tar
 local_network_advisory
+maybe_test_models_before_run
 
 step "choose coding agent"
 choose_coding_agent
@@ -4667,9 +4435,9 @@ if [[ $AGENT_KIND == codex ]]; then
   AGENT_PROVIDER="$CODEX_PROVIDER"
   case "$CODEX_PROVIDER" in
     openai) note "OpenAI mode uses the installed Codex CLI directly" ;;
-    deepseek) note "DeepSeek mode preserves V4 Pro thinking through the Responses/Anthropic bridge workflow" ;;
-    kimi) note "Kimi mode uses Moonshot Chat Completions through a local Responses adapter; Formula search is exposed by sprite-kimi-web-search" ;;
-    minimax) note "MiniMax mode uses MiniMax M3 through its native OpenAI-compatible Responses API" ;;
+    deepseek) note "DeepSeek uses $DEEPSEEK_MODEL through native Responses with $DEEPSEEK_REASONING_EFFORT reasoning" ;;
+    kimi) note "Moonshot uses $KIMI_MODEL through native Responses, including native web search" ;;
+    minimax) note "MiniMax uses $MINIMAX_MODEL through its native Responses API" ;;
   esac
 else
   CODEX_PROVIDER=none
@@ -4900,9 +4668,10 @@ fi
 
 step "prepare Sprite tools and workspace"
 setup_file=$(make_remote_setup)
-sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-  --file "$setup_file:/tmp/sprite-codex-setup.sh" \
-  -- bash /tmp/sprite-codex-setup.sh "$REMOTE_WORKDIR" "$MIN_CODEX_VERSION" "$CODEX_PROVIDER" "$AGENT_KIND" \
+cleanup_files+=("$setup_file")
+note "using a fresh private transfer directory; existing sessions and old helper files are left alone"
+run_remote_file "$setup_file" "" "" -- \
+  bash @SPRITE_PAYLOAD@ "$REMOTE_WORKDIR" "$MIN_CODEX_VERSION" "$CODEX_PROVIDER" "$AGENT_KIND" \
   || die "Sprite tool setup failed"
 ok "Sprite tools ready"
 
@@ -4945,7 +4714,7 @@ printf "shared_origin=%s\n" "$origin"
 printf "shared_branch=%s\n" "$(git -C "$workdir" branch --show-current)"
 ' _ "$REMOTE_WORKDIR" "$GITHUB_REPOSITORY" 2>&1) || die "shared Sprite repository verification failed: $SHARED_REPO_CHECK"
   printf '%s\n' "$SHARED_REPO_CHECK"
-  ok "reused the live peer's existing GitHub-backed working tree without mutating it"
+  ok "reused the existing GitHub-backed working tree without synchronizing repository files"
 else
   run_github_bootstrap "$GITHUB_ENV" || die "GitHub repository setup failed"
   ok "normal git fetch, commit, and push are configured for $GITHUB_REPOSITORY"
@@ -4988,121 +4757,46 @@ if [[ $AGENT_KIND == kimi-code ]]; then
   printf '%s\n' "$KIMI_CODE_VERSION"
   ok "official Kimi Code CLI is installed"
   note "authentication remains in Kimi Code's standard login flow; choose OAuth or Kimi Platform API key with /login"
-elif [[ $CODEX_PROVIDER == deepseek ]]; then
-  step "DeepSeek credential"
-  prompt_secret DEEPSEEK_API_KEY "DeepSeek API key required by Codex"
-  DEEPSEEK_ENV=$(make_exec_env DEEPSEEK_API_KEY)
-  ALL_CREDENTIAL_ENV=$(build_codex_credential_env DEEPSEEK_API_KEY)
-  if [[ $CODEX_DEEPSEEK_ACCESS == 1 ]]; then
-    warn "the DeepSeek provider key is also exposed to Codex-run experiment processes for this run"
-  else
-    note "the DeepSeek provider key remains excluded from Codex shell commands"
-  fi
-  note "DeepSeek is passed per Sprite command; bridge mode uses a short-lived 0600 config that is deleted after startup"
-
-  step "choose DeepSeek V4 Pro transport"
-  if [[ $TRANSPORT == auto ]]; then
-    PROBE=$(sx_env "$DEEPSEEK_ENV" -- bash -lc '
-set -Eeuo pipefail
-out=$(mktemp); trap "rm -f \"$out\"" EXIT
-status=$(curl -sS -o "$out" -w "%{http_code}" -m 90 \
-  -X POST https://api.deepseek.com/responses \
-  -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-  -H "Content-Type: application/json" \
-  --data "{\"model\":\"deepseek-v4-pro\",\"input\":\"Reply with OK.\",\"max_output_tokens\":16}" || echo 000)
-case "$status" in
-  200|429) echo direct ;;
-  401|403)
-    echo "DeepSeek authentication failed (HTTP $status)" >&2
-    python3 - "$out" <<"DSPY1" >&2
-import json,sys
-try: print(json.load(open(sys.argv[1])).get("error",{}))
-except Exception: pass
-DSPY1
-    exit 61 ;;
-  *)
-    msg=$(python3 - "$out" <<"DSPY2"
-import json,sys
-try:
- d=json.load(open(sys.argv[1])); e=d.get("error",d); print(str(e.get("message",e))[:180] if isinstance(e,dict) else str(e)[:180])
-except Exception: print("unparseable response")
-DSPY2
-)
-    echo "bridge|http=$status $msg"
-    ;;
-esac
-' 2>&1) || die "$PROBE"
-    if [[ $PROBE == direct ]]; then
-      TRANSPORT=direct
-      ok "native DeepSeek Responses accepted deepseek-v4-pro"
-    else
-      TRANSPORT=bridge
-      warn "native V4 Pro Responses probe was not accepted: ${PROBE#bridge|}"
-      note "using the local Responses-to-Anthropic bridge"
-    fi
-  else
-    note "transport forced by DEEPSEEK_TRANSPORT=$TRANSPORT"
-  fi
-
-  step "configure Codex provider"
-  configurator=$(make_codex_configurator)
-  sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --file "$configurator:/tmp/configure-sprite-codex.py" \
-    -- python3 /tmp/configure-sprite-codex.py "$REMOTE_WORKDIR" "$TRANSPORT" "$BRIDGE_PORT" \
-    || die "Codex configuration failed"
-  ok "Codex profile $PROFILE configured for $MODEL"
-elif [[ $CODEX_PROVIDER == minimax ]]; then
+elif [[ $CODEX_PROVIDER == deepseek || $CODEX_PROVIDER == minimax || $CODEX_PROVIDER == kimi ]]; then
   TRANSPORT=native-responses
-  step "MiniMax M3 credential"
-  prompt_secret MINIMAX_API_KEY "MiniMax API or Subscription Key required by Codex"
-  ALL_CREDENTIAL_ENV=$(build_codex_credential_env MINIMAX_API_KEY)
-  if [[ $CODEX_MINIMAX_ACCESS == 1 ]]; then
-    warn "the MiniMax provider key is also exposed to Codex-run experiment processes for this run"
+  case "$CODEX_PROVIDER" in
+    deepseek)
+      SELECTED_MODEL=$DEEPSEEK_MODEL; SELECTED_BASE=$DEEPSEEK_BASE_URL
+      SELECTED_CONTEXT=$DEEPSEEK_CONTEXT_WINDOW; SELECTED_EFFORT=$DEEPSEEK_REASONING_EFFORT
+      SELECTED_KEY=DEEPSEEK_API_KEY; SELECTED_ACCESS=$CODEX_DEEPSEEK_ACCESS ;;
+    minimax)
+      SELECTED_MODEL=$MINIMAX_MODEL; SELECTED_BASE=$MINIMAX_BASE_URL
+      SELECTED_CONTEXT=$MINIMAX_CONTEXT_WINDOW; SELECTED_EFFORT=$MINIMAX_REASONING_EFFORT
+      SELECTED_KEY=MINIMAX_API_KEY; SELECTED_ACCESS=$CODEX_MINIMAX_ACCESS ;;
+    kimi)
+      SELECTED_MODEL=$KIMI_MODEL; SELECTED_BASE=$MOONSHOT_BASE_URL
+      SELECTED_CONTEXT=$KIMI_CONTEXT_WINDOW; SELECTED_EFFORT=$KIMI_REASONING_EFFORT
+      SELECTED_KEY=MOONSHOT_API_KEY; SELECTED_ACCESS=$CODEX_MOONSHOT_ACCESS ;;
+  esac
+  step "$CODEX_PROVIDER credential"
+  prompt_secret "$SELECTED_KEY" "$CODEX_PROVIDER API key required by $SELECTED_MODEL"
+  ALL_CREDENTIAL_ENV=$(build_codex_credential_env "$SELECTED_KEY")
+  if [[ $SELECTED_ACCESS == 1 ]]; then
+    warn "the selected provider key is also exposed to Codex-run experiment processes for this run"
   else
-    note "the MiniMax key is inherited by Codex for provider authentication but excluded from Codex shell commands"
+    note "the selected key authenticates Codex but remains excluded from Codex shell/tools"
   fi
-  note "MiniMax uses its native Responses endpoint; no CodeProxy adapter is started"
-
-  step "configure MiniMax M3 Codex provider"
-  minimax_configurator=$(make_minimax_configurator)
-  sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --file "$minimax_configurator:/tmp/configure-sprite-codex-minimax.py" -- \
-    python3 /tmp/configure-sprite-codex-minimax.py "$REMOTE_WORKDIR" "$MINIMAX_MODEL" "$MINIMAX_BASE_URL" \
-    || die "MiniMax M3 Codex configuration failed"
-  ok "Codex profile $MINIMAX_PROFILE configured for $MINIMAX_MODEL"
-elif [[ $CODEX_PROVIDER == kimi ]]; then
-  TRANSPORT=kimi-adapter
-  step "Kimi K3 credential"
-  prompt_secret MOONSHOT_API_KEY "Moonshot API key required by Kimi K3"
-  ALL_CREDENTIAL_ENV=$(build_codex_credential_env MOONSHOT_API_KEY)
-  if [[ $CODEX_MOONSHOT_ACCESS == 1 ]]; then
-    warn "the Moonshot key is available both to the Kimi gateway and to Codex-run experiment processes for this run"
-  else
-    note "the Moonshot key is inherited only by the Kimi gateway/adapter process tree"
-    note "Codex shell tools cannot read MOONSHOT_API_KEY; Formula search is available through a loopback helper"
-  fi
-  [[ $CODEX_MINIMAX_ACCESS == 1 ]] && note "MiniMax experiment credential is also enabled for this Codex run"
-  [[ $CODEX_DEEPSEEK_ACCESS == 1 ]] && note "DeepSeek experiment credential is also enabled for this Codex run"
-
-  step "configure Kimi K3 Codex provider"
-  kimi_configurator=$(make_kimi_configurator)
-  sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --file "$kimi_configurator:/tmp/configure-sprite-codex-kimi.sh" -- \
-    bash /tmp/configure-sprite-codex-kimi.sh "$REMOTE_WORKDIR" "$KIMI_MODEL" \
-      "$MOONSHOT_BASE_URL" "$KIMI_FORMULA_URI" "$KIMI_BRIDGE_PORT" "$KIMI_GATEWAY_PORT" \
-      "$KIMI_REQUEST_TIMEOUT" "$KIMI_MAX_COMPLETION_TOKENS" "$KIMI_MIN_REQUEST_INTERVAL_MS" \
-      "$KIMI_FORMULA_MAX_ROUNDS" \
-    || die "Kimi K3 Codex configuration failed"
-  ok "Codex profile $KIMI_PROFILE configured for $KIMI_MODEL"
+  step "configure $CODEX_PROVIDER native Responses provider"
+  make_native_configurator
+  run_remote_file "$NATIVE_CONFIGURATOR" "" "" -- \
+    python3 @SPRITE_PAYLOAD@ "$REMOTE_WORKDIR" "$CODEX_PROVIDER" \
+      "$SELECTED_MODEL" "$SELECTED_BASE" "$SELECTED_CONTEXT" "$SELECTED_EFFORT" \
+    || die "native provider configuration failed"
+  ok "Codex profile sprite-$CODEX_PROVIDER configured for $SELECTED_MODEL"
 else
   TRANSPORT=normal
   ALL_CREDENTIAL_ENV=$(build_codex_credential_env)
 
   step "configure normal OpenAI Codex launcher"
   openai_launcher=$(make_openai_launcher)
-  sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --file "$openai_launcher:/tmp/configure-sprite-codex-openai.sh" \
-    -- bash /tmp/configure-sprite-codex-openai.sh "$REMOTE_WORKDIR" \
+  cleanup_files+=("$openai_launcher")
+  run_remote_file "$openai_launcher" "" "" -- \
+    bash @SPRITE_PAYLOAD@ "$REMOTE_WORKDIR" \
     || die "could not configure the normal OpenAI Codex launcher"
   ok "OpenAI mode uses normal Codex provider/authentication with YOLO flags"
 
@@ -5112,8 +4806,8 @@ fi
 
 if (( SHARED_REUSE_ACTIVE == 1 )); then
   step "preserve live shared workspace"
-  note "skipping local workspace/ upload because another managed agent is editing $REMOTE_WORKDIR"
-  note "skipping startup commit/push checks so the peer's uncommitted work remains untouched"
+  note "shared-workspace reuse: skipping local workspace/ upload to $REMOTE_WORKDIR"
+  note "skipping startup commit/push checks; existing repository files remain untouched by sync"
 else
 step "upload local workspace/ tree"
 LOCAL_WORKSPACE_DIR="$HOST_DIR/workspace"
@@ -5135,10 +4829,7 @@ else
   note "local workspace/: ${WORKSPACE_FILE_COUNT:-0} regular file(s), ${WORKSPACE_ENTRY_COUNT:-0} total entr$( [[ ${WORKSPACE_ENTRY_COUNT:-0} == 1 ]] && echo y || echo ies )"
   note "destination: $REMOTE_WORKSPACE_DIR"
 
-  REMOTE_ARCHIVE="/tmp/sprite-codex-workspace-$(basename "$WORKSPACE_ARCHIVE")"
-  sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --file "$WORKSPACE_ARCHIVE:$REMOTE_ARCHIVE" -- \
-    bash -lc '
+  run_remote_file "$WORKSPACE_ARCHIVE" "" "" -- bash -c '
 set -Eeuo pipefail
 dest=$1
 archive=$2
@@ -5146,10 +4837,10 @@ mkdir -p "$dest"
 tar -xzf "$archive" -C "$dest"
 rm -f "$archive"
 printf "       Sprite workspace/ now contains:\n"
-find "$dest" -mindepth 1 -printf "         %P\n" | sort | head -200
+find "$dest" -mindepth 1 -printf "         %P\n" | sort | sed -n "1,200p"
 count=$(find "$dest" -type f | wc -l | tr -d " ")
 printf "       regular files in Sprite workspace/: %s\n" "$count"
-' _ "$REMOTE_WORKSPACE_DIR" "$REMOTE_ARCHIVE" \
+' _ "$REMOTE_WORKSPACE_DIR" @SPRITE_PAYLOAD@ \
     || die "workspace/ upload failed"
   ok "uploaded local workspace/ tree into $REMOTE_WORKSPACE_DIR"
 fi
@@ -5177,94 +4868,39 @@ printf "SPRITE_KIMI_CODE_OK\n"
   printf '\n%sReady.%s Sprite=%s workspace=%s agent=kimi-code approval=%s\n' \
     "$C_GREEN" "$C_RESET" "$SPRITE_NAME" "$REMOTE_WORKDIR" "$KIMI_CODE_APPROVAL_MODE"
   note "on first launch, use /login and choose Kimi Code OAuth or Kimi Platform API key"
-elif [[ $CODEX_PROVIDER == deepseek ]]; then
-  step "verify Codex -> DeepSeek V4 Pro"
+elif [[ $CODEX_PROVIDER == deepseek || $CODEX_PROVIDER == minimax || $CODEX_PROVIDER == kimi ]]; then
+  step "verify Codex -> $CODEX_PROVIDER / $SELECTED_MODEL"
   CODEX_CHECK_FILE=$(mktemp)
   cleanup_files+=("$CODEX_CHECK_FILE")
-  note "streaming Codex output; hard timeout=${CODEX_PREFLIGHT_TIMEOUT:-180}s"
+  note "native Responses agent preflight; hard timeout=${CODEX_PREFLIGHT_TIMEOUT}s"
   if ! sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --env "SPRITE_CODEX_ENV_HEX=$ALL_CREDENTIAL_ENV,CODEX_PREFLIGHT_TIMEOUT=$CODEX_PREFLIGHT_TIMEOUT" \
-    --dir "$REMOTE_WORKDIR" -- \
-    python3 -c "$ENV_EXEC_PY" bash -lc '
-set -o pipefail
-run_check() {
-  "$HOME/.local/bin/sprite-codex-deepseek-v4-pro" exec --ephemeral \
-    "Run: git remote get-url origin && git ls-remote --exit-code origin HEAD. If both commands succeed, reply with exactly: SPRITE_CODEX_DEEPSEEK_V4_PRO_OK"
-}
-if command -v timeout >/dev/null 2>&1; then
-  timeout "${CODEX_PREFLIGHT_TIMEOUT:-180}" bash -c "$(declare -f run_check); run_check"
-else
-  run_check
-fi
-' 2>&1 | tee "$CODEX_CHECK_FILE"; then
-    CODEX_CHECK=$(cat "$CODEX_CHECK_FILE")
-    die "Codex could not complete the DeepSeek V4 Pro preflight"
+    --env "SPRITE_CODEX_ENV_HEX=$ALL_CREDENTIAL_ENV" --dir "$REMOTE_WORKDIR" -- \
+    python3 -c "$ENV_EXEC_PY" bash -c '
+set -Eeuo pipefail
+provider=$1
+limit=$2
+command -v timeout >/dev/null || { echo "GNU timeout is required on the Sprite" >&2; exit 2; }
+reply=$(mktemp)
+cleanup_reply() { rm -f -- "$reply"; }
+trap cleanup_reply EXIT
+launcher="$HOME/.local/bin/sprite-codex-$provider"
+timeout --kill-after=5 "$limit" "$launcher" exec --ephemeral --output-last-message "$reply" \
+  "Run: git remote get-url origin && git ls-remote --exit-code origin HEAD. If both commands succeed, reply with exactly SPRITE_NATIVE_CODEX_OK and nothing else."
+python3 - "$reply" <<"PYCHECK"
+import sys
+text = open(sys.argv[1], encoding="utf-8").read().strip()
+if text != "SPRITE_NATIVE_CODEX_OK":
+    raise SystemExit("Codex final response did not match the preflight marker")
+print("SPRITE_NATIVE_CODEX_FINAL_VERIFIED")
+PYCHECK
+' _ "$CODEX_PROVIDER" "$CODEX_PREFLIGHT_TIMEOUT" 2>&1 | tee "$CODEX_CHECK_FILE"; then
+    die "Codex could not complete the $CODEX_PROVIDER native Responses preflight"
   fi
-  CODEX_CHECK=$(cat "$CODEX_CHECK_FILE")
-  grep -q 'SPRITE_CODEX_DEEPSEEK_V4_PRO_OK' <<<"$CODEX_CHECK" \
-    || die "Codex ran, but its expected DeepSeek response was missing"
-  ok "Codex is connected to $MODEL and can access the GitHub origin via normal git commands"
-  printf '\n%sReady.%s Sprite=%s workspace=%s provider=deepseek profile=%s transport=%s\n' \
-    "$C_GREEN" "$C_RESET" "$SPRITE_NAME" "$REMOTE_WORKDIR" "$PROFILE" "$TRANSPORT"
-elif [[ $CODEX_PROVIDER == minimax ]]; then
-  step "verify Codex -> MiniMax M3"
-  CODEX_CHECK_FILE=$(mktemp)
-  cleanup_files+=("$CODEX_CHECK_FILE")
-  note "streaming Codex output through MiniMax native Responses; hard timeout=${CODEX_PREFLIGHT_TIMEOUT:-180}s"
-  if ! sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --env "SPRITE_CODEX_ENV_HEX=$ALL_CREDENTIAL_ENV,CODEX_PREFLIGHT_TIMEOUT=$CODEX_PREFLIGHT_TIMEOUT" \
-    --dir "$REMOTE_WORKDIR" -- \
-    python3 -c "$ENV_EXEC_PY" bash -lc '
-set -o pipefail
-run_check() {
-  "$HOME/.local/bin/sprite-codex-minimax-m3" exec --ephemeral \
-    "Run: git remote get-url origin && git ls-remote --exit-code origin HEAD. If both commands succeed, reply with exactly: SPRITE_CODEX_MINIMAX_M3_OK"
-}
-if command -v timeout >/dev/null 2>&1; then
-  timeout "${CODEX_PREFLIGHT_TIMEOUT:-180}" bash -c "$(declare -f run_check); run_check"
-else
-  run_check
-fi
-' 2>&1 | tee "$CODEX_CHECK_FILE"; then
-    CODEX_CHECK=$(cat "$CODEX_CHECK_FILE")
-    die "Codex could not complete the MiniMax M3 preflight"
-  fi
-  CODEX_CHECK=$(cat "$CODEX_CHECK_FILE")
-  grep -q 'SPRITE_CODEX_MINIMAX_M3_OK' <<<"$CODEX_CHECK" \
-    || die "Codex ran, but its expected MiniMax M3 response was missing"
-  ok "Codex is connected to $MINIMAX_MODEL and can access the GitHub origin"
-  printf '\n%sReady.%s Sprite=%s workspace=%s provider=minimax profile=%s transport=native-responses\n' \
-    "$C_GREEN" "$C_RESET" "$SPRITE_NAME" "$REMOTE_WORKDIR" "$MINIMAX_PROFILE"
-elif [[ $CODEX_PROVIDER == kimi ]]; then
-  step "verify Codex -> Kimi K3"
-  CODEX_CHECK_FILE=$(mktemp)
-  cleanup_files+=("$CODEX_CHECK_FILE")
-  note "streaming Codex output through the local Responses adapter; hard timeout=${CODEX_PREFLIGHT_TIMEOUT:-180}s"
-  if ! sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-    --env "SPRITE_CODEX_ENV_HEX=$ALL_CREDENTIAL_ENV,CODEX_PREFLIGHT_TIMEOUT=$CODEX_PREFLIGHT_TIMEOUT" \
-    --dir "$REMOTE_WORKDIR" -- \
-    python3 -c "$ENV_EXEC_PY" bash -lc '
-set -o pipefail
-run_check() {
-  "$HOME/.local/bin/sprite-codex-kimi-k3" exec --ephemeral \
-    "Run: git remote get-url origin && git ls-remote --exit-code origin HEAD. If both commands succeed, reply with exactly: SPRITE_CODEX_KIMI_K3_OK"
-}
-if command -v timeout >/dev/null 2>&1; then
-  timeout "${CODEX_PREFLIGHT_TIMEOUT:-180}" bash -c "$(declare -f run_check); run_check"
-else
-  run_check
-fi
-' 2>&1 | tee "$CODEX_CHECK_FILE"; then
-    CODEX_CHECK=$(cat "$CODEX_CHECK_FILE")
-    die "Codex could not complete the Kimi K3 preflight"
-  fi
-  CODEX_CHECK=$(cat "$CODEX_CHECK_FILE")
-  grep -q 'SPRITE_CODEX_KIMI_K3_OK' <<<"$CODEX_CHECK" \
-    || die "Codex ran, but its expected Kimi K3 response was missing"
-  ok "Codex is connected to $KIMI_MODEL and can access the GitHub origin"
-  printf '\n%sReady.%s Sprite=%s workspace=%s provider=kimi profile=%s transport=responses-adapter\n' \
-    "$C_GREEN" "$C_RESET" "$SPRITE_NAME" "$REMOTE_WORKDIR" "$KIMI_PROFILE"
-  note "Formula web search helper: $REMOTE_HOME/.local/bin/sprite-kimi-web-search"
+  grep -qx 'SPRITE_NATIVE_CODEX_FINAL_VERIFIED' "$CODEX_CHECK_FILE" \
+    || die "the verified final-response marker was missing"
+  ok "Codex is connected to $SELECTED_MODEL and completed the GitHub-origin preflight"
+  printf '\n%sReady.%s Sprite=%s workspace=%s provider=%s model=%s transport=native-responses\n' \
+    "$C_GREEN" "$C_RESET" "$SPRITE_NAME" "$REMOTE_WORKDIR" "$CODEX_PROVIDER" "$SELECTED_MODEL"
 else
   step "verify normal OpenAI Codex"
   CODEX_CHECK_FILE=$(mktemp)
@@ -5336,7 +4972,7 @@ if [[ ! -t 0 || ! -t 1 ]]; then warn "no interactive terminal is attached, so $A
 
 SESSION_DEADLINE=$(( $(date +%s) + RUN_SECONDS ))
 runner=$(make_session_runner)
-REMOTE_RUNNER="$REMOTE_HOME/.local/bin/${SESSION_TAG}-runner"
+cleanup_files+=("$runner")
 NATIVE_ENTRY=$(mktemp)
 cleanup_files+=("$NATIVE_ENTRY")
 cat >"$NATIVE_ENTRY" <<'PYENTRY'
@@ -5362,10 +4998,7 @@ env.update({str(k):str(v) for k,v in values.items()})
 os.execvpe(sys.argv[1], sys.argv[1:], env)
 PYENTRY
 chmod 700 "$NATIVE_ENTRY"
-REMOTE_ENTRY="$REMOTE_HOME/.local/bin/${SESSION_TAG}-entry"
-run_limited 30 sprite exec "${ORG[@]}" -s "$SPRITE_NAME" \
-  --file "$runner:$REMOTE_RUNNER" --file "$NATIVE_ENTRY:$REMOTE_ENTRY" -- \
-  bash -lc 'chmod 700 "$1" "$2"' _ "$REMOTE_RUNNER" "$REMOTE_ENTRY" \
+install_native_entrypoints "$runner" "$NATIVE_ENTRY" \
   || die "could not install the native $AGENT_LABEL supervisor/entrypoint"
 
 write_state
