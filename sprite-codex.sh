@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# sprite-codex-v46.sh — updated 2026-09-18
+# sprite-codex-v47.sh — updated 2026-09-18
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
 # native detachable TTY sessions, resume/fork, update and reconnect support.
+#
+# v47 adds mandatory, in-Sprite validation of every credential used by a new run.
+# GitHub PAT: authenticated user, target repository and Git write-service access.
+# Fly: fly status --app "$FLY_APP" with both token aliases. Providers: completed
+# native Responses generation on the configured model. All checks precede repo
+# sync and any new Codex agent/preflight; replacement/retry/abort is offered on failure.
+# Existing live-session reattachment does not start a process or rotate its keys.
+# TOKEN_CHECK_TIMEOUT=180 (1..900) bounds each validation request. No skip switch.
 #
 # v46 fixes reuse of an existing Sprite with stale/unwritable upload paths.
 # All file transfers now use non-TTY exec stdin, a fresh private remote directory,
@@ -17,12 +25,12 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v46.sh                        # existing interactive workflow
-#   bash sprite-codex-v46.sh --show-models          # no API calls
-#   bash sprite-codex-v46.sh --test-models          # host API tests only
-#   bash sprite-codex-v46.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v46.sh --test-models-before-run
-#   bash sprite-codex-v46.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v47.sh                        # existing interactive workflow
+#   bash sprite-codex-v47.sh --show-models          # no API calls
+#   bash sprite-codex-v47.sh --test-models          # host API tests only
+#   bash sprite-codex-v47.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v47.sh --test-models-before-run
+#   bash sprite-codex-v47.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -96,12 +104,12 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 set -Eeuo pipefail
-set +x
+set +x +v
 umask 077
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v46.sh [option] [--json-output PATH]
+Usage: bash sprite-codex-v47.sh [option] [--json-output PATH]
 
   (no option)               Normal Sprite bootstrap; optional model-test prompt.
   --test-models             Test DeepSeek, MiniMax and Moonshot from this host.
@@ -109,6 +117,15 @@ Usage: bash sprite-codex-v46.sh [option] [--json-output PATH]
   --test-models-before-run  Require host tests to pass, then run normal bootstrap.
   --show-models             Display configured model IDs and base URLs; no calls.
   --help, -h                Display this help.
+
+Every credential used by a NEW run is validated on the selected Sprite:
+GitHub authentication + repository/write-service access, Fly app status, and a
+completion from each selected/experiment provider. Failed checks offer hidden
+replacement, retry, or abort; noninteractive failures stop before agent launch.
+TOKEN_CHECK_TIMEOUT=180 (1..900) bounds each request; checks cannot be skipped.
+MODEL_TEST_MODE=never disables only the optional full suite, NOT token validation.
+Fly accepts FLY_API_TOKEN or FLY_ACCESS_TOKEN; successful validation sets both.
+Live-session reattachment preserves the existing process and its credentials.
 
 Keys: DEEPSEEK_API_KEY, MINIMAX_API_KEY, MOONSHOT_API_KEY.
 Missing keys are prompted with hidden input on a terminal, otherwise fail.
@@ -192,6 +209,10 @@ MODEL_TEST_MAX_TOKENS="${MODEL_TEST_MAX_TOKENS:-4096}"
 MODEL_TEST_RETRIES="${MODEL_TEST_RETRIES:-0}"
 MODEL_TEST_ALLOW_LOCALHOST="${MODEL_TEST_ALLOW_LOCALHOST:-0}"
 MODEL_TEST_PROMPT=0
+TOKEN_CHECK_TIMEOUT="${TOKEN_CHECK_TIMEOUT:-180}"
+[[ $TOKEN_CHECK_TIMEOUT =~ ^[1-9][0-9]{0,2}$ ]] && (( TOKEN_CHECK_TIMEOUT <= 900 )) || {
+  echo "error: TOKEN_CHECK_TIMEOUT must be 1..900 seconds" >&2; exit 2;
+}
 
 if [[ $RUN_MODE == show ]]; then
   printf 'Defaults verified: 2026-09-18; configured models (not live availability)\n'
@@ -1034,7 +1055,7 @@ PAYLOAD_META_PY
   [[ -z $workdir ]] || options+=(--dir "$workdir")
   receiver=$(cat <<'PAYLOAD_RECEIVER'
 set -Eeuo pipefail
-set +x
+set +x +v
 umask 077
 size=$1; expected=$2; receive_timeout=$3; base=$4; decoder=$5
 shift 5
@@ -1098,7 +1119,23 @@ PAYLOAD_RECEIVER
   # Deliberately do not use run_limited/sx: those redirect stdin to /dev/null.
   # Non-TTY WebSocket exec carries the file stream. Existing short control calls
   # can still use the configured HTTP-POST fallback independently.
-  sprite exec "${ORG[@]}" -s "$SPRITE_NAME" "${options[@]}" -- \
+  local -a deadline_command=()
+  if [[ -n ${_TOKEN_EXEC_LIMIT:-} ]]; then
+    deadline_command=(python3 -c '
+import os, signal, subprocess, sys
+p = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    rc = p.wait(timeout=int(sys.argv[1]))
+except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
+    try: os.killpg(p.pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+    p.wait()
+    rc = 130 if isinstance(exc, KeyboardInterrupt) else 124
+    print("token validation transport interrupted/timed out", file=sys.stderr)
+raise SystemExit(rc if rc >= 0 else 128-rc)
+' "$_TOKEN_EXEC_LIMIT")
+  fi
+  "${deadline_command[@]}" sprite exec "${ORG[@]}" -s "$SPRITE_NAME" "${options[@]}" -- \
     bash -c "$receiver" sprite-codex-transfer "$size" "$digest" \
       "$SPRITE_UPLOAD_TIMEOUT" "$SPRITE_UPLOAD_TMPDIR" "$ENV_EXEC_PY" "$@" <"$source"
 }
@@ -1171,6 +1208,174 @@ prompt_secret() {
   fi
   [[ -n $current ]] || die "$label is required"
   printf -v "$var_name" '%s' "$current"
+}
+
+# Verified only for this invocation, exact credential, target Sprite and scope.
+# Nothing from this cache is persisted in resume state or credential files.
+declare -A TOKEN_VALIDATED=()
+
+credential_fingerprint() {
+  local name=$1 kind=$2
+  printf '%s\0' "$kind" "${!name:-}" "$SPRITE_NAME" "${SPRITE_ORG:-}" \
+    "${GITHUB_REPOSITORY:-}" "${FLY_APP:-}" \
+    "$DEEPSEEK_MODEL" "$MINIMAX_MODEL" "$KIMI_MODEL" \
+    "$DEEPSEEK_BASE_URL" "$MINIMAX_BASE_URL" "$MOONSHOT_BASE_URL" \
+    "$DEEPSEEK_REASONING_EFFORT" "$MINIMAX_REASONING_EFFORT" "$KIMI_REASONING_EFFORT" \
+    | if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d ' ' -f 1
+      elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | cut -d ' ' -f 1
+      else
+        python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+      fi
+}
+
+validate_token_once() {
+  local name=$1 kind=$2 nonce packed output cli_rc=0
+  local -a names=("$name" TOKEN_CHECK_TIMEOUT)
+  case "$kind" in
+    github) names+=(GITHUB_REPOSITORY) ;;
+    fly) names+=(FLY_APP) ;;
+    deepseek|minimax|moonshot) names+=("${MODEL_TEST_ENV_NAMES[@]}") ;;
+    *) die "unsupported credential validation kind" ;;
+  esac
+  nonce=$(python3 -c 'import secrets; print(secrets.token_hex(16))') || return 1
+  if [[ -z ${MODEL_TEST_HELPER:-} || ! -f $MODEL_TEST_HELPER ]]; then make_model_test_helper; fi
+  packed=$(make_exec_env "${names[@]}") || return 1
+  # Dynamic local limits the local CLI too. Each remote operation has its own
+  # hard timeout. There is no automatic retransmission of a billable model call.
+  local _TOKEN_EXEC_LIMIT=$((TOKEN_CHECK_TIMEOUT * 3 + SPRITE_UPLOAD_TIMEOUT + SPRITE_CONTROL_TIMEOUT + 15))
+  if output=$(run_remote_file "$MODEL_TEST_HELPER" "$packed" "" -- \
+      python3 @SPRITE_PAYLOAD@ --validate-token "$kind" "$nonce" 2>&1); then
+    cli_rc=0
+  else
+    cli_rc=$?
+  fi
+  (( cli_rc != 130 && cli_rc != 143 )) || return 130
+  # Never print raw Sprite CLI errors: they could echo the --env argument.
+  # Require a result for this exact request, even when the CLI claims exit 0.
+  printf '%s' "$output" | python3 -c '
+import json, re, sys
+kind, nonce, name, cli_rc = sys.argv[1:]
+try:
+    rows = [json.loads(line.split("=",1)[1]) for line in sys.stdin.read().splitlines()
+            if line.startswith("SPRITE_TOKEN_RESULT=")]
+    if len(rows) != 1:
+        raise ValueError()
+    row = rows[0]
+    if (not isinstance(row, dict) or row.get("schema_version") != 1 or
+        row.get("nonce") != nonce or row.get("kind") != kind or type(row.get("passed")) is not bool):
+        raise ValueError()
+    category, detail = row.get("category"), row.get("detail")
+    if (not isinstance(category, str) or not re.fullmatch(r"[a-z-]{1,40}", category) or
+        not isinstance(detail, str) or not detail.isascii() or not all(c.isprintable() for c in detail) or len(detail) > 500):
+        raise ValueError()
+    if row["passed"] != (category == "ok"):
+        raise ValueError()
+except (ValueError, TypeError, KeyError):
+    print("       FAIL %s: Sprite did not confirm this validation request (transport rc=%s). No token was accepted." % (name, cli_rc))
+    raise SystemExit(1)
+print("       %s %s [%s]: %s" % ("PASS" if row["passed"] else "FAIL", name, category, detail))
+raise SystemExit(0 if row["passed"] else (130 if category == "interrupted" else 1))
+' "$kind" "$nonce" "$name" "$cli_rc"
+}
+
+prompt_validated_secret() {
+  local name=$1 label=$2 kind=$3 fingerprint choice rc
+  fingerprint=$(credential_fingerprint "$name" "$kind") || die "cannot fingerprint credential context"
+  if [[ -n ${!name:-} && ${TOKEN_VALIDATED[$name]:-} == "$fingerprint" ]]; then
+    note "$name already verified for this Sprite and target in this run"
+    return 0
+  fi
+  while :; do
+    if [[ -z ${!name:-} ]]; then
+      [[ -t 0 ]] || die "$name is required; no interactive terminal is available"
+      printf '  %s, hidden (Enter aborts): ' "$label"
+      if ! IFS= read -rs "$name"; then printf '\n'; die "credential entry cancelled; no new agent launched"; fi
+      printf '\n'
+      [[ -n ${!name:-} ]] || die "credential entry cancelled; no new agent launched"
+    fi
+    note "validating $name on Sprite $SPRITE_NAME"
+    if validate_token_once "$name" "$kind"; then
+      fingerprint=$(credential_fingerprint "$name" "$kind") || die "cannot record credential validation"
+      TOKEN_VALIDATED[$name]=$fingerprint
+      # Rebuild aliases from the accepted value, never from a failed candidate.
+      case "$kind" in
+        github) GH_TOKEN=$GITHUB_PAT; GITHUB_TOKEN=$GITHUB_PAT ;;
+        fly) FLY_ACCESS_TOKEN=$FLY_API_TOKEN ;;
+      esac
+      return 0
+    else
+      rc=$?
+    fi
+    unset 'TOKEN_VALIDATED[$name]'
+    (( rc != 130 )) || die "credential validation interrupted; no new agent launched"
+    [[ -t 0 ]] || die "$name did not pass validation; no new agent launched (non-interactive run)"
+    while :; do
+      printf '\n  %s did not pass validation.\n' "$name"
+      printf '    1) Enter a replacement token [default]\n    2) Retry the same token\n    3) Abort without launching\n'
+      printf '  Select [1-3]: '
+      IFS= read -r choice || die "credential validation cancelled; no new agent launched"
+      case "${choice,,}" in
+        ''|1|n|new|replace) printf -v "$name" '%s' ''; break ;;
+        2|r|retry) break ;;
+        3|a|abort|q|quit) die "credential validation cancelled; no new agent launched" ;;
+        *) warn "invalid selection" ;;
+      esac
+    done
+  done
+}
+
+assert_token_validation_gate() {
+  local name kind fingerprint spec
+  local -a required=(GITHUB_PAT:github FLY_API_TOKEN:fly)
+  if [[ $AGENT_KIND == codex ]]; then
+    [[ $CODEX_PROVIDER != deepseek && $CODEX_DEEPSEEK_ACCESS != 1 ]] || required+=(DEEPSEEK_API_KEY:deepseek)
+    [[ $CODEX_PROVIDER != minimax && $CODEX_MINIMAX_ACCESS != 1 ]] || required+=(MINIMAX_API_KEY:minimax)
+    [[ $CODEX_PROVIDER != kimi && $CODEX_MOONSHOT_ACCESS != 1 ]] || required+=(MOONSHOT_API_KEY:moonshot)
+  fi
+  for spec in "${required[@]}"; do
+    name=${spec%:*}; kind=${spec#*:}
+    [[ -n ${!name:-} ]] || die "credential gate: $name is missing; refusing to launch"
+    fingerprint=$(credential_fingerprint "$name" "$kind") || die "credential gate failed"
+    [[ ${TOKEN_VALIDATED[$name]:-} == "$fingerprint" ]] || die "credential gate: $name or its target changed or was never validated; refusing to launch"
+  done
+  [[ ${GH_TOKEN:-} == "$GITHUB_PAT" && ${GITHUB_TOKEN:-} == "$GITHUB_PAT" ]] || die "credential gate: GitHub aliases differ from the validated token"
+  [[ ${FLY_ACCESS_TOKEN:-} == "$FLY_API_TOKEN" ]] || die "credential gate: Fly aliases differ from the validated token"
+}
+
+collect_validated_credentials() {
+  step "validate credentials on the selected Sprite"
+  note "every supplied credential must pass before repository synchronization or a new Codex agent/preflight"
+  note "provider checks make one generation request per used key and may incur charges"
+  note "failed checks allow replacement/retry/abort; network or quota failures are not proof of an invalid token"
+  note "credentials use process-scoped JSON/hex transport; the encoded value may appear in local process arguments"
+  prompt_validated_secret GITHUB_PAT "GitHub PAT for $GITHUB_REPOSITORY" github
+  if [[ -n ${FLY_ACCESS_TOKEN:-} && -n ${FLY_API_TOKEN:-} && $FLY_ACCESS_TOKEN != "$FLY_API_TOKEN" ]]; then
+    warn "Fly aliases differ; validating FLY_API_TOKEN and replacing FLY_ACCESS_TOKEN only after success"
+  fi
+  FLY_API_TOKEN=${FLY_API_TOKEN:-${FLY_ACCESS_TOKEN:-}}
+  prompt_validated_secret FLY_API_TOKEN "Fly.io token for $FLY_APP" fly
+  if [[ $AGENT_KIND == codex ]]; then
+    step "optional provider-key access for Codex experiments"
+    choose_codex_secret_access CODEX_MOONSHOT_ACCESS MOONSHOT_API_KEY "Moonshot"
+    choose_codex_secret_access CODEX_MINIMAX_ACCESS MINIMAX_API_KEY "MiniMax"
+    choose_codex_secret_access CODEX_DEEPSEEK_ACCESS DEEPSEEK_API_KEY "DeepSeek"
+    if [[ $CODEX_PROVIDER == deepseek || $CODEX_DEEPSEEK_ACCESS == 1 ]]; then
+      note "DeepSeek credential target: $DEEPSEEK_MODEL at $DEEPSEEK_BASE_URL"
+      prompt_validated_secret DEEPSEEK_API_KEY "DeepSeek API key" deepseek
+    fi
+    if [[ $CODEX_PROVIDER == minimax || $CODEX_MINIMAX_ACCESS == 1 ]]; then
+      note "MiniMax credential target: $MINIMAX_MODEL at $MINIMAX_BASE_URL"
+      prompt_validated_secret MINIMAX_API_KEY "MiniMax API or Subscription Key" minimax
+    fi
+    if [[ $CODEX_PROVIDER == kimi || $CODEX_MOONSHOT_ACCESS == 1 ]]; then
+      note "Moonshot credential target: $KIMI_MODEL at $MOONSHOT_BASE_URL"
+      prompt_validated_secret MOONSHOT_API_KEY "Moonshot API key" moonshot
+    fi
+  fi
+  assert_token_validation_gate
+  ok "all credentials required by this run passed validation"
 }
 
 choose_codex_secret_access() {
@@ -2654,7 +2859,7 @@ startup_repo_rescue() {
   [[ $GITHUB_REPOSITORY =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] \
     || die "GitHub repository must be OWNER/REPO"
   note "use a fine-grained PAT limited to $GITHUB_REPOSITORY with Contents: read and write"
-  prompt_secret GITHUB_PAT "GitHub PAT for startup repository backup"
+  prompt_validated_secret GITHUB_PAT "GitHub PAT for startup repository backup" github
   GH_TOKEN=$GITHUB_PAT
   GITHUB_TOKEN=$GITHUB_PAT
   GITHUB_ENV=$(make_exec_env GH_TOKEN GITHUB_TOKEN GITHUB_REPOSITORY)
@@ -3825,6 +4030,7 @@ attach_native_session_resilient() {
 choose_live_native_session() {
   local tag=$1 preferred=${2:-} workdir_hint=${3:-} raw row i=1 choice chosen sid created wd cmd epoch hint
   raw=$(get_sessions_json); mapfile -t rows < <(native_session_rows "$raw" "$tag" "$preferred" "$workdir_hint"); ((${#rows[@]})) || return 1
+  note "reattaching preserves the running process credentials; no new token entry or rotation occurs"
   step "choose live native $AGENT_LABEL TTY session"; note "live managed Sprite TTY sessions on $SPRITE_NAME (newest first):"
   for row in "${rows[@]}"; do IFS=$'\t' read -r epoch sid created wd cmd <<<"$row"; hint=""; [[ -n $preferred && $sid == "$preferred" ]] && hint=" [saved-state hint]"; printf '    %d) id=%s%s\n' "$i" "$sid" "$hint"; printf '       created=%s workspace=%s\n' "${created:-unknown}" "${wd:-unknown}"; printf '       command=%s\n' "${cmd:-unknown}"; ((i++)); done
   if [[ ! -t 0 ]]; then choice=1; else printf '  Attach which session? [1]: '; IFS= read -r choice || true; choice=${choice:-1}; fi
@@ -3867,6 +4073,7 @@ legacy_tmux_guard() {
 
 start_native_agent_session() {
   local remote_entry=$1 remote_runner=$2 row sid="" rc watcher="" raw
+  assert_token_validation_gate
   raw=$(get_sessions_json)
   [[ -n $raw ]] && sessions_inventory_valid "$raw" || die "cannot validate Sprite session inventory before launch; refusing to risk a duplicate $AGENT_LABEL process"
   row=$(native_session_rows "$raw" "$SESSION_TAG" "${CURRENT_SESSION_ID:-}" "$REMOTE_WORKDIR" | sed -n '1p')
@@ -4251,6 +4458,174 @@ def write_report(path, report):
             os.unlink(tmp)
 
 
+# Token checks deliberately do not return upstream bodies or CLI output. Error
+# details can echo a supplied credential; only fixed diagnostics cross the wire.
+class TokenFailure(Exception):
+    def __init__(self, category, detail):
+        super().__init__(detail)
+        self.category = category
+
+
+def token_http_failure(status, headers=None):
+    headers = headers or {}
+    if status == 401:
+        return TokenFailure("authentication", "Token rejected (HTTP 401): invalid, expired or revoked.")
+    if status == 402:
+        return TokenFailure("quota", "Balance or quota prevents use (HTTP 402); token validity is not established.")
+    if status == 429 or (status == 403 and (headers.get("X-RateLimit-Remaining") == "0" or headers.get("Retry-After"))):
+        return TokenFailure("rate-limit", "Rate limited; wait and retry. This does not prove the token is invalid.")
+    if status == 403:
+        return TokenFailure("access", "Access denied (HTTP 403): check token scope, organization approval/SSO and model access; rate limiting is also possible.")
+    if status == 404:
+        return TokenFailure("access", "Target unavailable (HTTP 404): check repository/app/model and endpoint, and token access.")
+    if status is not None and 300 <= status < 400:
+        return TokenFailure("configuration", "Redirect refused; update the configured target. Credentials were not forwarded.")
+    if status is not None and status >= 500:
+        return TokenFailure("service", "Service error (HTTP %s); retry later. Token validity is not established." % status)
+    return TokenFailure("request", "Request or response was not usable%s; check endpoint, model and request settings." % (" (HTTP %s)" % status if status else ""))
+
+
+def token_get(url, key, timeout, *, basic=False, advertisement=False):
+    import base64
+    auth = "Basic " + base64.b64encode(("x-access-token:" + key).encode()).decode() if basic else "Bearer " + key
+    headers = {"Authorization": auth, "User-Agent": "sprite-codex-token-check/47"}
+    if not advertisement:
+        headers.update({"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10"})
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with deadline(timeout), urllib.request.build_opener(NoRedirect()).open(req, timeout=timeout) as response:
+            if response.status != 200:
+                raise token_http_failure(response.status, response.headers)
+            if advertisement:
+                # Only service discovery: never POST a pack, create a ref or push.
+                # A bounded prefix avoids downloading an entire large ref list.
+                service = b"# service=git-receive-pack\n"
+                raw = response.read(4 + len(service) + 4)
+                expected = ("%04x" % (4 + len(service))).encode() + service + b"0000"
+                if response.headers.get_content_type() != "application/x-git-receive-pack-advertisement" or raw != expected:
+                    raise TokenFailure("response", "GitHub did not return the authenticated Git write-service advertisement.")
+                return None
+            raw = response.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise TokenFailure("response", "GitHub response exceeded the safety size limit.")
+            body = json.loads(raw)
+            if not isinstance(body, dict) or body.get("error"):
+                raise TokenFailure("response", "GitHub returned an unexpected response object.")
+            return body
+    except urllib.error.HTTPError as exc:
+        failure = token_http_failure(exc.code, exc.headers)
+        exc.close()
+        raise failure from None
+
+
+def check_github_token(env, key, timeout):
+    repo = env.get("GITHUB_REPOSITORY", "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+", repo) or repo.split("/")[-1] in (".", ".."):
+        raise TokenFailure("configuration", "GITHUB_REPOSITORY must be a valid OWNER/REPO.")
+    user = token_get("https://api.github.com/user", key, timeout)
+    if not isinstance(user.get("login"), str) or not user["login"] or type(user.get("id")) is not int:
+        raise TokenFailure("response", "GitHub did not return an authenticated user; public repository access alone is not sufficient.")
+    metadata = token_get("https://api.github.com/repos/" + repo, key, timeout)
+    if str(metadata.get("full_name", "")).lower() != repo.lower():
+        raise TokenFailure("configuration", "GitHub returned a different repository; update GITHUB_REPOSITORY.")
+    permissions = metadata.get("permissions") or {}
+    if not isinstance(permissions, dict):
+        raise TokenFailure("response", "GitHub returned invalid repository permissions.")
+    if metadata.get("archived") or metadata.get("disabled"):
+        raise TokenFailure("access", "Repository is archived or disabled; it is not a writable target.")
+    if permissions.get("push") is False and not any(permissions.get(k) is True for k in ("admin", "maintain")):
+        raise TokenFailure("access", "GitHub reports no repository push permission. Grant Contents: read and write for the selected repository.")
+    # Metadata permission and public reads alone do not prove a PAT can push.
+    token_get("https://github.com/" + repo + ".git/info/refs?service=git-receive-pack", key, timeout,
+              basic=True, advertisement=True)
+    return "Authenticated user, selected repository and Git write-service access verified (no push performed; branch rules still apply)."
+
+
+def check_fly_token(env, key, timeout):
+    import shutil
+    import subprocess
+    app = env.get("FLY_APP", "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", app):
+        raise TokenFailure("configuration", "FLY_APP must be a valid app name.")
+    child_env = env.copy()
+    home = child_env.get("HOME", os.path.expanduser("~"))
+    child_env["PATH"] = home + "/.local/bin:" + home + "/.fly/bin:" + child_env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    fly = shutil.which("fly", path=child_env["PATH"]) or shutil.which("flyctl", path=child_env["PATH"])
+    if not fly:
+        raise TokenFailure("configuration", "Fly CLI is missing on the selected Sprite; install fly/flyctl and retry.")
+    child_env["FLY_API_TOKEN"] = child_env["FLY_ACCESS_TOKEN"] = key
+    # Disable optional diagnostics, never use --access-token or shell expansion.
+    for name in ("LOG_LEVEL", "FLY_LOG_LEVEL", "FLY_DEBUG", "DEBUG"):
+        child_env.pop(name, None)
+    child_env["NO_COLOR"] = "1"
+    # Use a transient empty working directory so a repository fly.toml cannot
+    # redirect the app lookup. No credential or CLI output is written there.
+    with tempfile.TemporaryDirectory(prefix="sprite-fly-check-") as workdir:
+        process = subprocess.Popen([fly, "status", "--app", app], env=child_env, cwd=workdir,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            rc = process.wait(timeout=timeout)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise
+    if rc != 0:
+        raise TokenFailure("access-or-service", "fly status failed: token may be invalid/expired, lack app access, or the app/network/service may be unavailable. Check FLY_APP, then replace the token or retry.")
+    return "fly status succeeded for the selected app with both Fly token aliases; deployment/SSH permissions are not proven."
+
+
+def token_main(kind, nonce):
+    import subprocess
+    env = os.environ.copy()
+    key_names = {"github": "GITHUB_PAT", "fly": "FLY_API_TOKEN", "deepseek": "DEEPSEEK_API_KEY",
+                 "minimax": "MINIMAX_API_KEY", "moonshot": "MOONSHOT_API_KEY"}
+    result = {"schema_version": 1, "nonce": nonce, "kind": kind, "passed": False}
+    client = None
+    try:
+        if kind not in key_names or not re.fullmatch(r"[a-f0-9]{32}", nonce):
+            raise TokenFailure("configuration", "Invalid token-check request.")
+        key = env.get(key_names[kind], "")
+        if not key:
+            raise TokenFailure("missing", "Credential is missing.")
+        # Fly macaroons can contain spaces/commas. Do not trim or rewrite them.
+        if not key.isascii() or any(ord(c) < 32 or ord(c) == 127 for c in key) or key != key.strip():
+            raise TokenFailure("format", "Credential contains control/non-ASCII characters or leading/trailing whitespace; re-enter it without changing internal spaces/commas.")
+        timeout = positive_int(env, "TOKEN_CHECK_TIMEOUT", 180, 1, 900)
+        if kind == "github":
+            detail = check_github_token(env, key, timeout)
+        elif kind == "fly":
+            detail = check_fly_token(env, key, timeout)
+        else:
+            # A /models listing need not prove generation access or usable quota.
+            # Test the actual configured native Responses model, with no tools.
+            env.update(MODEL_TEST_TIMEOUT=str(timeout), MODEL_TEST_RETRIES="0", MODEL_TEST_ALLOW_LOCALHOST="0")
+            client = Client(kind, env, key, sanitizer([key]))
+            probe(client, "completion")
+            detail = "Configured model returned a completed, exact-answer Responses reply; generation access verified."
+        result.update(passed=True, category="ok", detail=detail)
+    except TokenFailure as exc:
+        result.update(category=exc.category, detail=str(exc))
+    except KeyboardInterrupt:
+        result.update(category="interrupted", detail="Token check interrupted; launch is blocked.")
+    except (TimeoutError, socket.timeout, subprocess.TimeoutExpired):
+        result.update(category="timeout", detail="Validation timed out; token validity is not established. Retry or check connectivity.")
+    except urllib.error.URLError:
+        result.update(category="network", detail="Network/DNS/TLS error; token validity is not established. Retry or check connectivity.")
+    except ProbeError:
+        failure = token_http_failure(client.last_status if client else None)
+        result.update(category=failure.category, detail=str(failure))
+    except (ValueError, KeyError, TypeError, OSError):
+        result.update(category="configuration-or-response", detail="Configuration or response could not be validated; check settings and retry.")
+    except Exception:
+        result.update(category="response", detail="Unexpected validation failure; launch is blocked. No credential or upstream body was logged.")
+    print("SPRITE_TOKEN_RESULT=" + json.dumps(result, separators=(",", ":")), flush=True)
+    return 0 if result["passed"] else 1
+
+
 def main():
     env = os.environ.copy()
     if env.get("MODEL_TEST_PROMPT", "0") == "1":
@@ -4325,6 +4700,8 @@ def main():
 
 if __name__ == "__main__":
     try:
+        if len(sys.argv) == 4 and sys.argv[1] == "--validate-token":
+            raise SystemExit(token_main(sys.argv[2], sys.argv[3]))
         raise SystemExit(main())
     except KeyboardInterrupt:
         print("\nModel tests interrupted.", file=sys.stderr)
@@ -4534,7 +4911,7 @@ if [[ $AGENT_KIND == kimi-code ]]; then
 fi
 prompt_run_limit
 
-step "target credentials"
+step "target repository and Fly app"
 GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-$(detect_github_repo || true)}"
 if [[ -n $GITHUB_REPOSITORY ]]; then
   note "GitHub repository detected: $GITHUB_REPOSITORY"
@@ -4544,7 +4921,6 @@ else
 fi
 [[ $GITHUB_REPOSITORY =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || die "GitHub repository must be OWNER/REPO"
 note "use a fine-grained PAT limited to $GITHUB_REPOSITORY with Contents: read and write"
-prompt_secret GITHUB_PAT "GitHub PAT for $GITHUB_REPOSITORY"
 
 FLY_APP="${FLY_APP:-$(detect_fly_app || true)}"
 if [[ -n $FLY_APP ]]; then
@@ -4555,7 +4931,6 @@ else
 fi
 [[ $FLY_APP =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || die "invalid Fly.io app name"
 note "use an app-scoped Fly deploy token for $FLY_APP, preferably with a short expiry"
-prompt_secret FLY_API_TOKEN "Fly.io token for $FLY_APP"
 
 step "connect to Sprite"
 # This is the first real exec to the Sprite in the run. It is bounded and uses
@@ -4685,6 +5060,8 @@ if [[ $AGENT_KIND == codex && $CODEX_UPDATE_REQUESTED == 1 && $CODEX_UPDATE_COMP
   fi
 fi
 
+collect_validated_credentials
+
 step "prepare process-scoped GitHub and Fly.io environment"
 GH_TOKEN="$GITHUB_PAT"
 GITHUB_TOKEN="$GITHUB_PAT"
@@ -4721,31 +5098,9 @@ else
 fi
 note "$AGENT_LABEL should use the HTTPS origin directly; no Sprites GitHub gateway is required"
 
-step "verify Fly.io from the Sprite"
-FLY_OUTPUT=$(sx_env "$FLY_ENV" -- bash -lc '
-set -Eeuo pipefail
-export PATH="$HOME/.local/bin:$HOME/.fly/bin:$PATH"
-tmp=$(mktemp); trap "rm -f \"$tmp\"" EXIT
-fly status --app "$FLY_APP" > "$tmp"
-echo "fly_app=$FLY_APP"
-head -12 "$tmp"
-' 2>&1) || {
-  printf '%s\n' "$FLY_OUTPUT"
-  die "Fly.io connection check failed"
-}
-printf '%s\n' "$FLY_OUTPUT"
-ok "Fly.io target app is accessible"
-
-if [[ $AGENT_KIND == codex ]]; then
-  step "optional provider-key access for Codex experiments"
-  choose_codex_secret_access CODEX_MOONSHOT_ACCESS MOONSHOT_API_KEY "Moonshot"
-  choose_codex_secret_access CODEX_MINIMAX_ACCESS MINIMAX_API_KEY "MiniMax"
-  choose_codex_secret_access CODEX_DEEPSEEK_ACCESS DEEPSEEK_API_KEY "DeepSeek"
-
-  [[ $CODEX_MOONSHOT_ACCESS == 1 ]] && prompt_secret MOONSHOT_API_KEY "Moonshot API key for Codex experiment processes"
-  [[ $CODEX_MINIMAX_ACCESS == 1 ]] && prompt_secret MINIMAX_API_KEY "MiniMax API key for Codex experiment processes"
-  [[ $CODEX_DEEPSEEK_ACCESS == 1 ]] && prompt_secret DEEPSEEK_API_KEY "DeepSeek API key for Codex experiment processes"
-fi
+# GitHub and Fly have already passed mandatory in-Sprite validation.
+# Do not repeat the old unredacted Fly CLI diagnostic or accept a stale alias.
+assert_token_validation_gate
 
 if [[ $AGENT_KIND == kimi-code ]]; then
   TRANSPORT=native
@@ -4774,7 +5129,7 @@ elif [[ $CODEX_PROVIDER == deepseek || $CODEX_PROVIDER == minimax || $CODEX_PROV
       SELECTED_KEY=MOONSHOT_API_KEY; SELECTED_ACCESS=$CODEX_MOONSHOT_ACCESS ;;
   esac
   step "$CODEX_PROVIDER credential"
-  prompt_secret "$SELECTED_KEY" "$CODEX_PROVIDER API key required by $SELECTED_MODEL"
+  note "$SELECTED_KEY was validated before repository setup"
   ALL_CREDENTIAL_ENV=$(build_codex_credential_env "$SELECTED_KEY")
   if [[ $SELECTED_ACCESS == 1 ]]; then
     warn "the selected provider key is also exposed to Codex-run experiment processes for this run"
@@ -4850,6 +5205,8 @@ fi
 # included in the comparison and optional push.
 check_and_offer_repo_push
 fi
+
+assert_token_validation_gate
 
 if [[ $AGENT_KIND == kimi-code ]]; then
   step "verify Kimi Code shared-workspace access"
