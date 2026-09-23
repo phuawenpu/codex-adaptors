@@ -1,9 +1,31 @@
 #!/usr/bin/env bash
-# sprite-codex-v47.sh — updated 2026-09-18
+# sprite-codex-v49.sh — updated 2026-09-23
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
 # native detachable TTY sessions, resume/fork, update and reconnect support.
+#
+# v49 makes saved-conversation selection explicit: resume runs `codex resume`
+# through the existing provider launcher, without --last or a conversation ID.
+# Fork/recovery uses `codex fork` so the user selects the intended source history.
+# Post-update relaunches also open the resume picker, rather than guessing which
+# saved conversation was just active. Live native TTY reattachment is unchanged.
+# Resume interrupt exit codes do not trigger fork recovery or an update relaunch.
+# The new-conversation default remains unchanged; choose Resume to see history.
+# Codex resume/fork docs checked 2026-09-23:
+# https://developers.openai.com/codex/cli/reference/
+#
+# v48 adds optional official Mobbin hosted MCP setup after the Codex update stage.
+# MOBBIN_MCP_MODE=ask|always|never (ask defaults to No; noninteractive skips).
+# MOBBIN_MCP_LOGIN=ask|always|never; browser OAuth runs inside the selected Sprite
+# with automatic loopback port forwarding. No Mobbin API key is requested.
+# Login credentials are stored by Codex, not in the process-only provider env map.
+# Existing servers/settings are preserved; conflicting/disabled entries are not
+# replaced/enabled. Failure is non-fatal; no running Codex session is restarted.
+# Reattach may require a later agent restart before newly added tools are loaded.
+# MOBBIN_MCP_LOGIN_TIMEOUT=300 (1..1800 seconds). Model defaults remain unchanged.
+# Mobbin docs: https://docs.mobbin.com/mcp/introduction
+# Codex docs: https://developers.openai.com/codex/mcp
 #
 # v47 adds mandatory, in-Sprite validation of every credential used by a new run.
 # GitHub PAT: authenticated user, target repository and Git write-service access.
@@ -25,12 +47,12 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v47.sh                        # existing interactive workflow
-#   bash sprite-codex-v47.sh --show-models          # no API calls
-#   bash sprite-codex-v47.sh --test-models          # host API tests only
-#   bash sprite-codex-v47.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v47.sh --test-models-before-run
-#   bash sprite-codex-v47.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v49.sh                        # existing interactive workflow
+#   bash sprite-codex-v49.sh --show-models          # no API calls
+#   bash sprite-codex-v49.sh --test-models          # host API tests only
+#   bash sprite-codex-v49.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v49.sh --test-models-before-run
+#   bash sprite-codex-v49.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -109,7 +131,7 @@ umask 077
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v47.sh [option] [--json-output PATH]
+Usage: bash sprite-codex-v49.sh [option] [--json-output PATH]
 
   (no option)               Normal Sprite bootstrap; optional model-test prompt.
   --test-models             Test DeepSeek, MiniMax and Moonshot from this host.
@@ -117,6 +139,19 @@ Usage: bash sprite-codex-v47.sh [option] [--json-output PATH]
   --test-models-before-run  Require host tests to pass, then run normal bootstrap.
   --show-models             Display configured model IDs and base URLs; no calls.
   --help, -h                Display this help.
+
+Optional Mobbin MCP setup runs AFTER the Codex update stage (Codex agent only).
+MOBBIN_MCP_MODE=ask|always|never (default ask; interactive default No).
+MOBBIN_MCP_LOGIN=ask|always|never (default ask; noninteractive never opens OAuth).
+MOBBIN_MCP_LOGIN_TIMEOUT=300 bounds browser OAuth (1..1800 seconds).
+The official hosted server uses OAuth, not a pasted API key, and requires a
+Mobbin Pro/Team/Enterprise plan. Tool calls may use Mobbin AI credits.
+Configuration is persistent in ~/.codex/config.toml on the selected Sprite.
+Codex stores OAuth credentials normally; they are NOT process-only tokens.
+Existing MCP entries are preserved; 'never' does not uninstall an existing entry.
+The login exec enables automatic localhost forwarding; agent exec behavior is unchanged.
+Live Codex sessions are not restarted; newly added tools may need a later restart.
+Installation/OAuth failures do not prevent ordinary session reattachment.
 
 Every credential used by a NEW run is validated on the selected Sprite:
 GitHub authentication + repository/write-service access, Fly app status, and a
@@ -181,6 +216,23 @@ while (($#)); do
   esac
 done
 case "$MODEL_TEST_MODE" in ask|always|never) ;; *) echo "error: MODEL_TEST_MODE must be ask, always or never" >&2; exit 2 ;; esac
+
+MOBBIN_MCP_MODE="${MOBBIN_MCP_MODE:-ask}"
+MOBBIN_MCP_LOGIN="${MOBBIN_MCP_LOGIN:-ask}"
+MOBBIN_MCP_LOGIN_TIMEOUT="${MOBBIN_MCP_LOGIN_TIMEOUT:-300}"
+for _mobbin_setting in MOBBIN_MCP_MODE MOBBIN_MCP_LOGIN; do
+  case "${!_mobbin_setting}" in
+    ask|always|never) ;;
+    *) echo "error: $_mobbin_setting must be ask, always, or never" >&2; exit 2 ;;
+  esac
+done
+[[ $MOBBIN_MCP_LOGIN_TIMEOUT =~ ^[1-9][0-9]{0,3}$ ]] && (( MOBBIN_MCP_LOGIN_TIMEOUT <= 1800 )) || {
+  echo "error: MOBBIN_MCP_LOGIN_TIMEOUT must be 1..1800 seconds" >&2; exit 2;
+}
+MOBBIN_MCP_DECIDED=0
+MOBBIN_MCP_SELECTED=0
+MOBBIN_MCP_DONE=0
+MOBBIN_MCP_HELPER=""
 
 # Single source of truth for generation, tests, menus and remote launchers.
 DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-flash}"
@@ -573,13 +625,13 @@ choose_codex_start_mode() {
     resume)
       CODEX_START_ACTION=resume
       CODEX_MODE_SELECTED=1
-      note "$context: resuming the most recent Codex conversation"
+      note "$context: opening the saved-conversation picker: codex resume"
       return 0
       ;;
     fork)
       CODEX_START_ACTION=fork
       CODEX_MODE_SELECTED=1
-      note "$context: forking the most recent Codex conversation into a new writable thread"
+      note "$context: opening the saved-conversation fork picker: codex fork"
       return 0
       ;;
     new)
@@ -598,19 +650,19 @@ choose_codex_start_mode() {
   fi
 
   printf '\n  How should Codex start in the new TTY?\n'
-  printf '    1) Resume the most recent Codex conversation\n'
-  printf '    2) Fork the most recent conversation (same history, new writable thread)\n'
+  printf '    1) Resume a saved conversation (choose in Codex)\n'
+  printf '    2) Fork a saved conversation (choose in Codex; new writable thread)\n'
   printf '    3) Start a new Codex conversation [default]\n'
   printf '  Select [1-3]: '
   IFS= read -r choice || true
   case "${choice,,}" in
     1|r|resume)
       CODEX_START_ACTION=resume
-      note "Codex will run: codex resume --last"
+      note "Codex will run: codex resume"
       if [[ $CODEX_PROVIDER == deepseek ]]; then
-        note "resume replays the previous chat history through the selected DeepSeek native Responses provider"
+        note "resume replays the conversation you select through the selected DeepSeek native Responses provider"
       elif [[ $CODEX_PROVIDER == kimi ]]; then
-        note "resume replays the previous chat history through the selected Moonshot native Responses provider"
+        note "resume replays the conversation you select through the selected Moonshot native Responses provider"
       elif [[ $CODEX_PROVIDER == minimax ]]; then
         note "resume uses the MiniMax native Responses provider selected for this run"
       else
@@ -619,9 +671,9 @@ choose_codex_start_mode() {
       ;;
     2|f|fork)
       CODEX_START_ACTION=fork
-      note "Codex will run: codex fork --last"
+      note "Codex will run: codex fork"
       note "the selected conversation history is preserved under a new writable thread ID"
-      note "this is the safe choice when the original thread reports an active writer"
+      note "select the intended source conversation; forking creates a separate thread, not a reattachment"
       ;;
     ''|3|n|new)
       CODEX_START_ACTION=new
@@ -1911,6 +1963,404 @@ cat "$marker"
   warn "latest Codex update did not complete or could not be verified (rc=$rc)"
   note "continuing with the currently selected Codex; normal setup still enforces MIN_CODEX_VERSION"
   return "$rc"
+}
+
+# Optional official Mobbin Streamable HTTP MCP. Configure separately from OAuth:
+# `codex mcp add --url` can initiate login, which must not block unattended setup.
+# The equivalent documented TOML entry is added atomically and checked by Codex.
+make_mobbin_mcp_helper() {
+  if [[ -n ${MOBBIN_MCP_HELPER:-} && -f $MOBBIN_MCP_HELPER ]]; then return 0; fi
+  MOBBIN_MCP_HELPER=$(mktemp)
+  cleanup_files+=("$MOBBIN_MCP_HELPER")
+  cat >"$MOBBIN_MCP_HELPER" <<'MOBBIN_MCP_PY'
+#!/usr/bin/env python3
+"""Secret-free Mobbin configuration; OAuth credentials stay in Codex's store."""
+import fcntl
+import glob
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+URL = "https://api.mobbin.com/mcp"
+
+
+def fail(message, code=78):
+    print("Mobbin MCP: " + message, file=sys.stderr, flush=True)
+    raise SystemExit(code)
+
+
+def load_toml(text):
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib
+        except ImportError:
+            fail("Python 3.11+ or tomli is required on the Sprite; no configuration changed.", 75)
+    try:
+        return tomllib.loads(text)
+    except (ValueError, TypeError):
+        # TOML errors may echo config values, including secrets: never print them.
+        fail("existing Codex TOML is invalid; no configuration changed.")
+
+
+def atomic_write(path, data):
+    fd, tmp = tempfile.mkstemp(prefix=".sprite-mobbin-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def read_config(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        fail("refusing a symlink, non-file or differently owned config.toml; leaving it untouched.")
+    return path.read_bytes()
+
+
+def check_entry(root):
+    servers = root.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        fail("mcp_servers is not a TOML table; leaving it untouched.")
+    if "mobbin" not in servers:
+        return "missing"
+    entry = servers["mobbin"]
+    if not isinstance(entry, dict) or entry.get("url") not in (URL, URL + "/") or entry.get("command"):
+        fail("the name 'mobbin' already has a different configuration; it was NOT replaced.")
+    if entry.get("enabled", True) is False:
+        return "disabled"
+    if any(entry.get(k) for k in ("bearer_token", "bearer_token_env_var", "http_headers", "env_http_headers", "http_headers_helper")):
+        fail("existing Mobbin uses custom authentication/headers; manage it manually. Nothing replaced.")
+    return "existing"
+
+
+def runtime(home):
+    codex_home = home / ".codex"
+    configured_home = os.environ.get("CODEX_HOME")
+    if configured_home and Path(configured_home).expanduser().resolve() != codex_home.resolve():
+        fail("remote CODEX_HOME differs from ~/.codex used by this bootstrap; align it before installing.")
+    env = os.environ.copy()
+    # No GitHub/Fly/model credentials are needed by MCP configuration or login.
+    for key in list(env):
+        if any(word in key.upper() for word in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY")):
+            env.pop(key, None)
+    bins = [str(home / ".local/bin"), str(home / ".fly/bin")]
+    nodes = []
+    for pattern in ("/.sprite/languages/node/nvm/versions/node/*/bin/node",
+                    str(home / ".nvm/versions/node/*/bin/node"),
+                    str(home / ".local/share/nvm/versions/node/*/bin/node")):
+        nodes.extend(glob.glob(pattern))
+    def node_version(p):
+        match = re.search(r"/v?(\d+)\.(\d+)\.(\d+)/bin/node$", p)
+        return tuple(map(int, match.groups())) if match else (0, 0, 0)
+    bins.extend(str(Path(p).parent) for p in sorted(nodes, key=node_version, reverse=True))
+    env["PATH"] = os.pathsep.join(bins + [env.get("PATH", "/usr/local/bin:/usr/bin:/bin")])
+    env["CODEX_HOME"] = str(codex_home)
+    resolver = home / ".local/bin/sprite-codex-cli"
+    codex = str(resolver) if resolver.is_file() and os.access(resolver, os.X_OK) else shutil.which("codex", path=env["PATH"])
+    if not codex:
+        fail("Codex is not available yet; defer until Sprite tool setup/update completes.", 75)
+    return codex_home, codex, env
+
+
+def codex_output(codex, env, home, args):
+    try:
+        result = subprocess.run([codex, *args], cwd=home, env=env, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        fail("Codex management command failed or timed out; no authentication was verified.")
+    if result.returncode:
+        fail("Codex management command failed; check its version and config manually (raw output withheld).")
+    return result.stdout
+
+
+def verify_cli(codex, env, home):
+    output = codex_output(codex, env, home, ["mcp", "get", "mobbin", "--json"])
+    try:
+        entry = json.loads(output)
+        transport = entry.get("transport", entry)
+        valid = isinstance(transport, dict) and transport.get("url") in (URL, URL + "/")
+        valid = valid and entry.get("enabled", True) is not False
+        valid = valid and transport.get("type", "streamable_http") == "streamable_http"
+    except (ValueError, AttributeError):
+        valid = False
+    if not valid:
+        fail("Codex did not confirm the expected enabled Mobbin HTTP entry; check config overrides manually.")
+
+
+def configure(home, codex_home, codex, env):
+    codex_output(codex, env, home, ["mcp", "--help"])
+    if codex_home.is_symlink():
+        fail("refusing to modify a symlinked ~/.codex directory.")
+    codex_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = codex_home / ".sprite-mobbin-config.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail("another Mobbin setup is running; retry later.")
+        path = codex_home / "config.toml"
+        before = read_config(path)
+        text = (before or b"").decode("utf-8")
+        root = load_toml(text)
+        state = check_entry(root)
+        if state == "disabled":
+            print("MOBBIN_MCP_RESULT=disabled", flush=True)
+            return
+        if state == "existing":
+            verify_cli(codex, env, home)
+            print("MOBBIN_MCP_RESULT=existing", flush=True)
+            return
+        addition = ('\n\n# Mobbin hosted MCP (sprite-codex v48); OAuth is managed by Codex.\n'
+                    '[mcp_servers.mobbin]\n'
+                    'url = "https://api.mobbin.com/mcp"\n'
+                    'enabled = true\nrequired = false\n'
+                    'startup_timeout_sec = 30\ntool_timeout_sec = 120\n')
+        after = (text + addition).encode("utf-8")
+        parsed = load_toml(after.decode("utf-8"))
+        expected = dict(root.get("mcp_servers", {}))
+        expected["mobbin"] = parsed["mcp_servers"]["mobbin"]
+        if parsed != dict(root, mcp_servers=expected):
+            fail("configuration merge was not isolated to Mobbin; no changes made.")
+        if before is not None:
+            backups = codex_home / "backup-sprite-codex"
+            if backups.is_symlink():
+                fail("backup directory is a symlink; no changes made.")
+            backups.mkdir(mode=0o700, exist_ok=True)
+            fd, backup = tempfile.mkstemp(prefix="config.toml.mobbin-", suffix=".bak", dir=backups)
+            with os.fdopen(fd, "wb") as out:
+                out.write(before)
+            os.chmod(backup, 0o600)
+        # Do not silently overwrite a user/editor change made during preparation.
+        if read_config(path) != before:
+            fail("config.toml changed concurrently; no replacement performed.")
+        atomic_write(path, after)
+        try:
+            verify_cli(codex, env, home)
+        except BaseException:
+            if read_config(path) == after:
+                if before is None:
+                    path.unlink()
+                else:
+                    atomic_write(path, before)
+                print("Mobbin MCP: restored the pre-install config after verification failed.", file=sys.stderr)
+            raise
+        print("MOBBIN_MCP_RESULT=added", flush=True)
+
+
+def login(home, codex_home, codex, env, request, timeout):
+    if not re.fullmatch(r"[a-f0-9]{32}", request) or not 1 <= timeout <= 1800:
+        fail("invalid login request.")
+    state_dir = home / ".local/state/sprite-codex"
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    result_path = state_dir / ("mobbin-mcp-login-" + request + ".json")
+    def record(status):
+        atomic_write(result_path, json.dumps({"request_id": request, "status": status}).encode())
+    # Only this request's completion record can confirm success after a TTY detach.
+    record("pending")
+    child = None
+    rc = 1
+    fd = os.open(codex_home / ".sprite-mobbin-login.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            record("busy")
+            fail("a managed Mobbin login is already running; no second login started.")
+        try:
+            root = load_toml((read_config(codex_home / "config.toml") or b"").decode("utf-8"))
+            if check_entry(root) != "existing":
+                fail("Mobbin must be configured and enabled before login.")
+            verify_cli(codex, env, home)
+            def interrupted(signum, frame):
+                raise InterruptedError("login interrupted")
+            signal.signal(signal.SIGTERM, interrupted)
+            signal.signal(signal.SIGHUP, interrupted)
+            child = subprocess.Popen([codex, "mcp", "login", "mobbin"], cwd=home, env=env,
+                                     stdin=subprocess.DEVNULL, start_new_session=True)
+            rc = child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print("Mobbin MCP: browser authorization timed out.", file=sys.stderr)
+            rc = 124
+        except (KeyboardInterrupt, InterruptedError):
+            print("Mobbin MCP: browser authorization interrupted.", file=sys.stderr)
+            rc = 130
+        finally:
+            # Stop only our one OAuth management subprocess, never an agent session.
+            if child is not None and child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+                except ProcessLookupError:
+                    pass
+            record("ok" if rc == 0 else "failed")
+    raise SystemExit(rc if rc >= 0 else 128 - rc)
+
+
+def main():
+    home = Path.home()
+    codex_home, codex, env = runtime(home)
+    if sys.argv[1:] == ["configure"]:
+        configure(home, codex_home, codex, env)
+    elif len(sys.argv) == 4 and sys.argv[1] == "login":
+        login(home, codex_home, codex, env, sys.argv[2], int(sys.argv[3]))
+    else:
+        fail("invalid action.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, UnicodeError, ValueError):
+        fail("filesystem/runtime error; check ownership, free space and Codex configuration (details withheld).")
+MOBBIN_MCP_PY
+}
+
+run_mobbin_mcp_login() {
+  local request rc=0 result=""
+  [[ -t 0 && -t 1 ]] || {
+    warn "no interactive terminal: Mobbin is configured, but OAuth login was not attempted"
+    note "rerun from a terminal with MOBBIN_MCP_MODE=always MOBBIN_MCP_LOGIN=always"
+    return 0
+  }
+  make_mobbin_mcp_helper
+  request=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
+  note "open the authorization URL printed by Codex in your LOCAL browser and approve Mobbin"
+  note "automatic Sprite port forwarding is enabled for this login's loopback callback"
+  note "finish authorization here; Ctrl+C cancels it, while Ctrl+\\ only detaches the login viewer"
+  # Do not use --no-port-forward here: the local browser must reach the Sprite's
+  # loopback OAuth listener. No public Sprite URL or external callback is enabled.
+  # Empty decoded environment removes inherited API secrets but preserves HOME.
+  if sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty \
+      --env "SPRITE_CODEX_ENV_HEX=7b7d" -- \
+      python3 -c "$ENV_EXEC_PY" python3 -c "$(<"$MOBBIN_MCP_HELPER")" \
+      login "$request" "$MOBBIN_MCP_LOGIN_TIMEOUT"; then rc=0; else rc=$?; fi
+  # A clean local detach also returns 0. It is NOT proof that OAuth succeeded.
+  result=$(control_exec_limited 15 -- python3 -c '
+import json, pathlib, re, sys
+request = sys.argv[1]
+if not re.fullmatch(r"[a-f0-9]{32}", request): raise SystemExit(2)
+p = pathlib.Path.home()/".local/state/sprite-codex"/("mobbin-mcp-login-"+request+".json")
+try: data = json.loads(p.read_text())
+except (OSError, ValueError): raise SystemExit(1)
+if data.get("request_id") != request: raise SystemExit(1)
+status = data.get("status")
+if status not in ("ok", "pending", "failed", "busy"): raise SystemExit(1)
+print("MOBBIN_LOGIN_RESULT="+status)
+' "$request" 2>/dev/null || true)
+  if grep -qx 'MOBBIN_LOGIN_RESULT=ok' <<<"$result"; then
+    ok "Codex completed Mobbin OAuth on the selected Sprite"
+    note "this verifies the login flow, not a paid Mobbin search; inspect /mcp in Codex"
+  else
+    warn "Mobbin OAuth success was not confirmed (viewer rc=$rc); configuration is retained"
+    note "a detached login can remain pending until its timeout; no automatic second login was started"
+    note "rerun with MOBBIN_MCP_MODE=always MOBBIN_MCP_LOGIN=always when ready to authorize"
+    note "for callback problems, see the Mobbin section in README.md; no login token should be pasted into chat"
+  fi
+  return 0
+}
+
+maybe_setup_mobbin_mcp() {
+  local phase=${1:-early} answer="" output="" rc=0 state="" login_now=0
+  [[ $AGENT_KIND == codex && $MOBBIN_MCP_MODE != never && $MOBBIN_MCP_DONE == 0 ]] || return 0
+  if [[ $MOBBIN_MCP_DECIDED == 0 ]]; then
+    MOBBIN_MCP_DECIDED=1
+    step "optional Mobbin MCP setup (after Codex update)"
+    if [[ $MOBBIN_MCP_MODE == always ]]; then
+      MOBBIN_MCP_SELECTED=1
+    elif [[ -t 0 && -t 1 ]]; then
+      note "Mobbin requires a Pro, Team or Enterprise plan and browser OAuth; no API token is requested"
+      printf '  Install/configure the official Mobbin MCP for Codex on this Sprite? [y/N]: '
+      IFS= read -r answer || answer=n
+      case "${answer,,}" in y|yes) MOBBIN_MCP_SELECTED=1 ;; esac
+    fi
+    if [[ $MOBBIN_MCP_SELECTED != 1 ]]; then
+      MOBBIN_MCP_DONE=1
+      note "Mobbin setup skipped; existing MCP configuration and login are unchanged"
+      return 0
+    fi
+    note "only the Mobbin MCP entry is added; model providers and other MCP servers are preserved"
+    note "authorizing permits Codex to send Mobbin tool queries; searches may consume Mobbin AI credits"
+    note "Mobbin OAuth credentials persist in Codex's normal store on the Sprite, unlike the process-only model keys"
+  fi
+  # Do not run ahead of a requested update that is awaiting its after-setup retry.
+  if [[ $CODEX_UPDATE_REQUESTED == 1 && $CODEX_UPDATE_COMPLETED != 1 ]]; then
+    if [[ $phase == early ]]; then
+      note "Mobbin setup is deferred until the requested Codex update completes"
+    else
+      MOBBIN_MCP_DONE=1
+      warn "requested Codex update was not verified; optional Mobbin setup skipped for this run"
+    fi
+    return 0
+  fi
+  make_mobbin_mcp_helper
+  if output=$(run_remote_file "$MOBBIN_MCP_HELPER" "7b7d" "" -- \
+      python3 @SPRITE_PAYLOAD@ configure 2>&1); then rc=0; else rc=$?; fi
+  state=$(sed -n 's/^MOBBIN_MCP_RESULT=\(added\|existing\|disabled\)$/\1/p' <<<"$output" | tail -1)
+  if (( rc != 0 )) || [[ -z $state ]]; then
+    [[ -z $output ]] || printf '%s\n' "$output"
+    if (( rc == 75 )) && [[ $phase == early ]]; then
+      note "Mobbin setup will be retried after Sprite tools are ready; reattachment remains available"
+    else
+      MOBBIN_MCP_DONE=1
+      warn "optional Mobbin setup was not verified (rc=$rc); continuing without a Mobbin readiness claim"
+    fi
+    return 0
+  fi
+  MOBBIN_MCP_DONE=1
+  if [[ $state == disabled ]]; then
+    note "Mobbin is already configured but disabled; its explicit setting was preserved (no login attempted)"
+    return 0
+  fi
+  ok "Mobbin MCP configuration verified by Codex ($state) on Sprite $SPRITE_NAME"
+  if [[ $CODEX_UPDATE_LIVE_DETECTED == 1 ]]; then
+    warn "an existing Codex process may not load a newly added MCP server until its next restart"
+    note "this script will not restart/replace it for Mobbin; normal reattachment is unchanged"
+  fi
+  case "$MOBBIN_MCP_LOGIN" in
+    always) login_now=1 ;;
+    ask)
+      if [[ -t 0 && -t 1 ]]; then
+        if [[ $state == added ]]; then
+          printf '  Authorize Mobbin in your browser now? [Y/n]: '
+          IFS= read -r answer || answer=n
+          case "${answer,,}" in ''|y|yes) login_now=1 ;; esac
+        else
+          printf '  Mobbin is already configured. Run browser login again? [y/N]: '
+          IFS= read -r answer || answer=n
+          case "${answer,,}" in y|yes) login_now=1 ;; esac
+        fi
+      fi ;;
+  esac
+  if (( login_now )); then
+    run_mobbin_mcp_login
+  else
+    note "Mobbin login was not tested or changed; an existing Codex OAuth login may still be usable"
+    note "for a new connection, rerun with MOBBIN_MCP_MODE=always MOBBIN_MCP_LOGIN=always"
+  fi
+  return 0
 }
 
 make_remote_setup() {
@@ -3475,7 +3925,8 @@ if [[ $AGENT_KIND == kimi-code ]]; then
 fi
 
 # Keep this runner alive around Codex so an in-app update can replace the
-# executable and then resume the same persisted conversation.
+# executable and then reopen the resume picker. The user chooses the saved chat;
+# no automatic latest-session lookup or transcript-output parsing is performed.
 CODEX_RESOLVER="$HOME/.local/bin/sprite-codex-cli"
 
 codex_path() {
@@ -3511,13 +3962,14 @@ run_codex_mode() {
   local mode=$1
   case "$mode" in
     resume)
-      echo "       resuming the most recent Codex conversation: codex resume --last"
-      "$CODEX_LAUNCHER" resume --last
+      echo "       opening the saved-conversation picker: codex resume"
+      echo "       select the conversation to continue; no conversation ID or --last is supplied"
+      "$CODEX_LAUNCHER" resume
       ;;
     fork)
-      echo "       forking the most recent Codex conversation: codex fork --last"
-      echo "       the source history remains intact; Codex will allocate a new writable thread ID"
-      "$CODEX_LAUNCHER" fork --last
+      echo "       opening the saved-conversation fork picker: codex fork"
+      echo "       select the intended source; Codex creates a separate thread without replacing the source history"
+      "$CODEX_LAUNCHER" fork
       ;;
     new)
       echo "       opening a new Codex conversation in the existing repository workspace"
@@ -3538,6 +3990,15 @@ while :; do
     codex_rc=$?
   fi
 
+  # An interrupted picker/run is not a request to fork or restart. A clean
+  # exit is handled below; do not claim it proves that a conversation was resumed.
+  case "$codex_rc" in
+    129|130|131|143)
+      echo "       Codex was interrupted (rc=$codex_rc); no fork or update relaunch will be attempted"
+      exit "$codex_rc"
+      ;;
+  esac
+
   if (( codex_rc != 0 )) && [[ $launch_mode == resume ]]; then
     echo >&2
     echo "warning: Codex resume exited with rc=$codex_rc" >&2
@@ -3546,17 +4007,17 @@ while :; do
       printf '%s\n' "$codex_processes" | sed 's/^/         /' >&2
     else
       echo "warning: no live Codex, app-server, or codeproxy process was found" >&2
-      echo "         if Codex reported an active writer, its ownership state is stale" >&2
+      echo "         this process-name probe alone cannot establish whether a conversation has an active writer" >&2
     fi
-    echo "         the saved transcript and workspace have not been changed" >&2
+    echo "         this recovery step will not delete transcript files, reset the workspace, or terminate other agents" >&2
     if [[ -t 0 && -t 1 ]]; then
-      printf '  Fork the most recent conversation into a new writable thread now? [Y/n]: '
-      IFS= read -r fork_after_resume || true
+      printf '  Open the fork picker to select a saved conversation for a new thread? [y/N]: '
+      IFS= read -r fork_after_resume || fork_after_resume=n
     else
       fork_after_resume=n
     fi
     case "${fork_after_resume,,}" in
-      ''|y|yes)
+      y|yes)
         launch_mode=fork
         if run_codex_mode "$launch_mode"; then
           codex_rc=0
@@ -3565,7 +4026,7 @@ while :; do
         fi
         ;;
       *)
-        echo "       resume recovery cancelled; rerun and choose the Codex fork option to preserve the history under a new thread ID"
+        echo "       fork recovery skipped; rerun and choose Resume to select the intended saved conversation"
         ;;
     esac
   fi
@@ -3598,10 +4059,11 @@ while :; do
       exit "$codex_rc"
     fi
 
-    # The just-ended TUI has already persisted its conversation. Resume it so
-    # an in-app update returns the user directly to the same work.
+    # Open the picker with the verified update. Without an explicit user
+    # selection, the latest saved thread need not be the one that just ended.
     launch_mode=resume
-    echo "       relaunching with the updated Codex and resuming the conversation"
+    echo "       relaunching with the updated Codex and opening the resume picker"
+    echo "       select the conversation you were working on before the update"
     continue
   fi
 
@@ -3854,7 +4316,7 @@ offer_codex_update_before_run() {
     note "updating will not stop, kill, attach to, or rewrite the active conversation"
     note "the active process keeps running; the new selector is used by the next Codex launch or managed relaunch"
     if ((${#live_rows[@]} > 0)); then
-      note "the existing native runner already resumes the just-ended conversation after it detects a newer Codex"
+      note "the running TTY keeps its installed runner logic; new v49 runners reopen the resume picker after a verified update"
     fi
   else
     note "no live Codex session or process was detected by the validated inventory/probes"
@@ -4867,6 +5329,7 @@ fi
 # while still making the latest-version option available on every Codex run.
 if [[ $AGENT_KIND == codex ]]; then
   offer_codex_update_before_run "$_NATIVE_INVENTORY"
+  maybe_setup_mobbin_mcp early
 fi
 
 SHARED_PEER_LIVE=0
@@ -5059,6 +5522,9 @@ if [[ $AGENT_KIND == codex && $CODEX_UPDATE_REQUESTED == 1 && $CODEX_UPDATE_COMP
     warn "the requested latest-version update is still unavailable; continuing with the verified installed Codex"
   fi
 fi
+
+# Retry a deferred first-install only after tools and requested Codex update.
+maybe_setup_mobbin_mcp after-setup
 
 collect_validated_credentials
 
@@ -5380,7 +5846,10 @@ else
   note "no live native managed TTY was confirmed after the attachment ended"
   if [[ $AGENT_KIND == codex ]]; then
     note "conversation files remain on the Sprite"
-    note "if resume reported an active writer with no live process, rerun and choose 'Fork the most recent conversation'"
+    note "rerun and choose 'Resume a saved conversation' to open the Codex picker (no chat ID required)"
+    if (( launch_rc != 0 )); then
+      note "only if Codex explicitly reports an active-writer conflict, consider Fork and select the intended source chat"
+    fi
   else
     note "resume state is retained as a history hint; rerun and choose Kimi Code continue if it exited"
   fi
