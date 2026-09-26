@@ -1,9 +1,83 @@
 #!/usr/bin/env bash
-# sprite-codex-v49.sh — updated 2026-09-23
+# sprite-codex-v53.sh — updated 2026-09-26
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
 # native detachable TTY sessions, resume/fork, update and reconnect support.
+#
+# v53 simplifies --files/--shell into input/output file pickers.
+# Downloads are restricted to <selected-workspace>/output/; uploads select local
+# launch-directory files/folders and publish under <selected-workspace>/input/.
+# Arrow keys + Space + Enter when curses/terminal support is available; numbered
+# multi-select fallback otherwise. SPRITE_FILE_UI=auto|arrows|menu (default auto).
+# Both pickers navigate only below their roots; no paths or transfer commands needed.
+# Input is created only after upload confirmation. Conflicts keep both via suffixes,
+# still protected by atomic no-clobber publication. Completed earlier batch items
+# remain if a later item fails. Selections are revalidated; no agent restart needed.
+# Hidden names are hidden initially (H reveals them); selected folders still include
+# hidden contents. Links/special files are never followed by transfer pickers.
+# Advanced shell remains explicit; it is NOT restricted to the picker directories.
+# Existing post-session ~/output download convention is unchanged; --files uses
+# workspace/output, NOT ~/output or /output. --output-dir is rejected in --files.
+#
+# v52 adds an independent shell/file-access menu (--files or --shell, startup 5).
+# Pick an existing Sprite and a live session's recorded workspace, or --workdir.
+# Starts a separate Bash TTY only on request; never attaches/restarts Codex, loads
+# its credentials, runs token/model checks, updates, Mobbin, or Git sync/push.
+# Browse/preview, upload local files/directories and download files/directory ZIPs
+# while Codex remains in the other local terminal. Both share the Sprite filesystem.
+# No-overwrite uploads are streamed into a private hidden sibling stage, verified,
+# then published atomically. No directory overlays; links/special files rejected.
+# Individual downloads are checked with SHA-256; directory downloads reuse v51 ZIP.
+# SPRITE_FILE_TIMEOUT=3600 (1..86400). Both transfer directions stream large files.
+# --session-id in file mode selects a workspace, NOT an attachment. --workdir or
+# SPRITE_WORKDIR selects an existing remote directory instead. No local cwd hash.
+# In file mode, exit from Bash returns to the LOCAL transfer menu. Remote Bash cd
+# does not move the menu's directory. Bash uses no profile/rc and no history file.
+# A shell shares permissions/files, not the live agent's process-scoped tokens.
+# Race checks are not filesystem snapshots: finish writes before transfers.
+# No overwrite, source deletion, automatic extraction, or resumable transfer.
+# Local CLI context is private; caller .sprite and resume-state JSON are unchanged.
+# Native shell exec flags verified: https://docs.fly.io/sprites/cli/commands/
+#
+# v51 adds optional output ZIP download when an agent terminal returns, including
+# early attach-only, normal reattachment, and newly launched sessions.
+# Default remote folder: $HOME/output (create it from Codex when needed).
+# SPRITE_OUTPUT_DIR or --output-dir selects another absolute folder, e.g. /output.
+# SPRITE_OUTPUT_DOWNLOAD=ask|always|never (default ask, default answer No).
+# --download-output retrieves files without launching/attaching to an agent.
+# ZIPs are saved in the LOCAL directory where this invocation started, not on
+# the Sprite or beside this script. ZIP64 streams via non-TTY exec, using only
+# local Sprites authentication. No remote ZIP file, public server, provider key,
+# Git sync/push, source deletion or automatic extraction. SHA-256 and ZIP CRCs
+# must pass before a private local .partial becomes the uniquely named ZIP.
+# Symlinks/special files are skipped; symlinked root path components are rejected.
+# Finish writes first: detected source changes fail the download, not Codex.
+# Closing the local terminal cannot display an exit prompt: use download-only later.
+# SPRITE_DOWNLOAD_TIMEOUT=3600 bounds remote scan/compression/transfer (1..86400).
+# SPRITE_OUTPUT_COMPRESSION=1 (0..9); 0 stores without compression.
+# SPRITE_DOWNLOAD_TRANSPORT=websocket|http-post (default websocket).
+# With download declined/disabled, attach-only still executes no remote command.
+# Download failures preserve the preceding agent/attach exit status; explicit
+# --download-output reports its own failure status. No automatic resume of .partial.
+#
+# v50 adds an opening Attach / Normal setup / Quit menu (interactive, no run flag).
+# Attach-only runs BEFORE bootstrap configuration validation, model tests, agent/
+# provider choice, Codex updates, Mobbin, tokens, workspace setup or saved state.
+# --attach-only skips straight to Sprite/session selection; --session-id ID plus
+# SPRITE_NAME selects one exact native terminal after a fresh inventory check.
+# All active native TTYs on the chosen Sprite are listed, regardless of project.
+# Attachment itself never executes a new remote command, kills a session, writes
+# project state, or falls through to bootstrap. A confirmed output download does
+# run a separate read-only non-TTY archive command. It needs only local sprite + Python 3.9+.
+# --bootstrap skips the new opening menu and preserves the old setup workflow.
+# Bare non-interactive runs retain the old bootstrap behavior; attach needs a TTY.
+# SPRITE_ATTACH_TIMEOUT=25 bounds each local CLI inventory/context/help call.
+# SPRITE_ORG selects the CLI organization; otherwise the global CLI default is used.
+# Other bootstrap-only environment settings (including FORCE_NEW_SESSION) do not
+# affect attach-only. TTY_AUTO_REATTACH/TTY_REATTACH_* still control reconnects.
+# The attach picker uses native Sprite sessions, not a new tmux client or Codex
+# conversation picker. Legacy tmux-only discovery remains in normal bootstrap.
 #
 # v49 makes saved-conversation selection explicit: resume runs `codex resume`
 # through the existing provider launcher, without --last or a conversation ID.
@@ -47,12 +121,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v49.sh                        # existing interactive workflow
-#   bash sprite-codex-v49.sh --show-models          # no API calls
-#   bash sprite-codex-v49.sh --test-models          # host API tests only
-#   bash sprite-codex-v49.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v49.sh --test-models-before-run
-#   bash sprite-codex-v49.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v53.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v53.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v53.sh --attach-only --session-id 1847
+#   bash sprite-codex-v53.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v53.sh --download-output
+#   bash sprite-codex-v53.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v53.sh --show-models          # no API calls
+#   bash sprite-codex-v53.sh --test-models          # host API tests only
+#   bash sprite-codex-v53.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v53.sh --test-models-before-run
+#   bash sprite-codex-v53.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -131,14 +210,95 @@ umask 077
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v49.sh [option] [--json-output PATH]
+Usage: bash sprite-codex-v53.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
-  (no option)               Normal Sprite bootstrap; optional model-test prompt.
+  (no option)               Attach / Setup / Quit / Download / Shell-files menu.
+  --attach-only             Select a Sprite and attach to an existing live TTY.
+  --session-id ID           With --attach-only or --files + SPRITE_NAME: exact TTY.
+  --files, --shell          Independent shell/file menu alongside live Codex.
+  --workdir PATH            With --files: use this existing Sprite directory.
+  --bootstrap               Skip the opening menu; run normal setup workflow.
+  --download-output         Select a Sprite and download its output as a local ZIP.
+  --output-dir PATH         Remote folder (default ~/output); /output is supported.
   --test-models             Test DeepSeek, MiniMax and Moonshot from this host.
   --test-models-sprite      Test all three from one selected Sprite.
   --test-models-before-run  Require host tests to pass, then run normal bootstrap.
   --show-models             Display configured model IDs and base URLs; no calls.
   --help, -h                Display this help.
+
+Attach-only bypasses all model/agent choices, credential entry/validation, model
+API tests, Codex updates, Mobbin and workspace setup. Attachment never launches or
+replaces an agent, or falls back into bootstrap. Only an accepted output download
+runs a separate read-only remote archive command. Works from ANY local directory;
+all active native TTYs on the chosen Sprite are considered, not just this project.
+Requires an authenticated local sprite CLI, Python 3.9+, and an interactive TTY.
+SPRITE_NAME / SPRITE_ORG can preselect the Sprite / organization. Without an org,
+the global CLI default is used (not the current project's .sprite context).
+Session IDs are Sprite terminal IDs, NOT Codex conversation UUIDs. Discovery
+errors remain unknown, never "no sessions". Missing/ended exact targets exit 3.
+The picker offers refresh, another Sprite, or quit; it does not discover detached
+tmux servers without a native TTY. Use normal setup for legacy tmux recovery.
+SPRITE_ATTACH_TIMEOUT=25 (1..300) bounds inventory/context/help requests only.
+TTY_AUTO_REATTACH and TTY_REATTACH_* control retries to the same live session.
+Ctrl+\ detaches. No provider keys are copied out of or injected into the process.
+Bare non-interactive runs retain the previous bootstrap behavior. Explicit test
+modes and --bootstrap do not show the opening menu. --json-output is not allowed
+with --attach-only; bootstrap-only environment settings are ignored on attachment.
+
+Simplified file mode (--files / --shell, opening menu 5):
+Select a live session's recorded workspace, or supply --workdir. --session-id ID
+selects an exact live terminal's workspace and requires SPRITE_NAME. --session-id
+and --workdir cannot be combined. Ambiguous workspace metadata is never guessed.
+No Codex attach,
+restart, keys, token checks, updates, Mobbin, Git sync or pushes occur.
+Downloads select only files/folders under <workspace>/output/. Uploads select
+from the LOCAL launch directory and place each selection under <workspace>/input/.
+No upload/download paths or shell commands need to be typed. input/ is created
+only after a confirmed upload. Use ./input/ and ./output/ in Codex instructions.
+Picker: Up/Down moves, Space selects, Right opens a folder, Left goes back,
+Enter confirms selected items (or the highlighted file), Q cancels. Hidden files
+start hidden; H reveals them. A selects all in view; / filters; V previews text.
+SPRITE_FILE_UI=auto|arrows|menu selects the UI (default auto). With no curses or
+an unsupported/small terminal, a numbered multi-select picker is used instead.
+Both pickers stay under their root folders. Symlinks and special files are not
+selectable. Selected folders include hidden regular files: exclude credentials.
+Each selected upload lands at input/<basename>; nested folder contents remain
+nested. Downloaded files use their basenames locally; selected folders become
+separate ZIPs. Existing names get numeric suffixes; no files are overwritten.
+Batch transfers are sequential; earlier completed items remain if a later one
+fails. Finish writers first; checks are not atomic filesystem snapshots.
+No source deletion, automatic local extraction or transfer resumption.
+SPRITE_FILE_TIMEOUT=3600 (1..86400) bounds file transfers. Folder ZIP downloads
+use SPRITE_DOWNLOAD_TIMEOUT. Existing ~/output post-session downloads below are
+unchanged: that is a DIFFERENT folder convention from file mode's ./output/.
+--output-dir is rejected with --files; SPRITE_OUTPUT_DIR does not move its root.
+The explicit advanced shell is separate and is NOT restricted to input/output;
+it shares files/permissions, not the running Codex process's credentials.
+
+Output download:
+After an actual attachment/agent return, offers a ZIP of ~/output on the Sprite.
+Ask Codex to create that folder and save completed deliverables there. /output at
+filesystem root is different: use --output-dir /output when that folder exists.
+No folder is created/cleared on attachment. The destination is the local working
+DIRECTORY AT SCRIPT START, not the temporary CLI context or the script directory.
+SPRITE_OUTPUT_DOWNLOAD=ask|always|never controls the post-session offer (default ask).
+'ask' skips when noninteractive; --download-output itself explicitly requests a
+transfer and needs SPRITE_NAME when no interactive terminal is available.
+SPRITE_DOWNLOAD_TIMEOUT=3600 (1..86400) bounds scan/compression/transfer.
+SPRITE_OUTPUT_COMPRESSION=1 (0..9, 0 = uncompressed ZIP).
+SPRITE_DOWNLOAD_TRANSPORT=websocket|http-post; default websocket.
+Uses local Sprites login and Python 3.9+ locally/on Sprite; no other API keys.
+ZIP64 supports large files; streams file bytes in chunks, with metadata in memory.
+Verifies length, SHA-256, ZIP structure and CRCs; no extraction or source deletion.
+Includes hidden regular files: put only deliverables, NOT credentials, in output.
+Skips symlinks/special files; rejects symlinked root components and unsafe ZIP names.
+Finish writers first: changes observed during archiving reject the transfer.
+A closed/crashed terminal cannot offer a prompt. Rerun --download-output later.
+Failed downloads remove local partial files when cleanup can run; retries start
+again. A forced kill/power loss can leave a hidden .sprite-output-*.partial file.
+No automatic remote ZIP staging or temporary archive remains on the Sprite.
+Post-session downloads do not replace the agent exit code; --download-output has
+its own success/failure exit status. Declining the offer performs NO remote exec.
 
 Optional Mobbin MCP setup runs AFTER the Codex update stage (Codex agent only).
 MOBBIN_MCP_MODE=ask|always|never (default ask; interactive default No).
@@ -196,13 +356,27 @@ RUN_MODE=bootstrap
 MODEL_TEST_MODE="${MODEL_TEST_MODE:-ask}"
 MODEL_TEST_JSON="${MODEL_TEST_JSON:-}"
 _MODE_SELECTED=0
+_JSON_OUTPUT_SELECTED=0
+ATTACH_SESSION_ID=""
+OUTPUT_HOST_DIR="$PWD"
+SPRITE_OUTPUT_DIR="${SPRITE_OUTPUT_DIR:-}"
+[[ -n $SPRITE_OUTPUT_DIR ]] || SPRITE_OUTPUT_DIR='~/output'
+SPRITE_OUTPUT_DOWNLOAD="${SPRITE_OUTPUT_DOWNLOAD:-ask}"
+OUTPUT_PINNED_CONTEXT=""
+_OUTPUT_DIR_SELECTED=0
+FILE_WORKDIR="${SPRITE_WORKDIR:-}"
+_FILE_WORKDIR_SELECTED=0
 while (($#)); do
   case "$1" in
     --help|-h) show_usage; exit 0 ;;
-    --test-models|--test-models-sprite|--test-models-before-run|--show-models)
+    --attach-only|--files|--shell|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
       (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
       _MODE_SELECTED=1
       case "$1" in
+        --attach-only) RUN_MODE=attach ;;
+        --files|--shell) RUN_MODE=files ;;
+        --bootstrap) RUN_MODE=bootstrap ;;
+        --download-output) RUN_MODE=download ;;
         --test-models) RUN_MODE=test-local ;;
         --test-models-sprite) RUN_MODE=test-sprite ;;
         --test-models-before-run) MODEL_TEST_MODE=always ;;
@@ -211,10 +385,2832 @@ while (($#)); do
       shift ;;
     --json-output)
       [[ $# -ge 2 && -n $2 && $2 != --* ]] || { echo "error: --json-output requires a path" >&2; exit 2; }
-      MODEL_TEST_JSON=$2; shift 2 ;;
+      MODEL_TEST_JSON=$2; _JSON_OUTPUT_SELECTED=1; shift 2 ;;
+    --output-dir)
+      [[ $# -ge 2 && -n $2 && $2 != --* && $_OUTPUT_DIR_SELECTED == 0 ]] || {
+        echo "error: --output-dir requires one remote folder path" >&2; exit 2;
+      }
+      SPRITE_OUTPUT_DIR=$2; _OUTPUT_DIR_SELECTED=1; shift 2 ;;
+    --workdir)
+      [[ $# -ge 2 && -n $2 && $2 != --* && $_FILE_WORKDIR_SELECTED == 0 ]] || {
+        echo "error: --workdir requires one existing Sprite directory" >&2; exit 2;
+      }
+      FILE_WORKDIR=$2; _FILE_WORKDIR_SELECTED=1; shift 2 ;;
+    --session-id)
+      [[ $# -ge 2 && $2 =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ && -z $ATTACH_SESSION_ID ]] || {
+        echo "error: --session-id requires one valid Sprite terminal ID" >&2; exit 2;
+      }
+      ATTACH_SESSION_ID=$2; shift 2 ;;
     *) printf 'error: unknown argument: %s\n' "$1" >&2; show_usage >&2; exit 2 ;;
   esac
 done
+
+# v50: the first interactive choice is deliberately before all bootstrap-only
+# settings and side effects. The attach branch exits unconditionally afterwards.
+if [[ -n $ATTACH_SESSION_ID && $RUN_MODE != attach && $RUN_MODE != files ]]; then
+  echo "error: --session-id must be used with --attach-only or --files" >&2; exit 2
+fi
+if [[ ( $RUN_MODE == attach || $RUN_MODE == download || $RUN_MODE == files ) && $_JSON_OUTPUT_SELECTED == 1 ]]; then
+  echo "error: --json-output cannot be used with --attach-only, --download-output or --files" >&2; exit 2
+fi
+if [[ $RUN_MODE == bootstrap && $_MODE_SELECTED == 0 && $_JSON_OUTPUT_SELECTED == 0 && -t 0 && -t 1 ]]; then
+  while :; do
+    printf '\n=== Sprite Codex: what would you like to do?\n'
+    printf '    1) Attach to an existing Sprite terminal session [default]\n'
+    printf '    2) Normal setup / launch or resume a saved conversation\n'
+    printf '    3) Quit\n'
+    printf '    4) Download output folder as a ZIP (no agent attach/launch)\n'
+    printf '    5) File picker alongside Codex (output downloads / input uploads)\n'
+    printf '  Select [1-5]: '
+    if ! IFS= read -r _startup_choice; then printf '\n'; exit 0; fi
+    case "${_startup_choice,,}" in
+      ''|1|a|attach) RUN_MODE=attach; break ;;
+      2|b|bootstrap|setup) break ;;
+      3|q|quit) exit 0 ;;
+      4|d|download) RUN_MODE=download; break ;;
+      5|f|files|shell) RUN_MODE=files; break ;;
+      *) printf '  Invalid selection. Choose 1, 2, 3, 4, or 5.\n' ;;
+    esac
+  done
+fi
+
+# v51: this hook is explicit, not an EXIT trap. Help/test/cancel/setup failures
+# never trigger an output read; terminal hangup cannot trigger a hidden download.
+output_download_python() {
+  cat <<'OUTPUT_DOWNLOAD_PY'
+"""Optional host-side ZIP download; no provider credentials or remote ZIP file."""
+from __future__ import annotations
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import secrets
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+import zipfile
+import zlib
+
+# The remote program is embedded below when packaging this single-file script.
+REMOTE_OUTPUT_PY = r'''"""Read one output directory and stream a ZIP64 archive plus a completion record.
+Never creates an archive on the Sprite, follows symlinks, or changes source files.
+"""
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import time
+import zipfile
+
+FOOTER_SIZE = 512
+FOOTER_MAGIC = b"\nSPRITE_CODEX_OUTPUT_V1 "
+CHUNK = 1024 * 1024
+
+
+class OutputError(Exception):
+    pass
+
+
+def signature(st):
+    return (st.st_dev, st.st_ino, st.st_mode, st.st_size,
+            st.st_mtime_ns, st.st_ctime_ns)
+
+
+def open_directory(path, allow_base=False):
+    """Open each component without following any symlink, including at the root."""
+    home = os.path.expanduser("~")
+    if path.startswith("~/"):
+        path = os.path.join(home, path[2:])
+    elif path.startswith("$HOME/"):
+        path = os.path.join(home, path[6:])
+    if not path.startswith("/") or "\0" in path or ".." in path.split("/"):
+        raise OutputError("unsafe_path")
+    path = os.path.normpath(path)
+    if not allow_base and path in ("/", os.path.normpath(home)):
+        raise OutputError("unsafe_path")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", flags)
+    try:
+        for part in path.split("/"):
+            if not part:
+                continue
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def scan(fd, prefix="", result=None):
+    if result is None:
+        result = {}
+    result[prefix] = ("dir", signature(os.fstat(fd)))
+    with os.scandir(fd) as entries:
+        names = sorted(entry.name for entry in entries)
+    for name in names:
+        # Portable ZIP paths: reject Windows separators/drive/stream syntax and
+        # control characters rather than silently changing filenames.
+        if name in (".", "..") or any(c in name for c in ("\\", ":")) or any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise OutputError("unsafe_name")
+        try:
+            name.encode("utf-8")
+        except UnicodeError:
+            raise OutputError("unsafe_name") from None
+        rel = prefix + name
+        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISDIR(st.st_mode):
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                if signature(os.fstat(child)) != signature(st):
+                    raise OutputError("changed")
+                scan(child, rel + "/", result)
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(st.st_mode):
+            result[rel] = ("file", signature(st))
+        else:
+            # No reading outside output via links, and no hanging on FIFOs/devices.
+            result[rel] = ("skip", signature(st))
+    return result
+
+
+class HashWriter:
+    def __init__(self, raw):
+        self.raw = raw
+        self.digest = hashlib.sha256()
+        self.size = 0
+
+    def write(self, data):
+        self.raw.write(data)
+        self.digest.update(data)
+        self.size += len(data)
+        return len(data)
+
+    def tell(self):
+        return self.size
+
+    def flush(self):
+        self.raw.flush()
+
+
+def zip_info(name, st, directory=False, level=1):
+    value = time.localtime(st.st_mtime)
+    if value.tm_year < 1980:
+        date = (1980, 1, 1, 0, 0, 0)
+    elif value.tm_year > 2107:
+        date = (2107, 12, 31, 23, 59, 58)
+    else:
+        date = tuple(value[:6])
+    info = zipfile.ZipInfo(name, date)
+    info.create_system = 3
+    info.external_attr = ((stat.S_IFDIR if directory else stat.S_IFREG) | (st.st_mode & 0o777)) << 16
+    if directory:
+        info.external_attr |= 0x10
+    info.compress_type = zipfile.ZIP_DEFLATED if level and not directory else zipfile.ZIP_STORED
+    info._compresslevel = level  # Compatible with Python 3.9+.
+    info.file_size = 0 if directory else st.st_size
+    return info
+
+
+def write_tree(archive, fd, initial, level, prefix=""):
+    if signature(os.fstat(fd)) != initial[prefix][1]:
+        raise OutputError("changed")
+    archive.writestr(zip_info("output/" + prefix, os.fstat(fd), True, level), b"")
+    with os.scandir(fd) as entries:
+        names = sorted(entry.name for entry in entries)
+    for name in names:
+        rel = prefix + name
+        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISDIR(st.st_mode):
+            key = rel + "/"
+            if initial.get(key) != ("dir", signature(st)):
+                raise OutputError("changed")
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                write_tree(archive, child, initial, level, key)
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(st.st_mode):
+            if initial.get(rel) != ("file", signature(st)):
+                raise OutputError("changed")
+            source_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            with os.fdopen(source_fd, "rb") as source:
+                before = os.fstat(source.fileno())
+                if not stat.S_ISREG(before.st_mode) or signature(before) != signature(st):
+                    raise OutputError("changed")
+                # ZIP64 is enabled before writing the header, including >4 GiB files.
+                with archive.open(zip_info("output/" + rel, before, level=level), "w", force_zip64=True) as target:
+                    remaining = before.st_size
+                    while remaining:
+                        data = source.read(min(CHUNK, remaining))
+                        if not data:
+                            raise OutputError("changed")
+                        target.write(data)
+                        remaining -= len(data)
+                    if source.read(1) or signature(os.fstat(source.fileno())) != signature(before):
+                        raise OutputError("changed")
+        elif initial.get(rel) != ("skip", signature(st)):
+            raise OutputError("changed")
+
+
+def validate_selection(path, root, checks):
+    if checks is None:
+        return
+    if not isinstance(checks, dict) or not isinstance(checks.get("scope"), dict):
+        raise OutputError("invalid_request")
+    scope = checks["scope"]
+    workspace = scope.get("workspace", "")
+    if scope.get("folder") != "output" or not workspace.startswith("/"):
+        raise OutputError("unsafe_path")
+    boundary = os.path.join(os.path.normpath(workspace), "output")
+    if os.path.commonpath((boundary, os.path.normpath(path))) != boundary:
+        raise OutputError("unsafe_path")
+    base = open_directory(workspace, allow_base=True)
+    try:
+        if [os.fstat(base).st_dev, os.fstat(base).st_ino] != scope.get("identity"):
+            raise OutputError("changed")
+        folder = os.open("output", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=base)
+        try:
+            if [os.fstat(folder).st_dev, os.fstat(folder).st_ino] != scope.get("root_identity"):
+                raise OutputError("changed")
+        finally:
+            os.close(folder)
+    finally:
+        os.close(base)
+    if checks.get("expected") is not None and list(signature(os.fstat(root))) != checks["expected"]:
+        raise OutputError("changed")
+
+
+def stream_output(path, nonce, level, checks=None):
+    if not re.fullmatch(r"[0-9a-f]{32}", nonce) or not 0 <= level <= 9:
+        raise OutputError("invalid_request")
+    root = open_directory(path)
+    try:
+        validate_selection(path, root, checks)
+        initial = scan(root)
+        files = sum(kind == "file" for kind, _ in initial.values())
+        if not files:
+            raise OutputError("empty")
+        skipped = sum(kind == "skip" for kind, _ in initial.values())
+        raw_bytes = sum(sig[3] for kind, sig in initial.values() if kind == "file")
+        writer = HashWriter(sys.stdout.buffer)
+        with zipfile.ZipFile(writer, "w", allowZip64=True) as archive:
+            write_tree(archive, root, initial, level)
+        # This is a checked read, not an atomic filesystem snapshot. Stop writers
+        # first; changes visible during either scan invalidate the whole transfer.
+        if scan(root) != initial:
+            raise OutputError("changed")
+        # Detect replacement/rename of the requested root while reading through fd.
+        check = open_directory(path)
+        try:
+            if signature(os.fstat(check)) != signature(os.fstat(root)):
+                raise OutputError("changed")
+        finally:
+            os.close(check)
+        validate_selection(path, root, checks)
+        writer.flush()
+        metadata = dict(nonce=nonce, size=writer.size, sha256=writer.digest.hexdigest(),
+                        files=files, raw_bytes=raw_bytes, skipped=skipped)
+        payload = FOOTER_MAGIC + json.dumps(metadata, separators=(",", ":")).encode("ascii")
+        if len(payload) >= FOOTER_SIZE:
+            raise OutputError("invalid_request")
+        sys.stdout.buffer.write(payload.ljust(FOOTER_SIZE - 1, b" ") + b"\n")
+        sys.stdout.buffer.flush()
+    finally:
+        os.close(root)
+
+
+if __name__ == "__main__":
+    try:
+        if sys.version_info < (3, 9):
+            raise OutputError("python_version")
+        stream_output(sys.argv[1], sys.argv[2], int(sys.argv[3]), json.loads(sys.argv[4]) if len(sys.argv) > 4 else None)
+    except BrokenPipeError:
+        os._exit(1)
+    except (OutputError, OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
+        if isinstance(exc, OutputError):
+            reason = str(exc)
+        elif isinstance(exc, FileNotFoundError):
+            reason = "missing_or_changed"
+        elif isinstance(exc, PermissionError):
+            reason = "permission"
+        else:
+            reason = "read_failed"
+        # Do not send raw exception strings or secret-bearing file contents.
+        print("SPRITE_OUTPUT_ERROR=" + reason, file=sys.stderr)
+        raise SystemExit(1)
+'''
+FOOTER_SIZE = 512
+FOOTER_MAGIC = b"\nSPRITE_CODEX_OUTPUT_V1 "
+
+
+class DownloadError(Exception):
+    pass
+
+
+class DownloadInterrupted(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def safe(value):
+    return "".join(c if c.isprintable() and not unicodedata.category(c).startswith("C") else "?" for c in str(value))
+
+
+def integer(name, default, minimum, maximum):
+    value = os.environ.get(name, str(default))
+    if not re.fullmatch(r"[0-9]{1,6}", value) or not minimum <= int(value) <= maximum:
+        raise DownloadError(f"{name} must be {minimum}..{maximum}.")
+    return int(value)
+
+
+def stop_local_transfer(proc):
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=2)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+
+
+def verify_download(handle, nonce):
+    """Verify nonce/length/SHA-256 and every ZIP CRC; never extract any file."""
+    size = handle.seek(0, os.SEEK_END)
+    if size <= FOOTER_SIZE:
+        raise DownloadError("No complete output archive was received.")
+    handle.seek(-FOOTER_SIZE, os.SEEK_END)
+    footer = handle.read(FOOTER_SIZE)
+    if not footer.startswith(FOOTER_MAGIC) or not footer.endswith(b"\n"):
+        raise DownloadError("Download ended without its completion record; ZIP not saved.")
+    try:
+        meta = json.loads(footer[len(FOOTER_MAGIC):].strip())
+        valid = (isinstance(meta, dict) and meta.get("nonce") == nonce
+                 and type(meta.get("size")) is int and meta["size"] == size - FOOTER_SIZE
+                 and isinstance(meta.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", meta["sha256"])
+                 and all(type(meta.get(key)) is int and meta[key] >= 0 for key in ("files", "raw_bytes", "skipped"))
+                 and meta["files"] > 0)
+    except (ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise DownloadError("Invalid download completion record; ZIP not saved.")
+    handle.seek(0)
+    if handle.read(4) != b"PK\x03\x04":
+        raise DownloadError("Unexpected non-ZIP data in the download stream.")
+    handle.seek(0)
+    digest = hashlib.sha256()
+    remaining = meta["size"]
+    while remaining:
+        data = handle.read(min(1024 * 1024, remaining))
+        if not data:
+            raise DownloadError("Truncated archive.")
+        digest.update(data)
+        remaining -= len(data)
+    if digest.hexdigest() != meta["sha256"]:
+        raise DownloadError("SHA-256 mismatch; the partial download was rejected.")
+    handle.truncate(meta["size"])
+    handle.flush()
+    handle.seek(0)
+    try:
+        with zipfile.ZipFile(handle, "r") as archive:
+            seen, files, raw_bytes = set(), 0, 0
+            for item in archive.infolist():
+                parts = PurePosixPath(item.filename).parts
+                if (not parts or parts[0] != "output" or item.filename.startswith("/")
+                    or ".." in parts or "\\" in item.filename or ":" in item.filename
+                    or item.filename in seen or item.flag_bits & 1
+                    or stat.S_ISLNK(item.external_attr >> 16)):
+                    raise DownloadError("Unsafe or unexpected archive member; ZIP rejected.")
+                seen.add(item.filename)
+                if not item.is_dir():
+                    files += 1
+                    raw_bytes += item.file_size
+            if files != meta["files"] or raw_bytes != meta["raw_bytes"]:
+                raise DownloadError("Archive manifest does not match the completed transfer.")
+            if archive.testzip() is not None:
+                raise DownloadError("ZIP CRC verification failed.")
+    except (zipfile.BadZipFile, RuntimeError, EOFError, NotImplementedError, zlib.error):
+        raise DownloadError("ZIP integrity verification failed.") from None
+    os.fsync(handle.fileno())
+    return meta
+
+
+def remote_failure(stderr):
+    stderr.seek(0, os.SEEK_END)
+    stderr.seek(max(0, stderr.tell() - 8192))
+    text = stderr.read().decode("utf-8", "replace")
+    messages = {
+        "empty": "The remote output folder contains no regular files; nothing was downloaded.",
+        "missing_or_changed": "The output folder/file is missing or changed during reading. Create it and finish writes before retrying.",
+        "permission": "The Sprite user cannot read that output folder. Check its ownership and permissions.",
+        "unsafe_path": "Use one absolute output directory or ~/output, not /, the whole home directory, or a path containing '..'.",
+        "unsafe_name": "A filename has control characters, a backslash, or colon; rename it for a portable ZIP.",
+        "changed": "Output changed while being archived; finish writing and retry. No final ZIP was saved.",
+        "read_failed": "Remote output could not be read. Check permissions, symlinked path components and available resources.",
+        "python_version": "Python 3.9 or newer is required on the Sprite.",
+        "invalid_request": "The remote archive request was rejected.",
+    }
+    hits = re.findall(r"^SPRITE_OUTPUT_ERROR=([a-z_]+)$", text, re.M)
+    return messages.get(hits[-1]) if hits else None
+
+
+def download(sprite, output_dir, local_dir, org, context_file="", checks=None):
+    cli = shutil.which("sprite")
+    if not cli:
+        raise DownloadError("The local sprite CLI was not found; authenticate it with sprite login.")
+    cli = os.path.abspath(cli)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", sprite):
+        raise DownloadError("Invalid Sprite name.")
+    if org and (org.startswith("-") or any(c.isspace() or not c.isprintable() for c in org)):
+        raise DownloadError("Invalid SPRITE_ORG.")
+    if not output_dir or not (output_dir.startswith("/") or output_dir.startswith("~/") or output_dir.startswith("$HOME/")):
+        raise DownloadError("SPRITE_OUTPUT_DIR / --output-dir must be an absolute Sprite path or start with ~/ or $HOME/.")
+    if any(ord(c) < 32 for c in output_dir) or ".." in output_dir.split("/"):
+        raise DownloadError("The output folder must not contain control characters or '..'.")
+    directory = Path(local_dir)
+    if not directory.is_dir():
+        raise DownloadError("The local launch directory no longer exists.")
+    deadline = integer("SPRITE_DOWNLOAD_TIMEOUT", 3600, 1, 86400)
+    level = integer("SPRITE_OUTPUT_COMPRESSION", 1, 0, 9)
+    transport = os.environ.get("SPRITE_DOWNLOAD_TRANSPORT", "websocket")
+    if transport not in ("websocket", "http-post"):
+        raise DownloadError("SPRITE_DOWNLOAD_TRANSPORT must be websocket or http-post.")
+    nonce = secrets.token_hex(16)
+    proc, partial = None, None
+    try:
+        # A private CLI cwd prevents the local project's .sprite from changing
+        # either the download target or the destination directory.
+        with tempfile.TemporaryDirectory(prefix="sprite-output-context-") as context, tempfile.TemporaryFile() as errors:
+            if context_file:
+                # Preserve the exact CLI target context used for attachment.
+                # This is local selection metadata, not an API-token export.
+                raw_context = Path(context_file).read_bytes()
+                if len(raw_context) > 65536 or not isinstance(json.loads(raw_context), dict):
+                    raise DownloadError("Invalid saved Sprite CLI context; refusing to guess a download organization.")
+                pinned = Path(context) / ".sprite"
+                pinned.write_bytes(raw_context)
+                pinned.chmod(0o600)
+            fd, partial = tempfile.mkstemp(prefix=".sprite-output-", suffix=".partial", dir=directory)
+            with os.fdopen(fd, "w+b") as handle:
+                args = [cli, "exec", *(["-o", org] if org else []), "-s", sprite]
+                if transport == "http-post":
+                    args.append("--http-post")
+                args += ["--no-port-forward", "--", "python3", "-c", REMOTE_OUTPUT_PY, output_dir, nonce, str(level)]
+                if checks is not None:
+                    args.append(json.dumps(checks, separators=(",", ":")))
+                print("       Streaming ZIP from the Sprite (no remote ZIP staging file)...", flush=True)
+                proc = subprocess.Popen(args, cwd=context, stdin=subprocess.DEVNULL,
+                                        stdout=handle, stderr=errors, start_new_session=True)
+                started = time.monotonic()
+                next_progress = started + 5
+                while proc.poll() is None:
+                    now = time.monotonic()
+                    if now - started >= deadline:
+                        raise DownloadError(f"Download exceeded SPRITE_DOWNLOAD_TIMEOUT={deadline}s; no final ZIP was saved.")
+                    if now >= next_progress:
+                        print(f"       Received {os.fstat(handle.fileno()).st_size / (1024*1024):,.1f} MiB...", flush=True)
+                        next_progress = now + 5
+                    time.sleep(0.1)
+                problem = remote_failure(errors)
+                if problem:
+                    raise DownloadError(problem)
+                print("       Verifying SHA-256 and ZIP contents...", flush=True)
+                meta = verify_download(handle, nonce)
+                if proc.returncode:
+                    # A received footer confirms completion of this request,
+                    # and checksum/CRC verify its exact received bytes. The CLI
+                    # connection, not an unkeyed checksum, handles authentication.
+                    # This also handles known CLI missing-exit-frame failures.
+                    print(f"       Warning: Sprite CLI exited {proc.returncode}, but the complete archive passed integrity checks.", flush=True)
+                filename = f"sprite-{sprite}-output-{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-{nonce[:8]}.zip"
+                target = directory / filename
+                # Atomic no-clobber promotion: never overwrite an existing user file.
+                os.link(partial, target)
+                os.unlink(partial)
+                partial = None
+            print(f"  Saved: {safe(target)}", flush=True)
+            print(f"       {meta['files']} file(s); ZIP {meta['size']:,} bytes; source {meta['raw_bytes']:,} bytes")
+            print(f"       SHA-256: {meta['sha256']}")
+            if meta["skipped"]:
+                print(f"       Skipped {meta['skipped']} symlink/special-file entry/entries; links are never followed.")
+            print("       Original files remain on the Sprite. Nothing was extracted or deleted.")
+            return 0
+    finally:
+        stop_local_transfer(proc)
+        if partial is not None:
+            try:
+                os.unlink(partial)
+            except FileNotFoundError:
+                pass
+
+
+def main():
+    if sys.version_info < (3, 9):
+        raise DownloadError("Local Python 3.9 or newer is required.")
+    sprite, mode, local_dir, output_dir, org = sys.argv[1:6]
+    context_file = sys.argv[6] if len(sys.argv) > 6 else ""
+    if mode not in ("ask", "always", "never"):
+        raise DownloadError("SPRITE_OUTPUT_DOWNLOAD must be ask, always, or never.")
+    if mode == "never" or (mode == "ask" and (not sys.stdin.isatty() or not sys.stdout.isatty())):
+        return 0
+    print("\n=== download Sprite output", flush=True)
+    print(f"       Sprite: {safe(sprite)}\n       Remote folder: {safe(output_dir)}\n       Local ZIP directory: {safe(local_dir)}")
+    print("       Finish file writes first. This reads files without stopping or pausing Codex.")
+    print("       All regular files in that folder, including hidden files, are included. Keep credentials out of it.")
+    if mode == "ask":
+        try:
+            answer = input("  Download this output folder as a ZIP now? [y/N]: ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer not in ("y", "yes"):
+            print("       Download skipped; remote files are unchanged.")
+            return 0
+    return download(sprite, output_dir, local_dir, org, context_file)
+
+
+if __name__ == "__main__":
+    def interrupted(signum, frame):
+        raise DownloadInterrupted(signum)
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, interrupted)
+    try:
+        raise SystemExit(main())
+    except (KeyboardInterrupt, DownloadInterrupted) as exc:
+        print("\n       Download interrupted. Original files and agent sessions were not deleted or stopped.", file=sys.stderr)
+        raise SystemExit(128 + getattr(exc, "signum", signal.SIGINT))
+    except (DownloadError, OSError, ValueError) as exc:
+        message = str(exc) if isinstance(exc, DownloadError) else "Local file/CLI operation failed (check free disk space, permissions and connection)."
+        print("error: " + message, file=sys.stderr)
+        print("       No final ZIP was saved. Retry with --download-output; the source files remain on the Sprite.", file=sys.stderr)
+        raise SystemExit(1)
+OUTPUT_DOWNLOAD_PY
+}
+
+run_output_download() {
+  local selected_sprite=$1 mode=${2:-$SPRITE_OUTPUT_DOWNLOAD} context_file=${3:-${OUTPUT_PINNED_CONTEXT:-}}
+  [[ $mode != never ]] || return 0
+  command -v python3 >/dev/null 2>&1 || { echo "warning: output download requires local python3" >&2; return 127; }
+  python3 -c "$(output_download_python)" "$selected_sprite" "$mode" "$OUTPUT_HOST_DIR" "$SPRITE_OUTPUT_DIR" "${SPRITE_ORG:-}" "$context_file"
+}
+
+maybe_download_output() {
+  local selected_sprite=$1 session_rc=${2:-0} download_rc=0
+  # Do not start another operation after an interrupt/hangup/termination.
+  case "$session_rc" in 129|130|131|137|143) return 0 ;; esac
+  [[ $SPRITE_OUTPUT_DOWNLOAD != never ]] || return 0
+  if run_output_download "$selected_sprite"; then
+    return 0
+  else
+    download_rc=$?
+    printf 'warning: optional output download did not finish (exit %s); session exit status is preserved.
+' "$download_rc" >&2
+    return 0
+  fi
+}
+
+attach_only_python() {
+  cat <<'ATTACH_ONLY_PY'
+"""Local-only Sprite/session picker. Optional download is a separate host hook.
+
+CLI/API contracts checked 2026-09-24:
+https://docs.sprites.dev/api/dev-latest/exec/
+https://docs.sprites.dev/api/dev-latest/sprites/
+https://docs.sprites.dev/cli/commands/
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import math
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+import unicodedata
+from urllib.parse import urlencode
+
+
+class AttachError(Exception):
+    def __init__(self, message: str, code: int = 1):
+        super().__init__(message)
+        self.code = code
+
+
+class Cancelled(Exception):
+    pass
+
+
+def safe(value: object, limit: int = 180) -> str:
+    """Never let inventory metadata inject terminal control/format characters."""
+    text = str(value) if value is not None else ""
+    text = "".join(c if c.isprintable() and not unicodedata.category(c).startswith("C")
+                   else " " for c in text)
+    return " ".join(text.split())[:limit]
+
+
+def identifier(value: object, label: str, pattern: str) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise AttachError("Invalid " + label + ".", 2)
+    text = str(value)
+    if not re.fullmatch(pattern, text):
+        raise AttachError("Invalid " + label + ".", 2)
+    return text
+
+
+NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+SESSION_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
+
+
+def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    text = os.environ.get(name, str(default))
+    if not re.fullmatch(r"[0-9]{1,6}", text) or not minimum <= int(text) <= maximum:
+        raise AttachError(f"{name} must be {minimum}..{maximum}.", 2)
+    return int(text)
+
+
+def flag(value: object):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (str, int)) and str(value).lower() in ("true", "false", "1", "0"):
+        return str(value).lower() in ("true", "1")
+    return None
+
+
+def collection(root: object, keys: tuple[str, ...], depth: int = 0):
+    """Reject an error/unknown schema rather than treating it as an empty list."""
+    if isinstance(root, list):
+        return root, {}
+    if not isinstance(root, dict) or depth > 4 or root.get("error"):
+        raise AttachError("Unrecognized or unsuccessful inventory response; session state is unknown.")
+    for key in keys:
+        if key in root:
+            if key == "data" and isinstance(root[key], dict):
+                continue  # wrapper, not the collection itself
+            if not isinstance(root[key], list):
+                raise AttachError("Invalid inventory collection; session state is unknown.")
+            return root[key], root
+    for key in ("data", "result", "response"):
+        if isinstance(root.get(key), dict):
+            items, meta = collection(root[key], keys, depth + 1)
+            return items, {**root, **meta}
+    raise AttachError("Unrecognized inventory response; session state is unknown.")
+
+
+def created_info(record: dict):
+    value = next((record[k] for k in
+                  ("created_at", "createdAt", "created", "started_at", "startedAt", "started")
+                  if record.get(k) not in (None, "")), "")
+    epoch = 0.0
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError):
+        try:
+            date = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=dt.timezone.utc)
+            epoch = date.timestamp()
+        except (ValueError, OverflowError, OSError):
+            pass
+    if not math.isfinite(epoch):
+        epoch = 0.0
+    try:
+        display = dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") if epoch > 0 else "unknown"
+    except (ValueError, OverflowError, OSError):
+        epoch, display = 0.0, "unknown"
+    return value, epoch, display
+
+
+def command_info(record: dict):
+    command = record.get("command", record.get("cmd", ""))
+    if isinstance(command, list) and all(isinstance(x, str) for x in command):
+        argv = command
+    elif isinstance(command, str):
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            argv = []
+    else:
+        argv = []
+    # These are display hints about the recorded session command, not a scan of
+    # its child processes and not a promise that the agent is currently working.
+    label = "Other terminal"
+    workdir = record.get("workdir", record.get("dir", record.get("cwd", "")))
+    if not isinstance(workdir, str):
+        workdir = ""
+    for index, arg in enumerate(argv):
+        base = os.path.basename(arg)
+        if re.fullmatch(r"sprite-(codex|kimi-code)-native-[A-Za-z0-9._-]+", base):
+            label = "Kimi Code runner" if base.startswith("sprite-kimi-code-") else "Codex runner"
+            # The managed runner receives RUN_SECONDS, TASK_NAME, SESSION_TAG,
+            # WORKDIR. Prefer that workspace over the entrypoint's initial cwd.
+            if "-runner" in base and len(argv) > index + 4 and argv[index + 1].isdigit():
+                if argv[index + 4].startswith("/"):
+                    workdir = argv[index + 4]
+                    break
+    if label == "Other terminal" and argv:
+        program = os.path.basename(argv[0])
+        if program in ("codex", "sprite-codex-cli") or program.startswith("sprite-codex-"):
+            label = "Codex command"
+        elif program in ("kimi", "sprite-kimi-code"):
+            label = "Kimi Code command"
+        elif program in ("bash", "sh", "zsh", "fish", "dash"):
+            label = "Shell (" + program + ")"
+        elif program == "tmux":
+            label = "tmux client terminal"
+    return command, label, safe(workdir) or "unknown"
+
+
+def parse_sessions(root: object):
+    records, meta = collection(root, ("sessions", "items", "data"))
+    if flag(meta.get("has_more")) is True or meta.get("next_continuation_token"):
+        raise AttachError("Incomplete session inventory; refusing to choose from a partial response.")
+    rows, excluded, seen = [], {"inactive": 0, "non_tty": 0, "unknown": 0}, set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise AttachError("Invalid session record; session state is unknown.")
+        sid = identifier(record.get("id", record.get("session_id")), "session ID in inventory", SESSION_PATTERN)
+        if sid in seen:
+            raise AttachError("Duplicate session ID in inventory; refresh before attaching.")
+        seen.add(sid)
+        active_keys = ("is_active", "isActive", "active")
+        tty_keys = ("tty", "is_tty", "isTty")
+        active_key = next((k for k in active_keys if k in record), None)
+        tty_key = next((k for k in tty_keys if k in record), None)
+        # /exec lists active sessions. An absent active flag uses that contract;
+        # an explicit but malformed flag must NOT be interpreted as true.
+        active = flag(record[active_key]) if active_key else True
+        tty = flag(record[tty_key]) if tty_key else None
+        status = str(record.get("status", record.get("state", ""))).lower()
+        if active is False or status in ("exited", "ended", "stopped", "dead", "completed", "failed", "terminated", "killed", "closed"):
+            excluded["inactive"] += 1
+            continue
+        if active is None or tty is None:
+            excluded["unknown"] += 1
+            continue
+        if not tty:
+            excluded["non_tty"] += 1
+            continue
+        command, label, workdir = command_info(record)
+        created, epoch, display = created_info(record)
+        identity = hashlib.sha256(json.dumps([sid, command, created], sort_keys=True).encode()).hexdigest()
+        rows.append({"id": sid, "label": label, "workdir": workdir, "created": display,
+                     "epoch": epoch, "identity": identity})
+    rows.sort(key=lambda r: (r["epoch"], r["id"]), reverse=True)
+    return rows, excluded
+
+
+def ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        raise Cancelled()
+
+
+class Picker:
+    def __init__(self, context: str, selection_only: bool = False):
+        self.context = context
+        self.cli = shutil.which("sprite")
+        if not self.cli:
+            raise AttachError("Required local command not found: sprite", 127)
+        self.cli = os.path.abspath(self.cli)
+        org = os.environ.get("SPRITE_ORG", "")
+        if org and (org.startswith("-") or any(c.isspace() or not c.isprintable() for c in org)):
+            raise AttachError("Invalid SPRITE_ORG.", 2)
+        self.org = ["-o", org] if org else []
+        self.timeout = env_int("SPRITE_ATTACH_TIMEOUT", 25, 1, 300)
+        self.auto = 0 if selection_only else env_int("TTY_AUTO_REATTACH", 1, 0, 1)
+        self.attempts = 0 if selection_only else env_int("TTY_REATTACH_ATTEMPTS", 12, 0, 99999)
+        self.confirm_tries = 1 if selection_only else env_int("TTY_REATTACH_CONFIRM_TRIES", 8, 1, 99999)
+        self.delay = 0 if selection_only else env_int("TTY_REATTACH_DELAY", 3, 0, 300)
+
+    def capture(self, args: list[str], check: bool = True):
+        try:
+            result = subprocess.run([self.cli, *args], cwd=self.context,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+                                    timeout=self.timeout, check=False)
+        except subprocess.TimeoutExpired:
+            raise AttachError("Sprite CLI request timed out; session state is unknown.") from None
+        except OSError:
+            raise AttachError("Could not execute the local Sprite CLI.") from None
+        if check and result.returncode:
+            # Do not echo arbitrary CLI responses: they may contain credentials
+            # or full command arguments. Preserve the actionable status only.
+            raise AttachError(f"Sprite CLI request failed (exit {result.returncode}). Check your Sprites login, organization and connection.")
+        return result
+
+    def api(self, path: str, sprite: str = ""):
+        args = ["api", *self.org]
+        if sprite:
+            args.extend(("-s", sprite))
+        result = self.capture([*args, path])
+        try:
+            return json.loads(result.stdout)
+        except (ValueError, TypeError):
+            raise AttachError("Sprite API returned invalid JSON; session state is unknown.") from None
+
+    def sprites(self):
+        found, token, seen = {}, "", set()
+        for _ in range(1000):
+            path = "/sprites"
+            if token:
+                path += "?" + urlencode({"continuation_token": token})
+            records, meta = collection(self.api(path), ("sprites", "sprite_list", "items", "data"))
+            for record in records:
+                if not isinstance(record, dict):
+                    raise AttachError("Invalid Sprite inventory record.")
+                name = identifier(record.get("name", record.get("sprite_name")), "Sprite name in inventory", NAME_PATTERN)
+                found[name] = safe(record.get("status", record.get("state", "unknown")), 30) or "unknown"
+            token = meta.get("next_continuation_token") or ""
+            if not token:
+                if flag(meta.get("has_more")) is True:
+                    raise AttachError("Sprite inventory is incomplete: the next-page token is missing.")
+                return sorted(found.items())
+            if not isinstance(token, str) or token in seen or len(token) > 8192:
+                raise AttachError("Invalid or repeated Sprite pagination token.")
+            seen.add(token)
+        raise AttachError("Sprite pagination limit reached; inventory is incomplete.")
+
+    def choose_sprite(self, requested: str = "") -> str:
+        if requested:
+            return identifier(requested, "SPRITE_NAME", NAME_PATTERN)
+        while True:
+            print("\n=== choose Sprite (current CLI organization" + (", " + safe(self.org[1]) if self.org else "") + ")", flush=True)
+            try:
+                sprites = self.sprites()
+            except AttachError as exc:
+                print("Warning: " + str(exc), flush=True)
+                if ask("  R = retry, Q = quit [Q]: ").lower() == "r":
+                    continue
+                raise Cancelled()
+            if not sprites:
+                raise AttachError("No Sprites were returned for this organization. Nothing was created or launched.", 3)
+            for index, (name, state) in enumerate(sprites, 1):
+                print(f"    {index}) {name}  (reported state: {state})")
+            answer = ask("  Choose Sprite number or name; R = refresh, Q = quit: ")
+            if answer.lower() == "q":
+                raise Cancelled()
+            if answer.lower() == "r":
+                continue
+            # Names are resolved against this inventory, never as shell text.
+            if re.fullmatch(r"[0-9]{1,6}", answer) and 1 <= int(answer) <= len(sprites):
+                return sprites[int(answer) - 1][0]
+            if answer in dict(sprites):
+                return answer
+            print("  Invalid selection; choose one of the listed Sprites.")
+
+    def sessions(self, sprite: str):
+        return parse_sessions(self.api("/exec", sprite))
+
+    def choose_session(self, sprite: str, requested: str = ""):
+        while True:
+            print(f"\n=== live native terminal sessions on {sprite}", flush=True)
+            try:
+                rows, excluded = self.sessions(sprite)
+            except AttachError as exc:
+                if requested:
+                    raise
+                print("Warning: " + str(exc))
+                answer = ask("  R = retry, S = choose another Sprite, Q = quit [Q]: ").lower()
+                if answer == "r":
+                    continue
+                if answer == "s":
+                    return None
+                raise Cancelled()
+            if requested:
+                row = next((r for r in rows if r["id"] == requested), None)
+                if row is None:
+                    raise AttachError("Requested session is not confirmed as a live native terminal on this Sprite. No process was launched.", 3)
+                return row
+            for index, row in enumerate(rows, 1):
+                print(f"    {index}) ID={row['id']}  {row['label']}")
+                print(f"       Created: {row['created']}\n       Workspace: {row['workdir']}")
+            if excluded["non_tty"]:
+                print(f"       Not offered: {excluded['non_tty']} active non-terminal command(s).")
+            if excluded["unknown"]:
+                print(f"       Not offered: {excluded['unknown']} session(s) with unconfirmed active/TTY metadata.")
+            if rows:
+                print("       Newest first. Labels describe recorded commands, not conversation titles.")
+                answer = ask("  Attach number [1]; R = refresh, S = another Sprite, Q = quit: ")
+            else:
+                print("       No attachable native terminal was returned. Nothing will be launched.")
+                print("       Saved Codex conversations and legacy tmux-only sessions are not this inventory.")
+                answer = ask("  R = refresh, S = another Sprite, Q = quit [Q]: ")
+            if answer.lower() == "q" or (not rows and not answer):
+                raise Cancelled()
+            if answer.lower() == "s":
+                return None
+            if answer.lower() == "r":
+                continue
+            answer = answer or "1"
+            if re.fullmatch(r"[0-9]{1,6}", answer) and 1 <= int(answer) <= len(rows):
+                return rows[int(answer) - 1]
+            print("  Invalid selection; no session was attached.")
+
+    def live_same_session(self, sprite: str, row: dict) -> bool:
+        rows, _ = self.sessions(sprite)
+        current = next((r for r in rows if r["id"] == row["id"]), None)
+        if current and current["identity"] != row["identity"]:
+            raise AttachError("Session identity changed since selection; refusing to attach to a potentially reused ID.")
+        return current is not None
+
+    def attach(self, sprite: str, row: dict) -> int:
+        # Keep the caller's .sprite file and project resume-state files untouched.
+        self.capture(["use", *self.org, sprite])
+        command = None
+        for candidate in (["sessions", "attach"], ["attach"]):
+            if self.capture([*candidate, "--help"], check=False).returncode == 0:
+                command = candidate
+                break
+        if command is None:
+            raise AttachError("This Sprite CLI has no recognized session-attach command.", 127)
+        # Recheck AFTER the picker and context creation, immediately before attach.
+        if not self.live_same_session(sprite, row):
+            raise AttachError("Selected session ended before attachment. No replacement was started.", 3)
+        print(f"\n       Attaching to {sprite}, native session {row['id']} ({row['label']}).")
+        print("       Existing process credentials are unchanged; no keys, updates or setup.")
+        print("       Detach with Ctrl+\\. This is NOT codex resume; no new Codex is launched.", flush=True)
+        failures = 0
+        while True:
+            started = time.monotonic()
+            terminal_state = termios.tcgetattr(sys.stdin.fileno())
+            try:
+                # No timeout on interactive use. The CLI receives the real TTY
+                # and handles raw mode, resizing and its own detach shortcut.
+                rc = subprocess.call([self.cli, *command, row["id"]], cwd=self.context)
+            finally:
+                try:
+                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, terminal_state)
+                except termios.error:
+                    pass
+            rc = 128 - rc if rc < 0 else rc
+            if rc == 0:
+                print("\n       Attachment ended cleanly; no replacement session was launched.")
+                return 0
+            if rc in (129, 130, 131, 143) or not self.auto:
+                return rc
+            if time.monotonic() - started >= 30:
+                failures = 0
+            failures += 1
+            if self.attempts and failures > self.attempts:
+                print("       Automatic reattach limit reached; rerun --attach-only to reconnect.")
+                return rc
+            print(f"\n       Attachment ended with exit {rc}; checking the SAME session before retrying.", flush=True)
+            confirmed = False
+            last_error = None
+            for attempt in range(self.confirm_tries):
+                try:
+                    if self.live_same_session(sprite, row):
+                        confirmed = True
+                        break
+                    last_error = None
+                except AttachError as exc:
+                    last_error = exc
+                if attempt + 1 < self.confirm_tries:
+                    time.sleep(self.delay)
+            if not confirmed:
+                print("       " + (str(last_error) if last_error else "The selected terminal is no longer confirmed live."))
+                print("       Nothing was started or replaced; rerun --attach-only after connectivity recovers.")
+                return rc
+            time.sleep(self.delay)
+
+
+def main() -> int:
+    if sys.version_info < (3, 9):
+        raise AttachError("Attach-only requires local Python 3.9 or newer.", 2)
+    selection_only = len(sys.argv) > 3 and sys.argv[3] == "download"
+    if not selection_only and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        raise AttachError("Attach-only requires an interactive terminal for stdin and stdout. Nothing was launched.", 2)
+    requested_id = sys.argv[1] if len(sys.argv) > 1 else ""
+    requested_sprite = os.environ.get("SPRITE_NAME", "")
+    receipt = sys.argv[2] if len(sys.argv) > 2 else ""
+    def write_receipt(sprite):
+        if receipt:
+            with open(receipt, "w", encoding="utf-8") as handle:
+                json.dump({"sprite": sprite}, handle)
+            selected_context = os.path.join(context, ".sprite")
+            if os.path.isfile(selected_context):
+                with open(selected_context, "rb") as source:
+                    data = source.read(65537)
+                if len(data) > 65536:
+                    raise AttachError("Sprite CLI context is unexpectedly large; download target was not preserved.")
+                with open(receipt + ".context", "wb") as target:
+                    target.write(data)
+    if selection_only and not requested_sprite and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        raise AttachError("Noninteractive --download-output requires SPRITE_NAME.", 2)
+    if requested_id:
+        identifier(requested_id, "--session-id", SESSION_PATTERN)
+        if not requested_sprite:
+            raise AttachError("--session-id requires SPRITE_NAME to avoid attaching to the same ID on the wrong Sprite.", 2)
+    print("\n=== choose Sprite for output download" if selection_only else "\n=== attach-only: existing native Sprite terminal", flush=True)
+    print("       Uses your local Sprites login; no GitHub, Fly-app or model keys are requested.")
+    if os.environ.get("FORCE_NEW_SESSION") == "1":
+        print("       FORCE_NEW_SESSION=1 is ignored in attach-only mode; existing sessions will not be killed.")
+    with tempfile.TemporaryDirectory(prefix="sprite-codex-attach-") as context:
+        picker = Picker(context, selection_only=selection_only)
+        sprite = picker.choose_sprite(requested_sprite)
+        if selection_only:
+            write_receipt(sprite)
+            return 0
+        while True:
+            row = picker.choose_session(sprite, requested_id)
+            if row is None:
+                sprite = picker.choose_sprite()
+                continue
+            rc = picker.attach(sprite, row)
+            write_receipt(sprite)
+            return rc
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Cancelled:
+        print("\n       Attach-only cancelled; no new session was launched.")
+        raise SystemExit(0)
+    except KeyboardInterrupt:
+        print("\n       Attach-only interrupted; no remote kill or replacement was requested.")
+        raise SystemExit(130)
+    except AttachError as exc:
+        print("error: " + str(exc), file=sys.stderr)
+        raise SystemExit(exc.code)
+    except OSError:
+        print("error: local terminal or temporary-context operation failed; no bootstrap fallback.", file=sys.stderr)
+        raise SystemExit(1)
+ATTACH_ONLY_PY
+}
+
+run_attach_only() {
+  command -v python3 >/dev/null 2>&1 || { echo "error: local python3 is required for attach-only" >&2; return 127; }
+  # -c leaves stdin attached to the real terminal for the picker and Sprite CLI.
+  # All inventory parsing happens locally. No helper is uploaded to the Sprite.
+  python3 -c "$(attach_only_python)" "$ATTACH_SESSION_ID" "${1:-}" "$RUN_MODE"
+}
+
+
+# v52: all file-mode dispatch stays above bootstrap config/credentials/side effects.
+file_access_python() {
+  cat <<'FILES_ACCESS_PY'
+"""Local shell/file menu for one existing Sprite, separate from its agent TTY.
+Generated into sprite-codex-v53.sh; uses the retained picker and ZIP downloader.
+"""
+from __future__ import annotations
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import secrets
+import shlex
+import signal
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+import types
+import unicodedata
+
+REMOTE_FILES_PY = r'''"""Small stat/list/preview, checked streaming transfer and shell helper on Sprite.
+No account credentials or process inspection. Paths are opened without symlinks.
+"""
+import base64
+import ctypes
+import errno
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import stat
+import struct
+import sys
+import time
+
+CHUNK = 1024 * 1024
+MAX_MANIFEST = 16 * 1024 * 1024
+MAX_ENTRIES = 100000
+MAGIC = b"SPRITE_FILES_UPLOAD_V1\n"
+DONE = b"SPRITE_FILES_UPLOAD_DONE "
+FILE_MAGIC = b"\nSPRITE_CODEX_FILE_V1 "
+FOOTER_SIZE = 512
+
+class FileError(Exception):
+    pass
+
+def signature(st):
+    return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+def path_value(value, base="/"):
+    if not isinstance(value, str) or not value or len(value) > 8192 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise FileError("invalid_path")
+    if value == "~" or value == "$HOME":
+        value = os.path.expanduser("~")
+    elif value.startswith("~/"):
+        value = os.path.expanduser("~") + value[1:]
+    elif value.startswith("$HOME/"):
+        value = os.path.expanduser("~") + value[5:]
+    elif value.startswith("~"):
+        raise FileError("invalid_path")
+    return os.path.normpath(value if value.startswith("/") else os.path.join(base, value))
+
+def open_dir(path):
+    if not os.path.isabs(path):
+        raise FileError("invalid_path")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.split("/"):
+            if not part:
+                continue
+            if part in (".", ".."):
+                raise FileError("invalid_path")
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def inspect_path(path):
+    if path == "/":
+        st = os.stat(path)
+    else:
+        parent = open_dir(os.path.dirname(path))
+        try:
+            st = os.stat(os.path.basename(path), dir_fd=parent, follow_symlinks=False)
+        finally:
+            os.close(parent)
+    kind = "dir" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "link" if stat.S_ISLNK(st.st_mode) else "special"
+    return dict(path=path, kind=kind, size=st.st_size, identity=[st.st_dev, st.st_ino], signature=list(signature(st)))
+
+def component(value):
+    if (not isinstance(value, str) or not value or value in (".", "..") or len(value.encode("utf-8")) > 255
+        or any(c in value for c in ("/", "\\", ":")) or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise FileError("invalid_name")
+    return value
+
+def validate_manifest(data):
+    if not isinstance(data, dict) or data.get("kind") not in ("file", "dir") or not isinstance(data.get("entries"), list):
+        raise FileError("invalid_manifest")
+    entries = data["entries"]
+    if len(entries) > MAX_ENTRIES:
+        raise FileError("too_many_entries")
+    seen, dirs = set(), set()
+    for item in entries:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise FileError("invalid_manifest")
+        path = item["path"]
+        if not path or len(path.encode("utf-8")) > 8192 or path in seen or item.get("kind") not in ("file", "dir"):
+            raise FileError("invalid_manifest")
+        for part in path.split("/"):
+            component(part)
+        parent = path.rpartition("/")[0]
+        if parent and parent not in dirs:
+            raise FileError("invalid_manifest")
+        seen.add(path)
+        if item["kind"] == "dir":
+            dirs.add(path)
+        elif type(item.get("size")) is not int or not 0 <= item["size"] < 2**63:
+            raise FileError("invalid_manifest")
+        if type(item.get("executable", False)) is not bool:
+            raise FileError("invalid_manifest")
+    if data["kind"] == "file" and (len(entries) != 1 or entries[0]["kind"] != "file" or entries[0]["path"] != "payload"):
+        raise FileError("invalid_manifest")
+    return entries
+
+def read_exact(source, n):
+    parts = []
+    while n:
+        data = source.read(min(n, CHUNK))
+        if not data:
+            raise FileError("incomplete_upload")
+        parts.append(data)
+        n -= len(data)
+    return b"".join(parts)
+
+def rename_no_replace(src_fd, src, dst_fd, dst):
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise FileError("atomic_rename_unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(src_fd, os.fsencode(src), dst_fd, os.fsencode(dst), 1):
+        err = ctypes.get_errno()
+        if err == errno.EEXIST:
+            raise FileError("destination_exists")
+        raise FileError("atomic_rename_failed")
+
+def scope_guard(req, path):
+    scope = req.get("scope")
+    if scope is None:
+        return
+    if not isinstance(scope, dict) or scope.get("folder") not in ("input", "output"):
+        raise FileError("invalid_scope")
+    workspace = path_value(scope.get("workspace"))
+    root = os.path.join(workspace, scope["folder"])
+    if os.path.commonpath((root, path)) != root:
+        raise FileError("outside_selected_folder")
+    fd = open_dir(workspace)
+    try:
+        if [os.fstat(fd).st_dev, os.fstat(fd).st_ino] != scope.get("identity"):
+            raise FileError("workspace_changed")
+        child = os.open(scope["folder"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            if scope.get("root_identity") is not None and [os.fstat(child).st_dev, os.fstat(child).st_ino] != scope["root_identity"]:
+                raise FileError("directory_changed")
+        finally:
+            os.close(child)
+    finally:
+        os.close(fd)
+
+
+def check_expected(req, st):
+    if req.get("expected") is not None and list(signature(st)) != req["expected"]:
+        raise FileError("selection_changed_refresh_picker")
+
+
+def input_folder(req, path, create=False):
+    workspace = open_dir(path)
+    try:
+        if [os.fstat(workspace).st_dev, os.fstat(workspace).st_ino] != req.get("identity"):
+            raise FileError("workspace_changed")
+        if create:
+            try:
+                os.mkdir("input", 0o700, dir_fd=workspace)
+            except FileExistsError:
+                pass
+        try:
+            fd = os.open("input", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=workspace)
+        except FileNotFoundError:
+            if create:
+                raise
+            return dict(exists=False, names=[])
+        try:
+            st = os.fstat(fd)
+            if create:
+                return dict(path=os.path.join(path, "input"), kind="dir", size=st.st_size,
+                            identity=[st.st_dev, st.st_ino], signature=list(signature(st)))
+            names = []
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    names.append(entry.name)
+                    if len(names) > MAX_ENTRIES:
+                        raise FileError("too_many_entries")
+            return dict(exists=True, names=names)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(workspace)
+
+
+def upload(req, source):
+    path = path_value(req["path"])
+    scope_guard(req, path)
+    name = component(req["name"])
+    if path == "/":
+        raise FileError("root_upload_refused")
+    parent = open_dir(path)
+    stage_fd, old_cwd, stage = None, None, None
+    try:
+        if [os.fstat(parent).st_dev, os.fstat(parent).st_ino] != req["identity"]:
+            raise FileError("directory_changed")
+        try:
+            os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileError("destination_exists")
+        if read_exact(source, len(MAGIC)) != MAGIC:
+            raise FileError("invalid_upload")
+        length = struct.unpack("!Q", read_exact(source, 8))[0]
+        if not 0 < length <= MAX_MANIFEST:
+            raise FileError("invalid_manifest")
+        raw = read_exact(source, length)
+        manifest = json.loads(raw)
+        entries = validate_manifest(manifest)
+        manifest_hash = hashlib.sha256(raw).hexdigest()
+        if manifest_hash != req["manifest_sha256"]:
+            raise FileError("manifest_checksum")
+        # A hidden sibling stage keeps final files invisible until completion.
+        stage_name = ".sprite-upload-" + req["nonce"] + "-" + secrets.token_hex(4)
+        os.mkdir(stage_name, 0o700, dir_fd=parent)
+        stage = stage_name
+        stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        old_cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+        os.fchdir(stage_fd)
+        if manifest["kind"] == "dir":
+            os.mkdir("payload", 0o700)
+        total, count = 0, 0
+        for entry in entries:
+            target = "payload/" + entry["path"] if manifest["kind"] == "dir" else "payload"
+            if entry["kind"] == "dir":
+                os.mkdir(target, 0o700)
+                continue
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            h = hashlib.sha256()
+            with os.fdopen(fd, "wb") as output:
+                left = entry["size"]
+                while left:
+                    chunk = read_exact(source, min(CHUNK, left))
+                    output.write(chunk)
+                    h.update(chunk)
+                    total += len(chunk)
+                    left -= len(chunk)
+                if read_exact(source, 32) != h.digest():
+                    raise FileError("file_checksum")
+                output.flush()
+                os.fchmod(output.fileno(), 0o700 if entry.get("executable") else 0o600)
+                os.fsync(output.fileno())
+            count += 1
+        if read_exact(source, len(DONE) + 32) != DONE + req["nonce"].encode("ascii"):
+            raise FileError("incomplete_upload")
+        check = open_dir(path)
+        try:
+            if [os.fstat(check).st_dev, os.fstat(check).st_ino] != req["identity"]:
+                raise FileError("directory_changed")
+        finally:
+            os.close(check)
+        # Linux RENAME_NOREPLACE protects against concurrently created targets,
+        # including empty directories; never overlay a live working tree.
+        scope_guard(req, path)
+        rename_no_replace(stage_fd, "payload", parent, name)
+        return dict(path=os.path.join(path, name), files=count, size=total, manifest_sha256=manifest_hash)
+    finally:
+        if stage_fd is not None:
+            os.close(stage_fd)
+        if stage is not None:
+            # Cleanup by a held directory descriptor, not an untrusted path chain.
+            os.fchdir(parent)
+            shutil.rmtree(stage, ignore_errors=True)
+        if old_cwd is not None:
+            os.fchdir(old_cwd)
+            os.close(old_cwd)
+        os.close(parent)
+
+def download_file(req, output):
+    path = path_value(req["path"])
+    scope_guard(req, path)
+    parent = open_dir(os.path.dirname(path))
+    try:
+        name = os.path.basename(path)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, "rb") as source:
+            before = os.fstat(source.fileno())
+            check_expected(req, before)
+            if not stat.S_ISREG(before.st_mode):
+                raise FileError("not_regular_file")
+            h, left = hashlib.sha256(), before.st_size
+            while left:
+                chunk = source.read(min(CHUNK, left))
+                if not chunk:
+                    raise FileError("source_changed")
+                output.write(chunk)
+                h.update(chunk)
+                left -= len(chunk)
+            if (source.read(1) or signature(os.fstat(source.fileno())) != signature(before)
+                or signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) != signature(before)):
+                raise FileError("source_changed")
+            check = open_dir(os.path.dirname(path))
+            try:
+                if (os.fstat(check).st_dev, os.fstat(check).st_ino) != (os.fstat(parent).st_dev, os.fstat(parent).st_ino):
+                    raise FileError("source_changed")
+            finally:
+                os.close(check)
+            scope_guard(req, path)
+            meta = dict(nonce=req["nonce"], size=before.st_size, sha256=h.hexdigest())
+            footer = FILE_MAGIC + json.dumps(meta, separators=(",", ":")).encode("ascii")
+            output.write(footer.ljust(FOOTER_SIZE - 1, b" ") + b"\n")
+            output.flush()
+    finally:
+        os.close(parent)
+
+def handle(req):
+    path = path_value(req.get("path", "~"), req.get("base", "/"))
+    action = req["action"]
+    if action in ("input-status", "ensure-input"):
+        return input_folder(req, path, create=action == "ensure-input")
+    scope_guard(req, path)
+    if action == "stat":
+        result = inspect_path(path)
+        if req.get("expected") is not None and result["signature"] != req["expected"]:
+            raise FileError("selection_changed_refresh_picker")
+        return result
+    if action == "list":
+        fd = open_dir(path)
+        try:
+            with os.scandir(fd) as iterator:
+                names = []
+                for item in iterator:
+                    names.append(item.name)
+                    if len(names) > MAX_ENTRIES:
+                        raise FileError("too_many_entries")
+            names.sort()
+            offset = req.get("offset", 0)
+            if type(offset) is not int or offset < 0:
+                raise FileError("invalid_request")
+            entries = []
+            for name in names[offset:offset+100]:
+                try:
+                    st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                kind = "dir" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "link" if stat.S_ISLNK(st.st_mode) else "special"
+                entries.append(dict(name=name, kind=kind, size=st.st_size, signature=list(signature(st))))
+            return dict(path=path, entries=entries, total=len(names), offset=offset)
+        finally:
+            os.close(fd)
+    if action == "preview":
+        parent = open_dir(os.path.dirname(path))
+        try:
+            fd = os.open(os.path.basename(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, "rb") as source:
+                st = os.fstat(source.fileno())
+                check_expected(req, st)
+                if not stat.S_ISREG(st.st_mode):
+                    raise FileError("not_regular_file")
+                data = source.read(16384)
+                return dict(data=base64.b64encode(data).decode("ascii"), truncated=st.st_size > len(data))
+        finally:
+            os.close(parent)
+    if action == "upload":
+        return upload(req, sys.stdin.buffer)
+    if action == "get":
+        download_file(req, sys.stdout.buffer)
+        return None
+    if action == "shell":
+        fd = open_dir(path)
+        if [os.fstat(fd).st_dev, os.fstat(fd).st_ino] != req["identity"]:
+            os.close(fd)
+            raise FileError("directory_changed")
+        os.fchdir(fd)
+        os.close(fd)
+        env = os.environ.copy()
+        for key in list(env):
+            if any(x in key.upper() for x in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY")) or key in ("SPRITE_CODEX_ENV_HEX", "BASH_ENV", "ENV", "PROMPT_COMMAND") or key.startswith("BASH_FUNC_"):
+                env.pop(key, None)
+        env["PATH"] = os.path.expanduser("~/.local/bin") + ":" + os.path.expanduser("~/.fly/bin") + ":" + env.get("PATH", "/usr/bin:/bin")
+        env.update(PS1="sprite-files:\\w\\$ ", HISTFILE="/dev/null", PWD=path)
+        # Do not source arbitrary startup commands or load another agent's env.
+        os.execvpe("bash", ["bash", "--noprofile", "--norc", "-i"], env)
+    raise FileError("invalid_action")
+
+def main():
+    req = json.loads(sys.argv[1])
+    nonce = req.get("nonce", "")
+    if not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        raise FileError("invalid_request")
+    seconds = req.get("timeout", 3600)
+    if type(seconds) is not int or not 1 <= seconds <= 86400:
+        raise FileError("invalid_timeout")
+    def timed_out(*unused):
+        raise FileError("timeout")
+    if req.get("action") != "shell":
+        signal.signal(signal.SIGALRM, timed_out)
+        signal.alarm(seconds)
+    try:
+        data = handle(req)
+        if data is not None:
+            print(json.dumps(dict(ok=True, nonce=nonce, data=data), separators=(",", ":")), flush=True)
+    except (FileError, OSError, ValueError, KeyError, TypeError) as exc:
+        reason = str(exc) if isinstance(exc, FileError) else "permission" if isinstance(exc, PermissionError) else "missing" if isinstance(exc, FileNotFoundError) else "operation_failed"
+        # Never echo exception text containing arbitrary paths/data/credentials.
+        print(json.dumps(dict(ok=False, nonce=nonce, error=reason), separators=(",", ":")), file=sys.stderr, flush=True)
+        return 1
+    finally:
+        signal.alarm(0)
+    return 0
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:
+        os._exit(1)
+'''
+
+remote = types.ModuleType("files_remote_library")
+exec(compile(REMOTE_FILES_PY, "files_remote_library", "exec"), remote.__dict__)
+
+class FilesError(Exception):
+    pass
+
+class Cancelled(Exception):
+    pass
+
+def safe(value):
+    return "".join(c if c.isprintable() and not unicodedata.category(c).startswith("C") else "?" for c in str(value))
+
+def ask(prompt):
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        raise Cancelled()
+
+def raw_workspace(record):
+    """Extract unmodified path bytes, never reuse the display-sanitized label."""
+    command = record.get("command", record.get("cmd", ""))
+    if isinstance(command, list) and all(isinstance(s, str) for s in command):
+        argv = command
+    elif isinstance(command, str):
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return ""
+    else:
+        argv = []
+    managed = False
+    for index, arg in enumerate(argv):
+        base = os.path.basename(arg)
+        if re.fullmatch(r"sprite-(codex|kimi-code)-native-[A-Za-z0-9._-]+", base):
+            managed = True
+            if ("-runner" in base and len(argv) > index + 6 and argv[index + 1].isdigit()
+                and argv[index + 4].startswith("/") and argv[index + 5] in ("new", "resume", "fork")
+                and argv[index + 6] in ("codex", "kimi-code")):
+                return argv[index + 4]
+    # A malformed/ambiguous managed command must not fall back to its entrypoint's
+    # home directory. Ask explicitly instead of operating on the wrong workspace.
+    if managed:
+        return ""
+    value = record.get("workdir", record.get("dir", record.get("cwd", "")))
+    return value if isinstance(value, str) and value.startswith("/") else ""
+
+def int_setting(name, default, minimum, maximum):
+    value = os.environ.get(name, str(default))
+    if not re.fullmatch(r"[0-9]{1,6}", value) or not minimum <= int(value) <= maximum:
+        raise FilesError(f"{name} must be {minimum}..{maximum}.")
+    return int(value)
+
+def error_from_stream(data):
+    for line in data.decode("utf-8", "replace").splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict) and item.get("ok") is False and isinstance(item.get("error"), str):
+            return safe(item["error"])
+    return "transport_or_remote_error"
+
+def receipt(data, nonce):
+    try:
+        value = json.loads(data)
+    except (ValueError, UnicodeError):
+        raise FilesError("The remote result was incomplete or invalid; operation status is unknown.") from None
+    if not isinstance(value, dict) or value.get("nonce") != nonce or value.get("ok") is not True or not isinstance(value.get("data"), dict):
+        raise FilesError("The remote operation did not provide a matching success receipt.")
+    return value["data"]
+
+def stop_transfer(proc):
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=2)
+        except ProcessLookupError:
+            pass
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+class Deadline:
+    """Bound blocked pipe writes as well as waits on Unix local terminals."""
+    def __init__(self, seconds):
+        self.seconds = seconds
+    def __enter__(self):
+        self.previous = signal.getsignal(signal.SIGALRM)
+        def expired(*unused):
+            raise FilesError("Transfer timed out. Inspect the destination before retrying; no automatic retry was attempted.")
+        signal.signal(signal.SIGALRM, expired)
+        signal.alarm(self.seconds)
+    def __exit__(self, *unused):
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, self.previous)
+
+class UploadSource:
+    """A metadata snapshot with fd-based, bounded-memory content streaming."""
+    def __init__(self, path, expected=None, boundary=None):
+        supplied = Path(os.path.abspath(os.path.expanduser(path)))
+        if boundary is not None:
+            boundary = os.path.normpath(boundary)
+            if os.path.commonpath((boundary, str(supplied))) != boundary:
+                raise FilesError("Upload selection is outside the local launch directory.")
+            # Validate the entire parent chain BEFORE any resolve/follow operation.
+            checked = remote.open_dir(str(supplied.parent))
+            os.close(checked)
+        initial = supplied.lstat()
+        if not (stat.S_ISREG(initial.st_mode) or stat.S_ISDIR(initial.st_mode)):
+            raise FilesError("Choose a regular file or directory, not a symlink or special file.")
+        if expected is not None and list(remote.signature(initial)) != expected:
+            raise FilesError("Local selection changed; refresh the picker before uploading.")
+        self.path = supplied if boundary is not None else supplied.resolve(strict=True)
+        self.parent = remote.open_dir(str(self.path.parent))
+        self.name = self.path.name
+        self.root = None
+        self.kind = "dir" if stat.S_ISDIR(initial.st_mode) else "file"
+        self.entries, self.signatures = [], {}
+        try:
+            current = os.stat(self.name, dir_fd=self.parent, follow_symlinks=False)
+            if expected is not None and list(remote.signature(current)) != expected:
+                raise FilesError("Local selection changed before upload.")
+            if self.kind == "dir":
+                self.root = os.open(self.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.parent)
+                if expected is not None and list(remote.signature(os.fstat(self.root))) != expected:
+                    raise FilesError("Local folder changed before upload.")
+                self.scan(self.root, "", self.entries, self.signatures)
+            else:
+                current = os.stat(self.name, dir_fd=self.parent, follow_symlinks=False)
+                self.signatures[""] = remote.signature(current)
+                self.entries = [dict(path="payload", kind="file", size=current.st_size, executable=bool(current.st_mode & 0o111))]
+            self.manifest = json.dumps(dict(kind=self.kind, entries=self.entries), separators=(",", ":"), ensure_ascii=True).encode("ascii")
+            if len(self.manifest) > remote.MAX_MANIFEST:
+                raise FilesError("The upload manifest is too large; split the directory into smaller uploads.")
+            remote.validate_manifest(json.loads(self.manifest))
+        except BaseException:
+            self.close()
+            raise
+    def close(self):
+        if self.root is not None:
+            os.close(self.root)
+            self.root = None
+        if self.parent is not None:
+            os.close(self.parent)
+            self.parent = None
+    def scan(self, fd, prefix, entries, signatures):
+        signatures[prefix] = remote.signature(os.fstat(fd))
+        with os.scandir(fd) as iterator:
+            names = []
+            for entry in iterator:
+                names.append(entry.name)
+                if len(names) > remote.MAX_ENTRIES:
+                    raise FilesError("Directory has too many entries; split the upload.")
+        for name in sorted(names):
+            remote.component(name)
+            path = prefix + name
+            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(st.st_mode):
+                entries.append(dict(path=path, kind="dir"))
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    self.scan(child, path + "/", entries, signatures)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(st.st_mode):
+                entries.append(dict(path=path, kind="file", size=st.st_size, executable=bool(st.st_mode & 0o111)))
+                signatures[path] = remote.signature(st)
+            else:
+                raise FilesError("Upload contains a symlink or special file; remove it or upload an ordinary-file subset.")
+            if len(entries) > remote.MAX_ENTRIES:
+                raise FilesError("Too many entries; split the upload.")
+    def file_fd(self, path):
+        if self.kind == "file":
+            return os.open(self.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.parent)
+        parent = os.dup(self.root)
+        try:
+            parts = path.split("/")
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                os.close(parent)
+                parent = child
+            return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        finally:
+            os.close(parent)
+    def stream(self, destination, nonce):
+        destination.write(remote.MAGIC)
+        destination.write(struct.pack("!Q", len(self.manifest)))
+        destination.write(self.manifest)
+        total = 0
+        last_progress = time.monotonic()
+        for entry in self.entries:
+            if entry["kind"] != "file":
+                continue
+            key = "" if self.kind == "file" else entry["path"]
+            with os.fdopen(self.file_fd(entry["path"]), "rb") as source:
+                before = os.fstat(source.fileno())
+                if not stat.S_ISREG(before.st_mode) or remote.signature(before) != self.signatures[key]:
+                    raise FilesError("Local source changed during upload; destination was not deliberately published.")
+                h, left = hashlib.sha256(), before.st_size
+                while left:
+                    data = source.read(min(remote.CHUNK, left))
+                    if not data:
+                        raise FilesError("Local source changed during upload.")
+                    destination.write(data)
+                    h.update(data)
+                    total += len(data)
+                    left -= len(data)
+                    if time.monotonic() - last_progress >= 5:
+                        print(f"       Sent {total / 1048576:,.1f} MiB...", flush=True)
+                        last_progress = time.monotonic()
+                if source.read(1) or remote.signature(os.fstat(source.fileno())) != self.signatures[key]:
+                    raise FilesError("Local source changed during upload.")
+                destination.write(h.digest())
+        if self.kind == "dir":
+            entries, signatures = [], {}
+            self.scan(self.root, "", entries, signatures)
+            if entries != self.entries or signatures != self.signatures:
+                raise FilesError("Local directory changed during upload.")
+            root_signature = self.signatures[""]
+        else:
+            root_signature = self.signatures[""]
+        if remote.signature(os.stat(self.name, dir_fd=self.parent, follow_symlinks=False)) != root_signature:
+            raise FilesError("Local upload root changed.")
+        # Commit marker is withheld until the entire local snapshot revalidates.
+        destination.write(remote.DONE + nonce.encode("ascii"))
+        destination.flush()
+        return total
+
+def verify_raw_download(handle, nonce):
+    length = handle.seek(0, os.SEEK_END)
+    if length < remote.FOOTER_SIZE:
+        raise FilesError("Download is incomplete; no final file was saved.")
+    handle.seek(-remote.FOOTER_SIZE, os.SEEK_END)
+    footer = handle.read(remote.FOOTER_SIZE)
+    if not footer.startswith(remote.FILE_MAGIC) or not footer.endswith(b"\n"):
+        raise FilesError("Download completion record is missing; no final file was saved.")
+    try:
+        data = json.loads(footer[len(remote.FILE_MAGIC):].strip())
+    except ValueError:
+        raise FilesError("Download completion record is invalid.") from None
+    if (not isinstance(data, dict) or data.get("nonce") != nonce or type(data.get("size")) is not int
+        or data["size"] != length - remote.FOOTER_SIZE or not isinstance(data.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", data["sha256"])):
+        raise FilesError("Download completion record does not match this request.")
+    handle.seek(0)
+    h, left = hashlib.sha256(), data["size"]
+    while left:
+        chunk = handle.read(min(remote.CHUNK, left))
+        if not chunk:
+            raise FilesError("Truncated download.")
+        h.update(chunk)
+        left -= len(chunk)
+    if h.hexdigest() != data["sha256"]:
+        raise FilesError("Download SHA-256 mismatch; no final file was saved.")
+    handle.truncate(data["size"])
+    handle.flush()
+    os.fsync(handle.fileno())
+    return data
+
+class Browser:
+    def __init__(self, picker_module, output_module, context, local_dir):
+        self.a = types.SimpleNamespace(**picker_module)
+        self.o = types.SimpleNamespace(**output_module)
+        self.picker = self.a.Picker(context, selection_only=True)
+        self.local_dir = Path(local_dir).resolve()
+        self.timeout = int_setting("SPRITE_FILE_TIMEOUT", 3600, 1, 86400)
+        self.sprite, self.cwd = "", ""
+    def args(self, req, tty=False):
+        result = [self.picker.cli, "exec", *self.picker.org, "-s", self.sprite]
+        if tty:
+            result += ["--tty", "--dir", req["path"]]
+        return [*result, "--no-port-forward", "--", "python3", "-c", REMOTE_FILES_PY, json.dumps(req, separators=(",", ":"))]
+    def request(self, action, path=None, **extra):
+        return dict(action=action, path=path or self.cwd or "~", nonce=secrets.token_hex(16), timeout=self.timeout, **extra)
+    def control(self, action, path=None, **extra):
+        req = self.request(action, path, **extra)
+        req["timeout"] = self.picker.timeout
+        try:
+            result = subprocess.run(self.args(req), cwd=self.picker.context, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.picker.timeout)
+        except subprocess.TimeoutExpired:
+            raise FilesError("Remote file request timed out; no automatic retry was attempted.") from None
+        if result.returncode:
+            raise FilesError("Remote file operation failed: " + error_from_stream(result.stderr))
+        return receipt(result.stdout, req["nonce"])
+    def pin(self, sprite):
+        self.sprite = sprite
+        self.picker.capture(["use", *self.picker.org, sprite])
+    def select_workspace(self, requested_id="", override=""):
+        if override:
+            if requested_id:
+                raise FilesError("Use either --session-id or --workdir, not both.")
+            return self.set_cwd(override)
+        while True:
+            try:
+                raw = self.picker.api("/exec", self.sprite)
+                rows, _ = self.a.parse_sessions(raw)
+                records, _ = self.a.collection(raw, ("sessions", "items", "data"))
+            except self.a.AttachError as exc:
+                if requested_id:
+                    raise
+                print("Warning: " + str(exc))
+                answer = ask("  R = retry session discovery, M = enter workspace, Q = quit [Q]: ").lower()
+                if answer == "r":
+                    continue
+                if answer == "m":
+                    return self.set_cwd(ask("  Existing absolute Sprite workspace (or ~/...): "))
+                raise Cancelled()
+            by_id = {str(r.get("id", r.get("session_id"))): r for r in records}
+            print(f"\n=== choose workspace on {self.sprite} (does not attach to the agent)")
+            for index, row in enumerate(rows, 1):
+                row["raw_workdir"] = raw_workspace(by_id[row["id"]])
+                print(f"    {index}) ID={row['id']}  {row['label']}  created={row['created']}")
+                print("       Recorded workspace: " + safe(row["raw_workdir"] or "unknown; enter it manually"))
+            if requested_id:
+                chosen = next((r for r in rows if r["id"] == requested_id), None)
+                if chosen is None:
+                    raise FilesError("Requested session is not confirmed live; no workspace was guessed.")
+            else:
+                if not rows:
+                    print("       No live native terminal was returned; an existing workspace can still be selected manually.")
+                answer = ask("  Workspace session number; M = manual path, R = refresh, Q = quit: ")
+                if answer.lower() == "q" or not answer:
+                    raise Cancelled()
+                if answer.lower() == "r":
+                    continue
+                if answer.lower() == "m":
+                    return self.set_cwd(ask("  Existing absolute Sprite workspace (or ~/...): "))
+                if not re.fullmatch(r"[0-9]{1,6}", answer) or not 1 <= int(answer) <= len(rows):
+                    print("Invalid selection.")
+                    continue
+                chosen = rows[int(answer)-1]
+            if not self.picker.live_same_session(self.sprite, chosen):
+                raise FilesError("Selected session ended before its workspace could be confirmed. Refresh or select a manual path.")
+            if not chosen["raw_workdir"]:
+                if requested_id:
+                    raise FilesError("Session workspace cannot be determined. Rerun with --workdir and its exact path.")
+                return self.set_cwd(ask("  Workspace not recorded; enter the exact absolute directory: "))
+            print("       Using the recorded workspace, not a live child-process cwd probe.")
+            return self.set_cwd(chosen["raw_workdir"])
+    def set_cwd(self, path):
+        if not path:
+            raise FilesError("No directory entered.")
+        info = self.control("stat", path, base=self.cwd or "/")
+        if info.get("kind") != "dir":
+            raise FilesError("Selected path must be an existing ordinary directory, not a symlink.")
+        # Validate every path component now; subsequent operations reopen safely.
+        self.control("list", info["path"], offset=0)
+        self.cwd = info["path"]
+        print("       Remote directory: " + safe(self.cwd))
+        return self.cwd
+    def browse(self):
+        offset = 0
+        while True:
+            result = self.control("list", self.cwd, offset=offset)
+            entries = result["entries"]
+            print("\n=== " + safe(self.cwd))
+            for index, entry in enumerate(entries, 1):
+                print(f"    {index:3}) {entry['kind']:7} {entry['size']:>12,}  {safe(entry['name'])}")
+            print(f"       Page {offset // 100 + 1}; {result['total']} entries. Symlinks are listed but not followed.")
+            answer = ask("  Number = open; N/P = page, U = parent, Q = file menu: ")
+            if answer.lower() == "q" or not answer:
+                return
+            if answer.lower() == "n":
+                if offset + 100 < result["total"]:
+                    offset += 100
+                continue
+            if answer.lower() == "p":
+                offset = max(0, offset - 100)
+                continue
+            if answer.lower() == "u":
+                self.set_cwd(os.path.dirname(self.cwd))
+                offset = 0
+                continue
+            if not re.fullmatch(r"[0-9]{1,3}", answer) or not 1 <= int(answer) <= len(entries):
+                print("Invalid selection.")
+                continue
+            entry = entries[int(answer)-1]
+            path = os.path.join(self.cwd, entry["name"])
+            if entry["kind"] == "dir":
+                self.set_cwd(path)
+                offset = 0
+            elif entry["kind"] == "file":
+                choice = ask("  P = preview text (first 16 KiB), D = download, Enter = back: ").lower()
+                if choice == "p":
+                    preview = self.control("preview", path)
+                    data = base64.b64decode(preview["data"], validate=True)
+                    if b"\0" in data:
+                        print("       Binary-looking file; preview withheld. Download it instead.")
+                    else:
+                        text = data.decode("utf-8", "replace")
+                        print("\n" + "\n".join(safe(line) for line in text.splitlines()))
+                        if preview["truncated"]:
+                            print("       [preview truncated]")
+                elif choice == "d":
+                    self.download(path)
+            else:
+                print("       Symlinks and special files cannot be opened by this file menu.")
+    def shell(self):
+        info = self.control("stat", self.cwd)
+        if info.get("kind") != "dir":
+            raise FilesError("Directory is no longer available.")
+        req = self.request("shell", self.cwd, identity=info["identity"])
+        print("\n       Opening a SEPARATE Bash terminal in " + safe(self.cwd))
+        print("       Codex is not attached, restarted, paused or signalled by this operation.")
+        print("       This shell does not inherit the running agent's GitHub/Fly/model tokens.")
+        print("       Type exit to return to this LOCAL file menu for uploads/downloads.")
+        print("       Shell cd does not change the selected workspace or the input/output picker roots.", flush=True)
+        state = termios.tcgetattr(sys.stdin.fileno())
+        try:
+            rc = subprocess.call(self.args(req, tty=True), cwd=self.picker.context)
+        finally:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, state)
+        print(f"\n       Shell viewer returned (exit {rc}); existing Codex session was not changed.")
+        print("       Ctrl+\\ detaches rather than exits a shell; a detached shell may remain on the Sprite.")
+    def upload(self):
+        path = ask("  LOCAL file or directory to upload (no shell escaping/globs; blank cancels): ")
+        if not path:
+            return
+        source = UploadSource(path if os.path.isabs(os.path.expanduser(path)) else str(self.local_dir / path))
+        proc = None
+        try:
+            name = ask(f"  New name under {safe(self.cwd)} [{safe(source.name)}]: ") or source.name
+            remote.component(name)
+            info = self.control("stat", self.cwd)
+            if info.get("kind") != "dir":
+                raise FilesError("Upload destination is not a directory.")
+            print(f"       LOCAL {safe(source.path)} -> SPRITE {safe(os.path.join(self.cwd, name))}")
+            print("       No overwrites or directory merging. Hidden regular files are included; exclude secrets yourself.")
+            if ask("  Upload now? [y/N]: ").lower() not in ("y", "yes"):
+                return
+            req = self.request("upload", self.cwd, name=name, identity=info["identity"], manifest_sha256=hashlib.sha256(source.manifest).hexdigest())
+            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors, Deadline(self.timeout):
+                proc = subprocess.Popen(self.args(req), cwd=self.picker.context, stdin=subprocess.PIPE,
+                                        stdout=output, stderr=errors, start_new_session=True)
+                try:
+                    total = source.stream(proc.stdin, req["nonce"])
+                    proc.stdin.close()
+                    proc.wait()
+                except BrokenPipeError:
+                    proc.wait(timeout=5)
+                    errors.seek(0)
+                    raise FilesError("Upload rejected: " + error_from_stream(errors.read())) from None
+                output.seek(0)
+                errors.seek(0)
+                if proc.returncode:
+                    raise FilesError("Upload not confirmed: " + error_from_stream(errors.read()) + ". Inspect the destination before retrying.")
+                data = receipt(output.read(), req["nonce"])
+                count = sum(e["kind"] == "file" for e in source.entries)
+                if data.get("size") != total or data.get("files") != count or data.get("manifest_sha256") != req["manifest_sha256"]:
+                    raise FilesError("Upload receipt mismatch; inspect the destination before retrying.")
+                print(f"  Uploaded: {safe(data['path'])} ({count} files; {total:,} bytes)")
+                print("       Tell Codex this exact path and ask it to read the completed upload.")
+        finally:
+            stop_transfer(proc)
+            source.close()
+    def download(self, path=""):
+        path = path or ask("  REMOTE file/folder (relative to this menu's directory; blank cancels): ")
+        if not path:
+            return
+        info = self.control("stat", path, base=self.cwd)
+        resolved = info["path"]
+        if info["kind"] == "dir":
+            print("       Folder downloads use the checked ZIP exporter; the archive's top-level directory is output/.")
+            print("       Finish writes first. Hidden regular files are included; symlinks/special files are skipped.")
+            if ask("  Download this directory as a ZIP to the LOCAL launch directory? [y/N]: ").lower() not in ("y", "yes"):
+                return
+            org = self.picker.org[1] if self.picker.org else ""
+            return self.o.download(self.sprite, resolved, str(self.local_dir), org,
+                                   os.path.join(self.picker.context, ".sprite"))
+        if info["kind"] != "file":
+            raise FilesError("Download requires a regular file or ordinary directory, not a symlink/special file.")
+        name = ask(f"  New LOCAL filename [{safe(os.path.basename(resolved))}]: ") or os.path.basename(resolved)
+        remote.component(name)
+        target = self.local_dir / name
+        if os.path.lexists(target):
+            raise FilesError("Local filename already exists; choose a new name. Nothing was overwritten.")
+        print(f"       SPRITE {safe(resolved)} -> LOCAL {safe(target)}")
+        if ask("  Download now? [y/N]: ").lower() not in ("y", "yes"):
+            return
+        self.download_raw(resolved, target)
+    def download_raw(self, path, target, scope=None, expected=None):
+        req = self.request("get", path, scope=scope, expected=expected)
+        proc, partial = None, None
+        try:
+            fd, partial = tempfile.mkstemp(prefix=".sprite-file-", suffix=".partial", dir=self.local_dir)
+            with os.fdopen(fd, "w+b") as output, tempfile.TemporaryFile() as errors, Deadline(self.timeout):
+                proc = subprocess.Popen(self.args(req), cwd=self.picker.context, stdin=subprocess.DEVNULL,
+                                        stdout=output, stderr=errors, start_new_session=True)
+                progress = time.monotonic() + 5
+                while proc.poll() is None:
+                    if time.monotonic() >= progress:
+                        print(f"       Received {os.fstat(output.fileno()).st_size / 1048576:,.1f} MiB...", flush=True)
+                        progress = time.monotonic() + 5
+                    time.sleep(0.1)
+                if proc.returncode:
+                    errors.seek(0)
+                    raise FilesError("File download failed: " + error_from_stream(errors.read()))
+                metadata = verify_raw_download(output, req["nonce"])
+                os.link(partial, target)  # atomic no-clobber final publication
+                os.unlink(partial)
+                partial = None
+                print(f"  Saved: {safe(target)} ({metadata['size']:,} bytes)")
+                print("       SHA-256: " + metadata["sha256"])
+        finally:
+            stop_transfer(proc)
+            if partial:
+                try:
+                    os.unlink(partial)
+                except FileNotFoundError:
+                    pass
+    def menu(self):
+        while True:
+            print(f"\n=== shell / files on {self.sprite}")
+            print("       REMOTE: " + safe(self.cwd))
+            print("       LOCAL uploads/downloads: " + safe(self.local_dir))
+            print("    1) Browse remote directory / preview files")
+            print("    2) Open separate Bash shell here")
+            print("    3) Upload a local file or directory (new destination only)")
+            print("    4) Download a remote file or directory (ZIP for directory)")
+            print("    5) Change remote directory")
+            print("    6) Select another session's workspace")
+            print("    7) Choose another Sprite")
+            print("    0) Quit file access (leave Codex running)")
+            answer = ask("  Select [0-7]: ")
+            try:
+                if answer in ("0", "q", "quit", ""):
+                    return 0
+                if answer == "1":
+                    self.browse()
+                elif answer == "2":
+                    self.shell()
+                elif answer == "3":
+                    self.upload()
+                elif answer == "4":
+                    self.download()
+                elif answer == "5":
+                    path = ask("  Existing remote directory (absolute, ~/..., or relative; blank cancels): ")
+                    if path:
+                        self.set_cwd(path)
+                elif answer == "6":
+                    self.select_workspace()
+                elif answer == "7":
+                    # Keep old target/path coherent until the new selection works.
+                    old_sprite, old_cwd = self.sprite, self.cwd
+                    try:
+                        self.pin(self.picker.choose_sprite())
+                        self.cwd = ""
+                        self.select_workspace()
+                    except BaseException:
+                        self.pin(old_sprite)
+                        self.cwd = old_cwd
+                        raise
+                else:
+                    print("Invalid selection.")
+            except (FilesError, self.a.AttachError, self.o.DownloadError, remote.FileError) as exc:
+                print("  Warning: " + safe(exc), file=sys.stderr)
+            except OSError as exc:
+                print("  Warning: filesystem/transport operation failed (" + type(exc).__name__ + "). Check paths and permissions; no bootstrap fallback.", file=sys.stderr)
+            except (Cancelled, self.a.Cancelled):
+                print("       Selection cancelled; returning to file menu.")
+            except KeyboardInterrupt:
+                print("\n       File operation interrupted. Inspect destination before retrying; Codex was not signalled by this menu.")
+
+# v53: directory-scoped, no-path-entry transfer picker.
+PAGE_SIZE = 15
+
+
+def human_size(size):
+    if size is None:
+        return "folder"
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:,.0f} {unit}" if unit == "B" else f"{value:,.1f} {unit}"
+        value /= 1024
+
+
+def relative_path(root, relative):
+    """Only picker-produced, relative paths; no links or '..' navigation escapes."""
+    if not isinstance(relative, str) or relative.startswith("/"):
+        raise FilesError("Invalid file selection; select it again from the list.")
+    if relative:
+        for part in relative.split("/"):
+            remote.component(part)
+    root = os.path.normpath(str(root))
+    result = os.path.normpath(os.path.join(root, relative))
+    if os.path.commonpath((root, result)) != root:
+        raise FilesError("The selection is outside this picker's folder.")
+    return result
+
+
+def numbered_selection(value, length):
+    """Parse e.g. '1 3,5-7'; never interpret input as Python or shell code."""
+    if not re.fullmatch(r"[0-9, \t-]{1,1024}", value):
+        raise FilesError("Use item numbers, for example 1 3-5.")
+    result = set()
+    for token in re.split(r"[,\s]+", value.strip()):
+        if not token:
+            continue
+        match = re.fullmatch(r"([0-9]{1,6})(?:-([0-9]{1,6}))?", token)
+        if not match:
+            raise FilesError("Invalid number range; use 1 3-5.")
+        first, last = int(match[1]), int(match[2] or match[1])
+        if not 1 <= first <= last <= length:
+            raise FilesError("An item number is outside the displayed page.")
+        result.update(range(first-1, last))
+    if not result:
+        raise FilesError("Select at least one displayed item.")
+    return sorted(result)
+
+
+def alternative_name(name, number):
+    remote.component(name)
+    stem, suffix = os.path.splitext(name)
+    if not stem:
+        stem, suffix = name, ""
+    extra = f" ({number})"
+    # Retain extension where possible without exceeding a filesystem component.
+    while len((stem + extra + suffix).encode("utf-8")) > 255 and stem:
+        stem = stem[:-1]
+    if not stem:
+        raise FilesError("Filename is too long to generate a safe alternative.")
+    return remote.component(stem + extra + suffix)
+
+
+class FilePicker:
+    """Multi-selection with folder navigation, arrows/Space or numbered fallback.
+
+    The loader operates relative to a fixed root. Display text is never used as
+    a path, and selected parent directories supersede their selected children.
+    """
+    def __init__(self, title, root_label, loader, verb, preview=None):
+        self.title, self.root_label = title, str(root_label)
+        self.loader, self.verb, self.preview = loader, verb, preview
+        self.current, self.query, self.message = "", "", ""
+        self.hidden = False
+        self.entries, self.selected = [], {}
+        self.page, self.cursor = 0, 0
+        self.reload()
+
+    def reload(self):
+        rows = self.loader(self.current)
+        if not isinstance(rows, list) or len(rows) > remote.MAX_ENTRIES:
+            raise FilesError("Invalid or oversized file listing.")
+        entries, seen = [], set()
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                raise FilesError("Invalid file entry.")
+            name = row["name"]
+            if name in seen:
+                raise FilesError("Duplicate file entry; refresh the listing.")
+            seen.add(name)
+            valid = True
+            try:
+                remote.component(name)
+            except remote.FileError:
+                valid = False
+            entry = dict(row, rel=(self.current + "/" if self.current else "") + name)
+            entry["selectable"] = valid and row.get("kind") in ("file", "dir")
+            entries.append(entry)
+        self.entries = sorted(entries, key=lambda e: (e.get("kind") != "dir", e["name"].casefold(), e["name"]))
+        self.page, self.cursor = 0, 0
+
+    def visible(self):
+        return [e for e in self.entries if (self.hidden or not e["name"].startswith("."))
+                and self.query.casefold() in e["name"].casefold()]
+
+    def covered(self, entry):
+        rel = entry["rel"]
+        return any(e["kind"] == "dir" and rel.startswith(key + "/") for key, e in self.selected.items())
+
+    def toggle(self, entry):
+        if not entry["selectable"]:
+            self.message = "Links, special files and unsupported names cannot be selected."
+            return
+        key = entry["rel"]
+        if key in self.selected:
+            del self.selected[key]
+        elif self.covered(entry):
+            self.message = "Already included by a selected parent folder."
+        else:
+            if entry["kind"] == "dir":
+                self.selected = {k: e for k, e in self.selected.items() if not k.startswith(key + "/")}
+            self.selected[key] = dict(entry)
+            self.message = f"{len(self.selected)} item(s) selected."
+
+    def select_all(self):
+        for entry in self.visible():
+            if entry["selectable"] and entry["rel"] not in self.selected and not self.covered(entry):
+                self.toggle(entry)
+
+    def enter_folder(self, entry):
+        if entry["kind"] != "dir" or not entry["selectable"]:
+            self.message = "Select an ordinary folder to open."
+            return
+        old = self.current
+        self.current = entry["rel"]
+        try:
+            self.reload()
+            self.query = ""
+        except BaseException:
+            self.current = old
+            raise
+
+    def parent(self):
+        if self.current:
+            self.current = self.current.rpartition("/")[0]
+            self.query = ""
+            self.reload()
+        else:
+            self.message = "Already at this picker's root; navigation outside it is disabled."
+
+    def result(self):
+        return [self.selected[key] for key in sorted(self.selected)]
+
+    def preview_text(self, entry):
+        if entry["kind"] != "file" or not entry["selectable"] or self.preview is None:
+            return "Text preview is available only for regular files."
+        return self.preview(entry)
+
+    def run(self):
+        mode = os.environ.get("SPRITE_FILE_UI", "auto")
+        if mode not in ("auto", "arrows", "menu"):
+            raise FilesError("SPRITE_FILE_UI must be auto, arrows, or menu.")
+        term = os.environ.get("TERM", "")
+        if mode != "menu" and term not in ("", "dumb") and sys.stdin.isatty() and sys.stdout.isatty():
+            try:
+                import curses
+            except ImportError:
+                if mode == "arrows":
+                    print("       Arrow UI is unavailable; using the numbered picker.")
+            else:
+                try:
+                    return curses.wrapper(self.screen, curses)
+                except curses.error:
+                    print("       This terminal cannot display the arrow UI; using the numbered picker.")
+        return self.numbered()
+
+    def numbered(self):
+        while True:
+            rows = self.visible()
+            self.page = min(self.page, max(0, (len(rows)-1)//PAGE_SIZE))
+            page = rows[self.page*PAGE_SIZE:(self.page+1)*PAGE_SIZE]
+            print(f"\n=== {self.title}")
+            print("       Folder: " + safe(os.path.join(self.root_label, self.current)))
+            print(f"       {len(self.selected)} selected | page {self.page+1}/{max(1, (len(rows)+PAGE_SIZE-1)//PAGE_SIZE)} | hidden {'shown' if self.hidden else 'hidden'}")
+            if self.query:
+                print("       Filter: " + safe(self.query))
+            for index, entry in enumerate(page, 1):
+                mark = "x" if entry["rel"] in self.selected else "+" if self.covered(entry) else " " if entry["selectable"] else "-"
+                label = entry["name"] + ("/" if entry["kind"] == "dir" else "")
+                size = human_size(None if entry["kind"] == "dir" else entry.get("size", 0))
+                print(f"    {index:2}) [{mark}] {size:>12}  {safe(label)}" + (" [not selectable]" if not entry["selectable"] else ""))
+            if not page:
+                print("       No visible files here. Refresh after Codex finishes writing, or toggle hidden files.")
+            if self.message:
+                print("       " + safe(self.message))
+                self.message = ""
+            print(f"       Numbers toggle selection (1 3-5). Enter or T = {self.verb} selected.")
+            print("       O number = open folder | V number = preview | U = parent | N/P = pages")
+            print("       A = select all in view | C = clear | F = filter | H = hidden | R = refresh | Q = back")
+            answer = ask("  File picker: ")
+            command = answer.lower()
+            try:
+                if command in ("q", "quit"):
+                    return []
+                if command in ("", "t"):
+                    if self.selected:
+                        return self.result()
+                    self.message = "Select file numbers first, then press Enter. Q returns without a transfer."
+                elif command == "a":
+                    self.select_all()
+                elif command == "c":
+                    self.selected.clear()
+                elif command == "h":
+                    self.hidden = not self.hidden
+                    self.page = 0
+                elif command == "f":
+                    self.query = ask("  Filename filter (blank clears): ")
+                    self.page = 0
+                elif command == "r":
+                    self.reload()
+                elif command == "u":
+                    self.parent()
+                elif command == "n":
+                    self.page = min(self.page+1, max(0, (len(rows)-1)//PAGE_SIZE))
+                elif command == "p":
+                    self.page = max(0, self.page-1)
+                elif re.fullmatch(r"[ov]\s+[0-9]{1,6}", command):
+                    index = int(command.split()[1])-1
+                    if not 0 <= index < len(page):
+                        raise FilesError("Choose an item number on this page.")
+                    if command[0] == "o":
+                        self.enter_folder(page[index])
+                    else:
+                        print("\n" + self.preview_text(page[index]))
+                else:
+                    for index in numbered_selection(answer, len(page)):
+                        self.toggle(page[index])
+            except (FilesError, remote.FileError, OSError) as exc:
+                self.message = safe(exc) if isinstance(exc, (FilesError, remote.FileError)) else "File operation failed; refresh and check permissions."
+
+    def screen(self, screen, curses):
+        screen.keypad(True)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        while True:
+            height, width = screen.getmaxyx()
+            if height < 12 or width < 48:
+                raise curses.error("terminal too small")
+            rows = self.visible()
+            self.cursor = max(0, min(self.cursor, max(0, len(rows)-1)))
+            capacity = height - 9
+            start = (self.cursor//capacity)*capacity
+            screen.erase()
+            def put(y, text, attr=0):
+                if 0 <= y < height-1:
+                    screen.addnstr(y, 0, safe(text), max(1, width-1), attr)
+            put(0, self.title, curses.A_BOLD)
+            put(1, "Folder: " + os.path.join(self.root_label, self.current))
+            put(2, f"{len(self.selected)} selected | {len(rows)} visible | hidden {'shown' if self.hidden else 'hidden'} | filter: {self.query}")
+            for offset, entry in enumerate(rows[start:start+capacity]):
+                mark = "x" if entry["rel"] in self.selected else "+" if self.covered(entry) else " " if entry["selectable"] else "-"
+                label = entry["name"] + ("/" if entry["kind"] == "dir" else "")
+                size = human_size(None if entry["kind"] == "dir" else entry.get("size", 0))
+                put(4+offset, f"[{mark}] {size:>12}  {label}", curses.A_REVERSE if start+offset == self.cursor else 0)
+            if not rows:
+                put(4, "No visible files. R refreshes; H toggles hidden files.")
+            put(height-5, self.message)
+            put(height-4, f"Up/Down move  Space select  Enter {self.verb}  Right open  Left back")
+            put(height-3, "A all  C clear  / filter  H hidden  R refresh  V preview  Q cancel")
+            screen.refresh()
+            key = screen.get_wch()
+            self.message = ""
+            try:
+                if key in ("q", "Q", "\x1b"):
+                    return []
+                if key == "\x03":
+                    raise KeyboardInterrupt()
+                if key in (curses.KEY_UP, "k"):
+                    self.cursor = max(0, self.cursor-1)
+                elif key in (curses.KEY_DOWN, "j"):
+                    self.cursor = min(max(0, len(rows)-1), self.cursor+1)
+                elif key == curses.KEY_NPAGE:
+                    self.cursor = min(max(0, len(rows)-1), self.cursor+capacity)
+                elif key == curses.KEY_PPAGE:
+                    self.cursor = max(0, self.cursor-capacity)
+                elif key == " " and rows:
+                    self.toggle(rows[self.cursor])
+                elif key in ("\n", "\r", curses.KEY_ENTER):
+                    if self.selected:
+                        return self.result()
+                    if rows:
+                        if rows[self.cursor]["kind"] == "dir":
+                            self.enter_folder(rows[self.cursor])
+                        else:
+                            self.toggle(rows[self.cursor])
+                            if self.selected:
+                                return self.result()
+                elif key == curses.KEY_RIGHT and rows:
+                    self.enter_folder(rows[self.cursor])
+                elif key in (curses.KEY_LEFT, curses.KEY_BACKSPACE, "\x7f", "u", "U"):
+                    self.parent()
+                elif key in ("a", "A"):
+                    self.select_all()
+                elif key in ("c", "C"):
+                    self.selected.clear()
+                elif key in ("h", "H"):
+                    self.hidden = not self.hidden
+                    self.cursor = 0
+                elif key in ("r", "R"):
+                    self.reload()
+                elif key in ("f", "F", "/"):
+                    # Small in-screen line editor: no shell command parsing.
+                    value = ""
+                    while True:
+                        screen.move(height-5, 0)
+                        screen.clrtoeol()
+                        put(height-5, "Filter (Enter applies, Esc cancels): " + value)
+                        screen.refresh()
+                        char = screen.get_wch()
+                        if char in ("\n", "\r", curses.KEY_ENTER):
+                            self.query, self.cursor = value, 0
+                            break
+                        if char == "\x1b":
+                            break
+                        if char in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                            value = value[:-1]
+                        elif isinstance(char, str) and char.isprintable() and len(value) < 128:
+                            value += char
+                elif key in ("v", "V") and rows:
+                    lines = self.preview_text(rows[self.cursor]).splitlines()
+                    offset = 0
+                    while True:
+                        screen.erase()
+                        put(0, "Text preview — Up/Down scroll, Q/Enter return", curses.A_BOLD)
+                        for index, line in enumerate(lines[offset:offset+height-3]):
+                            put(index+2, line)
+                        screen.refresh()
+                        char = screen.get_wch()
+                        if char in ("q", "Q", "\x1b", "\n", "\r"):
+                            break
+                        if char in (curses.KEY_DOWN, curses.KEY_NPAGE):
+                            offset = min(max(0, len(lines)-1), offset+(height-3 if char == curses.KEY_NPAGE else 1))
+                        elif char in (curses.KEY_UP, curses.KEY_PPAGE):
+                            offset = max(0, offset-(height-3 if char == curses.KEY_PPAGE else 1))
+            except (FilesError, remote.FileError, OSError) as exc:
+                self.message = safe(exc) if isinstance(exc, (FilesError, remote.FileError)) else "Cannot read this entry; refresh and check permissions."
+
+
+class SimpleBrowser(Browser):
+    """Only input/output transfers are exposed; the optional shell stays separate."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        mode = os.environ.get("SPRITE_FILE_UI", "auto")
+        if mode not in ("auto", "arrows", "menu"):
+            raise FilesError("SPRITE_FILE_UI must be auto, arrows, or menu.")
+        st = self.local_dir.stat()
+        self.local_identity = [st.st_dev, st.st_ino]
+        self.workspace_identity = None
+
+    def set_cwd(self, path):
+        result = super().set_cwd(path)
+        info = self.control("stat", result)
+        self.workspace_identity = info["identity"]
+        return result
+
+    def scope(self, folder, root_info=None):
+        if folder not in ("input", "output") or not self.workspace_identity:
+            raise FilesError("Select the Codex workspace first.")
+        value = dict(workspace=self.cwd, identity=self.workspace_identity, folder=folder)
+        if root_info:
+            value["root_identity"] = root_info["identity"]
+        return value
+
+    def folder_info(self, folder, create=False):
+        if create:
+            return self.control("ensure-input", self.cwd, identity=self.workspace_identity)
+        path = os.path.join(self.cwd, folder)
+        info = self.control("stat", path, scope=self.scope(folder))
+        if info["kind"] != "dir":
+            raise FilesError(f"{folder}/ must be an ordinary directory, not a symlink or file.")
+        return info
+
+    def remote_listing(self, root, relative, scope):
+        path = relative_path(root, relative)
+        rows, offset = [], 0
+        while True:
+            data = self.control("list", path, offset=offset, scope=scope)
+            rows.extend(data["entries"])
+            if len(rows) > remote.MAX_ENTRIES:
+                raise FilesError("Too many entries; organize the folder into subfolders.")
+            offset += 100
+            if offset >= data["total"]:
+                return rows
+
+    def local_listing(self, relative):
+        current = self.local_dir.stat()
+        if [current.st_dev, current.st_ino] != self.local_identity:
+            raise FilesError("The local launch directory changed; restart file mode.")
+        fd = remote.open_dir(relative_path(self.local_dir, relative))
+        try:
+            rows = []
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    try:
+                        st = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    kind = "dir" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "link" if stat.S_ISLNK(st.st_mode) else "special"
+                    rows.append(dict(name=entry.name, kind=kind, size=st.st_size, signature=list(remote.signature(st))))
+                    if len(rows) > remote.MAX_ENTRIES:
+                        raise FilesError("Too many local entries; choose a smaller launch directory.")
+            return rows
+        finally:
+            os.close(fd)
+
+    def preview_remote(self, root, scope, entry):
+        result = self.control("preview", relative_path(root, entry["rel"]), scope=scope, expected=entry.get("signature"))
+        data = base64.b64decode(result["data"], validate=True)
+        if b"\0" in data:
+            return "Binary-looking file; download it to open locally."
+        text = "\n".join(safe(line) for line in data.decode("utf-8", "replace").splitlines())
+        return text + ("\n[preview limited to 16 KiB]" if result["truncated"] else "")
+
+    def preview_local(self, entry):
+        path = relative_path(self.local_dir, entry["rel"])
+        parent = remote.open_dir(os.path.dirname(path))
+        try:
+            fd = os.open(os.path.basename(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, "rb") as source:
+                st = os.fstat(source.fileno())
+                if not stat.S_ISREG(st.st_mode) or list(remote.signature(st)) != entry["signature"]:
+                    raise FilesError("File changed since listing; refresh before previewing.")
+                data = source.read(16384)
+        finally:
+            os.close(parent)
+        if b"\0" in data:
+            return "Binary-looking file; it can still be uploaded."
+        return "\n".join(safe(line) for line in data.decode("utf-8", "replace").splitlines()) + ("\n[preview limited to 16 KiB]" if st.st_size > len(data) else "")
+
+    def choose_outputs(self):
+        info = self.folder_info("output")
+        root, scope = info["path"], self.scope("output", info)
+        picker = FilePicker("Download from Codex output/", root,
+                            lambda rel: self.remote_listing(root, rel, scope), "download",
+                            lambda entry: self.preview_remote(root, scope, entry))
+        chosen = picker.run()
+        if chosen:
+            self.download_selected(chosen, root, scope)
+
+    def browse(self):
+        return self.choose_outputs()
+
+    def download(self, path=""):
+        if path:
+            raise FilesError("Use the output/ picker; arbitrary download paths are not accepted in simplified file mode.")
+        return self.choose_outputs()
+
+    def download_all(self):
+        info = self.folder_info("output")
+        self.download_selected([dict(rel="", name="output", kind="dir", signature=info["signature"])],
+                               info["path"], self.scope("output", info))
+
+    def next_local_name(self, name, reserved):
+        remote.component(name)
+        candidate, number = name, 2
+        while candidate in reserved or os.path.lexists(self.local_dir / candidate):
+            candidate = alternative_name(name, number)
+            number += 1
+            if number > 10000:
+                raise FilesError("Too many filename conflicts; move old local copies aside.")
+        reserved.add(candidate)
+        return candidate
+
+    def download_selected(self, chosen, root, scope):
+        plans, reserved = [], set()
+        for entry in chosen:
+            path = relative_path(root, entry["rel"])
+            info = self.control("stat", path, scope=scope, expected=entry.get("signature"))
+            if info["kind"] != entry["kind"]:
+                raise FilesError("A selected item changed; reopen the picker.")
+            name = self.next_local_name(entry["name"], reserved) if entry["kind"] == "file" else "unique output ZIP"
+            plans.append((entry, path, name))
+        print(f"\n=== Download {len(plans)} selected item(s)")
+        print("       LOCAL destination: " + safe(self.local_dir))
+        for entry, path, name in plans:
+            print("       output/" + safe(entry["rel"] or ".") + " -> " + safe(name))
+        print("       Files keep their format; each selected folder becomes a ZIP. Existing local names get a new suffix.")
+        print("       Finish Codex writes first. Folder ZIPs include hidden regular files, but do not follow links.")
+        if ask("  Download selected items now? [y/N]: ").lower() not in ("y", "yes"):
+            return
+        completed = 0
+        try:
+            for entry, path, name in plans:
+                if entry["kind"] == "dir":
+                    org = self.picker.org[1] if self.picker.org else ""
+                    self.o.download(self.sprite, path, str(self.local_dir), org,
+                                    os.path.join(self.picker.context, ".sprite"),
+                                    checks=dict(scope=scope, expected=entry.get("signature")))
+                else:
+                    self.download_raw(path, self.local_dir / name, scope=scope, expected=entry.get("signature"))
+                completed += 1
+        finally:
+            print(f"       Download batch: {completed}/{len(plans)} item(s) completed. Originals remain on the Sprite.")
+
+    def upload(self):
+        picker = FilePicker("Upload local files to Codex input/", self.local_dir, self.local_listing,
+                            "upload", self.preview_local)
+        chosen = picker.run()
+        if not chosen:
+            return
+        # Resolve only folder existence now; create input/ AFTER confirmation.
+        state = self.control("input-status", self.cwd, identity=self.workspace_identity)
+        names = set(state["names"])
+        plans = []
+        for entry in chosen:
+            name, number = entry["name"], 2
+            while name in names:
+                name = alternative_name(entry["name"], number)
+                number += 1
+                if number > 10000:
+                    raise FilesError("Too many remote filename conflicts.")
+            names.add(name)
+            plans.append((entry, name))
+        print(f"\n=== Upload {len(plans)} selected item(s)")
+        print("       SPRITE destination: " + safe(os.path.join(self.cwd, "input")))
+        for entry, name in plans:
+            print("       " + safe(entry["rel"]) + " -> input/" + safe(name))
+        print("       Each selection keeps its basename; folders keep their contents. Conflicts get a new suffix, never an overwrite.")
+        print("       Selecting a folder includes its hidden regular files. Do not include credentials; links/special files are rejected.")
+        if ask("  Upload selected items now? [y/N]: ").lower() not in ("y", "yes"):
+            return
+        info = self.folder_info("input", create=True)
+        scope, completed = self.scope("input", info), 0
+        try:
+            for entry, name in plans:
+                path = relative_path(self.local_dir, entry["rel"])
+                current = self.local_dir.stat()
+                if [current.st_dev, current.st_ino] != self.local_identity:
+                    raise FilesError("The local launch directory changed; reopen file mode.")
+                source = UploadSource(path, expected=entry.get("signature"), boundary=str(self.local_dir))
+                try:
+                    self.send_source(source, name, info, scope)
+                    completed += 1
+                finally:
+                    source.close()
+        finally:
+            print(f"       Upload batch: {completed}/{len(plans)} item(s) completed. Finished uploads were not rolled back.")
+        print("       Tell Codex: Read the files in ./input/ and save finished deliverables in ./output/.")
+
+    def send_source(self, source, name, info, scope):
+        req = self.request("upload", info["path"], name=name, identity=info["identity"], scope=scope,
+                           manifest_sha256=hashlib.sha256(source.manifest).hexdigest())
+        proc = None
+        try:
+            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors, Deadline(self.timeout):
+                proc = subprocess.Popen(self.args(req), cwd=self.picker.context, stdin=subprocess.PIPE,
+                                        stdout=output, stderr=errors, start_new_session=True)
+                try:
+                    total = source.stream(proc.stdin, req["nonce"])
+                    proc.stdin.close()
+                    proc.wait()
+                except BrokenPipeError:
+                    proc.wait(timeout=5)
+                    errors.seek(0)
+                    raise FilesError("Upload rejected: " + error_from_stream(errors.read())) from None
+                output.seek(0)
+                errors.seek(0)
+                if proc.returncode:
+                    raise FilesError("Upload not confirmed: " + error_from_stream(errors.read()) + ". Inspect input/ before retrying.")
+                data = receipt(output.read(), req["nonce"])
+                count = sum(e["kind"] == "file" for e in source.entries)
+                if (data.get("path") != os.path.join(info["path"], name) or data.get("size") != total
+                    or data.get("files") != count or data.get("manifest_sha256") != req["manifest_sha256"]):
+                    raise FilesError("Upload receipt mismatch; inspect input/ before retrying.")
+                print(f"  Uploaded: input/{safe(name)} ({count} files; {total:,} bytes)")
+        finally:
+            stop_transfer(proc)
+
+    def view_inputs(self):
+        info = self.folder_info("input")
+        scope = self.scope("input", info)
+        # Reuse selection UI solely for browsing/preview; no transfer follows.
+        picker = FilePicker("Browse Codex input/ (read-only; Q returns)", info["path"],
+                            lambda rel: self.remote_listing(info["path"], rel, scope), "return",
+                            lambda entry: self.preview_remote(info["path"], scope, entry))
+        picker.run()
+
+    def menu(self):
+        while True:
+            print(f"\n=== Codex files on {self.sprite}")
+            print("       Workspace: " + safe(self.cwd))
+            print("       Download from: " + safe(os.path.join(self.cwd, "output")))
+            print("       Upload to:     " + safe(os.path.join(self.cwd, "input")))
+            print("       Local folder:  " + safe(self.local_dir))
+            print("    1) Choose output files/folders to download")
+            print("    2) Choose local files/folders to upload into input/")
+            print("    3) Download all output/ as one ZIP")
+            print("    4) Browse uploaded input/ files")
+            print("    5) Select another session's workspace")
+            print("    6) Choose another Sprite")
+            print("    7) Open a separate shell (advanced; not needed for transfers)")
+            print("    0) Quit file access (leave Codex running)")
+            answer = ask("  File actions [0-7]: ")
+            try:
+                if answer in ("0", "q", "quit", ""):
+                    return 0
+                if answer == "1":
+                    self.choose_outputs()
+                elif answer == "2":
+                    self.upload()
+                elif answer == "3":
+                    self.download_all()
+                elif answer == "4":
+                    self.view_inputs()
+                elif answer == "5":
+                    self.select_workspace()
+                elif answer == "6":
+                    old_sprite, old_cwd, old_identity = self.sprite, self.cwd, self.workspace_identity
+                    try:
+                        self.pin(self.picker.choose_sprite())
+                        self.cwd, self.workspace_identity = "", None
+                        self.select_workspace()
+                    except BaseException:
+                        self.pin(old_sprite)
+                        self.cwd, self.workspace_identity = old_cwd, old_identity
+                        raise
+                elif answer == "7":
+                    print("       Advanced shell is unrestricted by the input/output picker; exit returns here.")
+                    self.shell()
+                else:
+                    print("Invalid selection.")
+            except (FilesError, self.a.AttachError, self.o.DownloadError, remote.FileError) as exc:
+                print("  Warning: " + safe(exc), file=sys.stderr)
+                if "missing" in str(exc):
+                    print("       Ask Codex to create ./output/ and save completed files there. input/ is created on the first confirmed upload.")
+            except OSError as exc:
+                print("  Warning: file/transport operation failed (" + type(exc).__name__ + "); check permissions or refresh. No setup fallback.", file=sys.stderr)
+            except (Cancelled, self.a.Cancelled):
+                print("       Selection cancelled; returning to file actions.")
+            except KeyboardInterrupt:
+                print("\n       File operation interrupted. Inspect completed transfers before retrying; Codex was not signalled.")
+
+
+def main():
+    if sys.version_info < (3, 9):
+        raise FilesError("Shell/file mode requires Python 3.9 or newer locally and on the Sprite.")
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise FilesError("Shell/file mode needs an interactive local terminal; no remote operation was started.")
+    source_dir, local_dir, requested_id, workdir = sys.argv[1:5]
+    picker_module = runpy.run_path(os.path.join(source_dir, "picker.py"))
+    output_module = runpy.run_path(os.path.join(source_dir, "output.py"))
+    if requested_id and not os.environ.get("SPRITE_NAME"):
+        raise FilesError("--session-id requires SPRITE_NAME to avoid selecting the wrong Sprite.")
+    print("\n=== Codex input/output file picker")
+    print("       No Codex launch/attach, provider keys, token validation, updates, Mobbin, Git sync or pushes.")
+    print("       This mode uses the same filesystem, NOT the running agent's process environment.")
+    print("       Avoid concurrent edits to the same file; tell Codex when new inputs are ready.")
+    with tempfile.TemporaryDirectory(prefix="sprite-codex-files-context-") as context:
+        browser = SimpleBrowser(picker_module, output_module, context, local_dir)
+        try:
+            browser.pin(browser.picker.choose_sprite(os.environ.get("SPRITE_NAME", "")))
+            browser.select_workspace(requested_id, workdir)
+            return browser.menu()
+        except browser.a.Cancelled:
+            return 0
+        except browser.a.AttachError as exc:
+            raise FilesError(str(exc)) from None
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Cancelled:
+        print("\n       File access cancelled; existing Codex was not changed.")
+        raise SystemExit(0)
+    except KeyboardInterrupt:
+        print("\n       File access interrupted; no Codex kill/restart was requested.")
+        raise SystemExit(130)
+    except (FilesError, remote.FileError) as exc:
+        print("error: " + safe(exc), file=sys.stderr)
+        raise SystemExit(1)
+    except OSError as exc:
+        print("error: local/remote file-access operation failed (" + type(exc).__name__ + "); no setup fallback.", file=sys.stderr)
+        raise SystemExit(1)
+FILES_ACCESS_PY
+}
+
+run_file_access() (
+  command -v python3 >/dev/null 2>&1 || { echo "error: local python3 is required" >&2; exit 127; }
+  local_sources=$(mktemp -d)
+  trap 'rm -rf -- "$local_sources"' EXIT
+  attach_only_python >"$local_sources/picker.py"
+  output_download_python >"$local_sources/output.py"
+  python3 -c "$(file_access_python)" "$local_sources" "$OUTPUT_HOST_DIR" "$ATTACH_SESSION_ID" "$FILE_WORKDIR"
+)
+
+if (( _FILE_WORKDIR_SELECTED == 1 )) && [[ $RUN_MODE != files ]]; then
+  echo "error: --workdir requires --files or --shell (or opening menu choice 5)" >&2; exit 2
+fi
+if [[ $RUN_MODE == files ]]; then
+  if (( _OUTPUT_DIR_SELECTED == 1 )); then
+    echo "error: --files always uses the selected workspace/output; --output-dir belongs to --download-output or agent modes" >&2; exit 2
+  fi
+  if [[ -n $ATTACH_SESSION_ID && $_FILE_WORKDIR_SELECTED == 1 ]]; then
+    echo "error: select --session-id OR --workdir, not both" >&2; exit 2
+  fi
+  # An exact session overrides an inherited bootstrap workspace hint.
+  [[ -z $ATTACH_SESSION_ID ]] || FILE_WORKDIR=""
+  if run_file_access; then exit 0; else exit $?; fi
+fi
+
+if [[ $RUN_MODE == attach || $RUN_MODE == download ]]; then
+  # Keep only the selected Sprite name in a transient, non-secret local receipt.
+  # The picker may choose another Sprite; never assume the original env name won.
+  _selection_receipt=$(mktemp)
+  trap 'rm -f -- "${_selection_receipt:-}" "${_selection_receipt:-}.context"' EXIT
+  if run_attach_only "$_selection_receipt"; then _attach_rc=0; else _attach_rc=$?; fi
+  _output_sprite=""
+  if [[ -s $_selection_receipt ]]; then
+    _output_sprite=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sprite"])' "$_selection_receipt") || _output_sprite=""
+  fi
+  rm -f -- "$_selection_receipt"
+  [[ ! -f $_selection_receipt.context ]] || OUTPUT_PINNED_CONTEXT="$_selection_receipt.context"
+  if [[ -n $_output_sprite ]]; then
+    if [[ $RUN_MODE == download ]]; then
+      if run_output_download "$_output_sprite" always; then exit 0; else exit $?; fi
+    else
+      maybe_download_output "$_output_sprite" "$_attach_rc"
+    fi
+  fi
+  exit "$_attach_rc"
+fi
+
 case "$MODEL_TEST_MODE" in ask|always|never) ;; *) echo "error: MODEL_TEST_MODE must be ask, always or never" >&2; exit 2 ;; esac
 
 MOBBIN_MCP_MODE="${MOBBIN_MCP_MODE:-ask}"
@@ -4504,6 +7500,7 @@ choose_live_native_session() {
   else
     rc=$?
   fi
+  maybe_download_output "$SPRITE_NAME" "$rc"
   return "$rc"
 }
 
@@ -4513,7 +7510,14 @@ legacy_tmux_probe() {
   control_exec_limited 15 -- bash -lc 's=$1; command -v tmux >/dev/null 2>&1 || exit 3; tmux has-session -t "$s" 2>/dev/null || exit 1; panes=$(tmux list-panes -t "$s" -F "#{pane_dead}|#{pane_start_command}|#{pane_current_command}" 2>/dev/null || true); meta=$(tmux show-environment -t "$s" SPRITE_CODEX_TASK 2>/dev/null || true); printf "%s\n%s\n" "$panes" "$meta" | grep -q "sprite-codex" && exit 0; exit 4' _ "$session" >/dev/null 2>&1
 }
 legacy_tmux_kill() { local session=$1; control_exec_limited 20 -- tmux kill-session -t "$session" >/dev/null 2>&1; }
-legacy_tmux_attach() { local session=$1; warn "attaching to a legacy tmux-managed Codex session from v31 or earlier"; note "this one legacy attachment still has tmux input/copy-mode behavior"; note "finish or stop that legacy Codex run, then rerun v34 for native Sprite TTY sessions"; sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward -- tmux attach-session -d -t "$session"; }
+legacy_tmux_attach() {
+  local session=$1 rc=0
+  warn "attaching to a legacy tmux-managed Codex session from v31 or earlier"
+  note "this one legacy attachment still has tmux input/copy-mode behavior"
+  if sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward -- tmux attach-session -d -t "$session"; then rc=0; else rc=$?; fi
+  maybe_download_output "$SPRITE_NAME" "$rc"
+  return "$rc"
+}
 legacy_tmux_guard() {
   local session=$1 rc ans
   [[ -n $session ]] || return 1
@@ -5300,6 +8304,19 @@ step "choose Sprite"
 pick_sprite
 note "selected Sprite: $SPRITE_NAME"
 note "one-Sprite mode: every setup, heartbeat, native TTY, and agent command targets only $SPRITE_NAME"
+# Snapshot local project selection metadata for a later output download. Explicit
+# SPRITE_ORG still takes precedence, and the selected Sprite is always passed -s.
+_output_context_parent="$OUTPUT_HOST_DIR"
+while :; do
+  if [[ -f $_output_context_parent/.sprite ]]; then
+    OUTPUT_PINNED_CONTEXT=$(mktemp)
+    cleanup_files+=("$OUTPUT_PINNED_CONTEXT")
+    cat "$_output_context_parent/.sprite" >"$OUTPUT_PINNED_CONTEXT"
+    break
+  fi
+  [[ $_output_context_parent != / ]] || break
+  _output_context_parent=$(dirname "$_output_context_parent")
+done
 project_short=$(python3 - "$HOST_DIR" <<'PY'
 import hashlib,os,sys
 print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest()[:8])
@@ -5834,6 +8851,8 @@ note "the native TTY session itself is also Sprite activity while it remains liv
 note "detach cleanly with Ctrl+\\; there is no tmux prefix, mouse mode, or copy mode"
 note "on a non-zero transport failure, the script reattaches to the same native session ID"
 
+note "generated deliverables: ask Codex to create and write to $SPRITE_OUTPUT_DIR on the Sprite"
+note "after the terminal returns, output ZIP downloads go to: $OUTPUT_HOST_DIR"
 if start_native_agent_session "$REMOTE_ENTRY" "$REMOTE_RUNNER"; then
   launch_rc=0
 else
@@ -5854,4 +8873,5 @@ else
     note "resume state is retained as a history hint; rerun and choose Kimi Code continue if it exited"
   fi
 fi
+maybe_download_output "$SPRITE_NAME" "$launch_rc"
 exit "$launch_rc"
