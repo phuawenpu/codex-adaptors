@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# sprite-codex-v53.sh — updated 2026-09-26
+# v54: session discovery must not equate is_active=false with process exit.
+# Offer listed TTY sessions with false/missing activity metadata; exclude explicit
+# ended statuses and invalid/non-TTY rows. Attachment still rechecks identity.
+# Both early attach/file mode and normal-run duplicate/reconnect checks are fixed.
+# Inventory counts distinguish a truly empty response from filtered records.
+# Activity metadata is NOT a terminal-health check; the attach endpoint may still
+# reject a stale session. No restart, kill, key recovery or new launch is automatic.
+# API/SDK reference: https://sprites.dev/api/sprites/exec
+# https://github.com/superfly/sprites-go/blob/main/session.go
+# sprite-codex-v54.sh — updated 2026-09-26
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -121,17 +130,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v53.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v53.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v53.sh --attach-only --session-id 1847
-#   bash sprite-codex-v53.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v53.sh --download-output
-#   bash sprite-codex-v53.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v53.sh --show-models          # no API calls
-#   bash sprite-codex-v53.sh --test-models          # host API tests only
-#   bash sprite-codex-v53.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v53.sh --test-models-before-run
-#   bash sprite-codex-v53.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v54.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v54.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v54.sh --attach-only --session-id 1847
+#   bash sprite-codex-v54.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v54.sh --download-output
+#   bash sprite-codex-v54.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v54.sh --show-models          # no API calls
+#   bash sprite-codex-v54.sh --test-models          # host API tests only
+#   bash sprite-codex-v54.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v54.sh --test-models-before-run
+#   bash sprite-codex-v54.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -210,7 +219,7 @@ umask 077
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v53.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v54.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
   (no option)               Attach / Setup / Quit / Download / Shell-files menu.
   --attach-only             Select a Sprite and attach to an existing live TTY.
@@ -1155,15 +1164,19 @@ def parse_sessions(root: object):
         tty_keys = ("tty", "is_tty", "isTty")
         active_key = next((k for k in active_keys if k in record), None)
         tty_key = next((k for k in tty_keys if k in record), None)
-        # /exec lists active sessions. An absent active flag uses that contract;
-        # an explicit but malformed flag must NOT be interpreted as true.
-        active = flag(record[active_key]) if active_key else True
+        # Activity is display metadata, not a process-exit signal. The exec API
+        # can return sessions whose is_active flag is false; the official SDK
+        # does not remove them. Let the attach endpoint decide if a listed TTY
+        # is attachable, after our existing identity/existence recheck.
+        active = flag(record[active_key]) if active_key else None
         tty = flag(record[tty_key]) if tty_key else None
-        status = str(record.get("status", record.get("state", ""))).lower()
-        if active is False or status in ("exited", "ended", "stopped", "dead", "completed", "failed", "terminated", "killed", "closed"):
+        status = str(record.get("status", record.get("state", ""))).strip().lower()
+        if status in ("exited", "ended", "stopped", "dead", "completed", "failed", "terminated", "killed", "closed"):
+            # Retain the internal counter name for callers; it now counts only
+            # explicit terminal-ended statuses, never an activity flag alone.
             excluded["inactive"] += 1
             continue
-        if active is None or tty is None:
+        if tty is None:
             excluded["unknown"] += 1
             continue
         if not tty:
@@ -1173,7 +1186,7 @@ def parse_sessions(root: object):
         created, epoch, display = created_info(record)
         identity = hashlib.sha256(json.dumps([sid, command, created], sort_keys=True).encode()).hexdigest()
         rows.append({"id": sid, "label": label, "workdir": workdir, "created": display,
-                     "epoch": epoch, "identity": identity})
+                     "epoch": epoch, "identity": identity, "activity": active})
     rows.sort(key=lambda r: (r["epoch"], r["id"]), reverse=True)
     return rows, excluded
 
@@ -1283,7 +1296,7 @@ class Picker:
 
     def choose_session(self, sprite: str, requested: str = ""):
         while True:
-            print(f"\n=== live native terminal sessions on {sprite}", flush=True)
+            print(f"\n=== listed native terminal sessions on {sprite}", flush=True)
             try:
                 rows, excluded = self.sessions(sprite)
             except AttachError as exc:
@@ -1301,18 +1314,32 @@ class Picker:
                 if row is None:
                     raise AttachError("Requested session is not confirmed as a live native terminal on this Sprite. No process was launched.", 3)
                 return row
+            total = len(rows) + sum(excluded.values())
+            print(f"       Exec inventory: {total} record(s); {len(rows)} terminal candidate(s).")
             for index, row in enumerate(rows, 1):
                 print(f"    {index}) ID={row['id']}  {row['label']}")
                 print(f"       Created: {row['created']}\n       Workspace: {row['workdir']}")
+                activity = row.get("activity")
+                if activity is False:
+                    print("       API activity: false (not proof of exit; attachment is still offered).")
+                elif activity is True:
+                    print("       API activity: true (not a terminal responsiveness check).")
+                else:
+                    print("       API activity: not reported or unrecognized (not used as an exit signal).")
+            if excluded["inactive"]:
+                print(f"       Not offered: {excluded['inactive']} session(s) explicitly reported as ended.")
             if excluded["non_tty"]:
-                print(f"       Not offered: {excluded['non_tty']} active non-terminal command(s).")
+                print(f"       Not offered: {excluded['non_tty']} non-terminal command(s).")
             if excluded["unknown"]:
-                print(f"       Not offered: {excluded['unknown']} session(s) with unconfirmed active/TTY metadata.")
+                print(f"       Not offered: {excluded['unknown']} session(s) with unconfirmed TTY metadata.")
             if rows:
                 print("       Newest first. Labels describe recorded commands, not conversation titles.")
                 answer = ask("  Attach number [1]; R = refresh, S = another Sprite, Q = quit: ")
             else:
                 print("       No attachable native terminal was returned. Nothing will be launched.")
+                if total == 0:
+                    print("       The exec API returned an empty collection, not a filtered-out terminal.")
+                print("       A Sprite reported as running does not itself prove a Codex terminal exists.")
                 print("       Saved Codex conversations and legacy tmux-only sessions are not this inventory.")
                 answer = ask("  R = refresh, S = another Sprite, Q = quit [Q]: ")
             if answer.lower() == "q" or (not rows and not answer):
@@ -1327,6 +1354,7 @@ class Picker:
             print("  Invalid selection; no session was attached.")
 
     def live_same_session(self, sprite: str, row: dict) -> bool:
+        """Check listed identity, not output activity or keyboard responsiveness."""
         rows, _ = self.sessions(sprite)
         current = next((r for r in rows if r["id"] == row["id"]), None)
         if current and current["identity"] != row["identity"]:
@@ -1471,7 +1499,7 @@ run_attach_only() {
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v53.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v54.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
 import base64
@@ -7193,8 +7221,11 @@ rows=[]
 for i,r in enumerate(items):
     if not isinstance(r,dict): continue
     sid=str(r.get("id",r.get("session_id",""))); cmd=" ".join(str(r.get("command","")).split()); wd=str(r.get("workdir",r.get("dir","")))
-    active=r.get("is_active",r.get("isActive",r.get("active",True))); tty=r.get("tty",r.get("is_tty",r.get("isTty",False)))
-    if not sid or active is False or not tty or tag not in cmd: continue
+    tty=r.get("tty",r.get("is_tty",r.get("isTty",False)))
+    tty_ok=isinstance(tty,(str,int,bool)) and str(tty).lower() in ("true","1")
+    ended=str(r.get("status",r.get("state",""))).strip().lower() in ("exited","ended","stopped","dead","completed","failed","terminated","killed","closed")
+    # is_active is activity metadata, not an exit status.
+    if not sid or ended or not tty_ok or tag not in cmd: continue
     created=""
     for k in ("created_at","createdAt","created","started_at","startedAt","started"):
         if r.get(k) not in (None,""): created=str(r.get(k)); break
@@ -7248,9 +7279,12 @@ for index, record in enumerate(items):
     session_id = str(record.get("id", record.get("session_id", "")))
     command = " ".join(str(record.get("command", "")).split())
     workdir = str(record.get("workdir", record.get("dir", "")))
-    active = record.get("is_active", record.get("isActive", record.get("active", True)))
     tty = record.get("tty", record.get("is_tty", record.get("isTty", False)))
-    if not session_id or active is False or not tty or "sprite-codex-native-" not in command:
+    tty_ok = isinstance(tty, (str, int, bool)) and str(tty).lower() in ("true", "1")
+    ended = str(record.get("status", record.get("state", ""))).strip().lower() in (
+        "exited", "ended", "stopped", "dead", "completed", "failed", "terminated", "killed", "closed")
+    # Keep quiet/detached candidates in live-update and duplicate protections.
+    if not session_id or ended or not tty_ok or "sprite-codex-native-" not in command:
         continue
     created = ""
     for key in ("created_at", "createdAt", "created", "started_at", "startedAt", "started"):
@@ -7373,6 +7407,8 @@ offer_codex_update_before_run() {
   fi
 }
 
+# Compatibility name: verifies a listed session has no explicit ended status;
+# is_active/last_activity are deliberately NOT used as process-liveness signals.
 session_id_is_active() {
   local sid=$1 raw; [[ -n $sid ]] || return 1; raw=$(get_sessions_json)
   python3 -c 'import json,sys
@@ -7381,8 +7417,10 @@ try: root=json.load(sys.stdin)
 except Exception: raise SystemExit(1)
 items=(root.get("sessions") or root.get("data") or root.get("items") or []) if isinstance(root,dict) else root
 for r in items if isinstance(items,list) else []:
- rid=str(r.get("id",r.get("session_id",""))); active=r.get("is_active",r.get("isActive",r.get("active",True)))
- if rid==sid and active is not False: raise SystemExit(0)
+ if not isinstance(r,dict): continue
+ rid=str(r.get("id",r.get("session_id","")))
+ ended=str(r.get("status",r.get("state",""))).strip().lower() in ("exited","ended","stopped","dead","completed","failed","terminated","killed","closed")
+ if rid==sid and not ended: raise SystemExit(0)
 raise SystemExit(1)' "$sid" <<<"$raw"
 }
 
