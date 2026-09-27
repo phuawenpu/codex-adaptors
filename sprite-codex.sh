@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# v58: Fly validation diagnostics and target correction. The status check remains
+# mandatory; a nonzero exit is NOT treated as proof of an invalid token.
+# --check-fly selects a Sprite/app and runs only that check, without GitHub/model
+# credentials, setup, synchronization, or Codex attachment/launch. It can wake a
+# cold Sprite and transfers a temporary credential-free validation helper.
+# Failed Fly checks show bounded, redacted CLI diagnostics, distinguish likely
+# access/app/network/service/process failures, and allow changing FLY_APP without
+# re-entering the same token. Tokens are never accepted solely on error text.
+# This does not repair Fly infrastructure or prove deploy/SSH/write permissions.
+# Fly docs: https://fly.io/docs/flyctl/integrating/
+#           https://fly.io/docs/security/tokens/
+#
 # v57: Retrieve is repository-first sync, not a recovery-branch copy.
 # Prompts for GitHub repo/PAT before Sprite access; discovers matching disk
 # checkouts, fetches latest branch history, and requires SYNC approval to commit,
@@ -43,7 +55,7 @@
 # reject a stale session. No restart, kill, key recovery or new launch is automatic.
 # API/SDK reference: https://sprites.dev/api/sprites/exec
 # https://github.com/superfly/sprites-go/blob/main/session.go
-# sprite-codex-v57.sh — updated 2026-09-26
+# sprite-codex-v58.sh — updated 2026-09-26
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -165,17 +177,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v57.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v57.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v57.sh --attach-only --session-id 1847
-#   bash sprite-codex-v57.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v57.sh --download-output
-#   bash sprite-codex-v57.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v57.sh --show-models          # no API calls
-#   bash sprite-codex-v57.sh --test-models          # host API tests only
-#   bash sprite-codex-v57.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v57.sh --test-models-before-run
-#   bash sprite-codex-v57.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v58.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v58.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v58.sh --attach-only --session-id 1847
+#   bash sprite-codex-v58.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v58.sh --download-output
+#   bash sprite-codex-v58.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v58.sh --show-models          # no API calls
+#   bash sprite-codex-v58.sh --test-models          # host API tests only
+#   bash sprite-codex-v58.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v58.sh --test-models-before-run
+#   bash sprite-codex-v58.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -254,7 +266,7 @@ umask 077
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v57.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v58.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
   (no option)               Attach / Setup / Quit / Download / Files / Retrieve menu.
   --attach-only             Select a Sprite and attach to an existing live TTY.
@@ -403,6 +415,19 @@ The login exec enables automatic localhost forwarding; agent exec behavior is un
 Live Codex sessions are not restarted; newly added tools may need a later restart.
 Installation/OAuth failures do not prevent ordinary session reattachment.
 
+Fly-only diagnostic mode: --check-fly
+Select a Sprite, confirm the actual Fly app, and enter the Fly token hidden.
+No GitHub/model keys, model tests, installs, Git sync or Codex/session action.
+Uses existing local Sprite authentication and installed Sprite fly/flyctl.
+FLY_APP is a Fly app name, not necessarily the Sprite name or repository name.
+Failure includes the CLI exit status and redacted diagnostic excerpts; categories
+are hints, not definitive diagnoses. The Fly retry menu adds 4) Change target app.
+The default for a failed Fly check is retrying the same token, not replacement.
+Validation is NOT skipped or weakened. Status access does not prove deployment,
+SSH or write rights. No token/debug dump is written by this validator. The normal
+JSON/hex Sprite credential transport still appears in process arguments; do not
+use shell tracing. Standalone --check-fly does not rotate a running agent's env.
+
 Every credential used by a NEW run is validated on the selected Sprite:
 GitHub authentication + repository/write-service access, Fly app status, and a
 completion from each selected/experiment provider. Failed checks offer hidden
@@ -461,13 +486,14 @@ _FILE_WORKDIR_SELECTED=0
 while (($#)); do
   case "$1" in
     --help|-h) show_usage; exit 0 ;;
-    --attach-only|--files|--shell|--retrieve|--recover|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
+    --attach-only|--files|--shell|--retrieve|--recover|--check-fly|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
       (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
       _MODE_SELECTED=1
       case "$1" in
         --attach-only) RUN_MODE=attach ;;
         --files|--shell) RUN_MODE=files ;;
         --retrieve|--recover) RUN_MODE=retrieve ;;
+        --check-fly) RUN_MODE=check-fly ;;
         --bootstrap) RUN_MODE=bootstrap ;;
         --download-output) RUN_MODE=download ;;
         --test-models) RUN_MODE=test-local ;;
@@ -497,6 +523,10 @@ while (($#)); do
     *) printf 'error: unknown argument: %s\n' "$1" >&2; show_usage >&2; exit 2 ;;
   esac
 done
+
+if [[ $RUN_MODE == check-fly ]] && (( _JSON_OUTPUT_SELECTED || _OUTPUT_DIR_SELECTED || _FILE_WORKDIR_SELECTED )); then
+  echo "error: --check-fly does not accept --json-output, --output-dir or --workdir" >&2; exit 2
+fi
 
 # v50: the first interactive choice is deliberately before all bootstrap-only
 # settings and side effects. The attach branch exits unconditionally afterwards.
@@ -2034,7 +2064,7 @@ run_attach_only() {
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v57.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v58.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
 import base64
@@ -3739,7 +3769,7 @@ run_file_access() (
 
 retrieve_python() {
   cat <<'RETRIEVE_PY'
-"""Local interactive retrieve mode. Embedded into sprite-codex-v57.sh."""
+"""Local interactive retrieve mode. Embedded into sprite-codex-v58.sh."""
 import contextlib
 import getpass
 import hashlib
@@ -5471,9 +5501,12 @@ prompt_secret() {
 declare -A TOKEN_VALIDATED=()
 
 credential_fingerprint() {
-  local name=$1 kind=$2
+  local name=$1 kind=$2 fly_scope=""
+  # Changing the Fly app must invalidate Fly approval, not an unrelated GitHub
+  # credential that was already validated earlier in this invocation.
+  [[ $kind != fly ]] || fly_scope=${FLY_APP:-}
   printf '%s\0' "$kind" "${!name:-}" "$SPRITE_NAME" "${SPRITE_ORG:-}" \
-    "${GITHUB_REPOSITORY:-}" "${FLY_APP:-}" \
+    "${GITHUB_REPOSITORY:-}" "$fly_scope" \
     "$DEEPSEEK_MODEL" "$MINIMAX_MODEL" "$KIMI_MODEL" \
     "$DEEPSEEK_BASE_URL" "$MINIMAX_BASE_URL" "$MOONSHOT_BASE_URL" \
     "$DEEPSEEK_REASONING_EFFORT" "$MINIMAX_REASONING_EFFORT" "$KIMI_REASONING_EFFORT" \
@@ -5528,10 +5561,18 @@ try:
         raise ValueError()
     if row["passed"] != (category == "ok"):
         raise ValueError()
+    diagnostics = row.get("diagnostics", [])
+    if (not isinstance(diagnostics, list) or len(diagnostics) > 6 or
+        any(not isinstance(d, str) or not d.isascii() or len(d) > 600 or
+            not all(c.isprintable() for c in d) for d in diagnostics) or
+        (diagnostics and kind != "fly")):
+        raise ValueError()
 except (ValueError, TypeError, KeyError):
     print("       FAIL %s: Sprite did not confirm this validation request (transport rc=%s). No token was accepted." % (name, cli_rc))
     raise SystemExit(1)
 print("       %s %s [%s]: %s" % ("PASS" if row["passed"] else "FAIL", name, category, detail))
+for diagnostic in diagnostics:
+    print("       Fly diagnostic: " + diagnostic)
 raise SystemExit(0 if row["passed"] else (130 if category == "interrupted" else 1))
 ' "$kind" "$nonce" "$name" "$cli_rc"
 }
@@ -5555,7 +5596,7 @@ read_hidden_credential() (
 )
 
 prompt_validated_secret() {
-  local name=$1 label=$2 kind=$3 fingerprint choice rc entered_secret
+  local name=$1 label=$2 kind=$3 fingerprint choice rc entered_secret target_app
   fingerprint=$(credential_fingerprint "$name" "$kind") || die "cannot fingerprint credential context"
   if [[ -n ${!name:-} && ${TOKEN_VALIDATED[$name]:-} == "$fingerprint" ]]; then
     note "$name already verified for this Sprite and target in this run"
@@ -5570,6 +5611,10 @@ prompt_validated_secret() {
       printf -v "$name" '%s' "$entered_secret"
       unset entered_secret
       [[ -n ${!name:-} ]] || die "credential entry cancelled; no new agent launched"
+    fi
+    if [[ $kind == fly ]]; then
+      note "Fly target: app=$FLY_APP; command host: Sprite=$SPRITE_NAME"
+      note "checking app access, not testing whether the Sprite is running"
     fi
     note "validating $name on Sprite $SPRITE_NAME"
     if validate_token_once "$name" "$kind"; then
@@ -5589,13 +5634,31 @@ prompt_validated_secret() {
     [[ -t 0 ]] || die "$name did not pass validation; no new agent launched (non-interactive run)"
     while :; do
       printf '\n  %s did not pass validation.\n' "$name"
-      printf '    1) Enter a replacement token [default]\n    2) Retry the same token\n    3) Abort without launching\n'
-      printf '  Select [1-3]: '
+      if [[ $kind == fly ]]; then
+        printf '    1) Enter a replacement token\n    2) Retry the same token [default]\n    3) Abort without launching\n    4) Change the target Fly app (keep this token)\n'
+        printf '  Select [1-4]: '
+      else
+        printf '    1) Enter a replacement token [default]\n    2) Retry the same token\n    3) Abort without launching\n'
+        printf '  Select [1-3]: '
+      fi
       IFS= read -r choice || die "credential validation cancelled; no new agent launched"
       case "${choice,,}" in
-        ''|1|n|new|replace) printf -v "$name" '%s' ''; break ;;
+        '') [[ $kind == fly ]] || printf -v "$name" '%s' ''; break ;;
+        1|n|new|replace) printf -v "$name" '%s' ''; break ;;
         2|r|retry) break ;;
         3|a|abort|q|quit) die "credential validation cancelled; no new agent launched" ;;
+        4|app|target)
+          if [[ $kind != fly ]]; then warn "invalid selection"; continue; fi
+          printf '  Target Fly app [%s] (not necessarily the Sprite name): ' "$FLY_APP"
+          IFS= read -r target_app || die "Fly target selection cancelled; no new agent launched"
+          target_app=${target_app:-$FLY_APP}
+          if [[ ! $target_app =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+            warn "invalid Fly app name; token and target are unchanged"; continue
+          fi
+          FLY_APP=$target_app
+          label="Fly.io token for $FLY_APP"
+          note "retrying app=$FLY_APP with the same hidden token; nothing was launched"
+          break ;;
         *) warn "invalid selection" ;;
       esac
     done
@@ -9163,12 +9226,13 @@ def write_report(path, report):
             os.unlink(tmp)
 
 
-# Token checks deliberately do not return upstream bodies or CLI output. Error
-# details can echo a supplied credential; only fixed diagnostics cross the wire.
+# API token checks use fixed messages. Fly also returns bounded diagnostic text
+# only after redacting secrets and terminal control sequences on the Sprite.
 class TokenFailure(Exception):
-    def __init__(self, category, detail):
+    def __init__(self, category, detail, diagnostics=None):
         super().__init__(detail)
         self.category = category
+        self.diagnostics = diagnostics or []
 
 
 def token_http_failure(status, headers=None):
@@ -9246,42 +9310,161 @@ def check_github_token(env, key, timeout):
     return "Authenticated user, selected repository and Git write-service access verified (no push performed; branch rules still apply)."
 
 
-def check_fly_token(env, key, timeout):
-    import shutil
+def fly_capture(argv, child_env, workdir, timeout):
+    """Bound total runtime AND buffered bytes; never store CLI output on disk.
+
+    If the byte cap is exceeded, suppress the WHOLE excerpt (not a raw prefix
+    which might end in a partial secret). A quiet process is still deadline-bound.
+    Only this read-only check's new process group is stopped on cancellation.
+    """
+    import selectors
     import subprocess
-    app = env.get("FLY_APP", "")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", app):
-        raise TokenFailure("configuration", "FLY_APP must be a valid app name.")
-    child_env = env.copy()
-    home = child_env.get("HOME", os.path.expanduser("~"))
-    child_env["PATH"] = home + "/.local/bin:" + home + "/.fly/bin:" + child_env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-    fly = shutil.which("fly", path=child_env["PATH"]) or shutil.which("flyctl", path=child_env["PATH"])
-    if not fly:
-        raise TokenFailure("configuration", "Fly CLI is missing on the selected Sprite; install fly/flyctl and retry.")
-    child_env["FLY_API_TOKEN"] = child_env["FLY_ACCESS_TOKEN"] = key
-    # Disable optional diagnostics, never use --access-token or shell expansion.
-    for name in ("LOG_LEVEL", "FLY_LOG_LEVEL", "FLY_DEBUG", "DEBUG"):
-        child_env.pop(name, None)
-    child_env["NO_COLOR"] = "1"
-    # Use a transient empty working directory so a repository fly.toml cannot
-    # redirect the app lookup. No credential or CLI output is written there.
-    with tempfile.TemporaryDirectory(prefix="sprite-fly-check-") as workdir:
-        process = subprocess.Popen([fly, "status", "--app", app], env=child_env, cwd=workdir,
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, start_new_session=True)
-        try:
-            rc = process.wait(timeout=timeout)
-        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+    limit = 128 * 1024
+    data = bytearray()
+    overflow = False
+    process = subprocess.Popen(argv, env=child_env, cwd=workdir,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, start_new_session=True)
+    selector = selectors.DefaultSelector()
+    end = time.monotonic() + timeout
+    completed = False
+    try:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            for event, _ in selector.select(min(remaining, 0.2)):
+                chunk = os.read(event.fileobj.fileno(), 16384)
+                if not chunk:
+                    selector.unregister(event.fileobj)
+                    continue
+                if not overflow and len(data) + len(chunk) <= limit:
+                    data.extend(chunk)
+                else:
+                    overflow = True
+                    data.clear()
+        rc = process.wait(timeout=max(0.001, end - time.monotonic()))
+        completed = True
+        return rc, bytes(data).decode('utf-8', 'replace'), overflow
+    finally:
+        selector.close()
+        if not completed or process.poll() is None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             process.wait()
-            raise
-    if rc != 0:
-        raise TokenFailure("access-or-service", "fly status failed: token may be invalid/expired, lack app access, or the app/network/service may be unavailable. Check FLY_APP, then replace the token or retry.")
-    return "fly status succeeded for the selected app with both Fly token aliases; deployment/SSH permissions are not proven."
+        process.stdout.close()
 
+
+def fly_redacted_text(text, env, key):
+    """Redact before extracting/truncating lines. Not a general secret scanner."""
+    import base64
+    secrets_to_hide = {key}
+    for name, value in env.items():
+        if name not in ('TOKEN_CHECK_TIMEOUT', 'MODEL_TEST_MAX_TOKENS') and value and (name.upper().endswith('_PAT') or any(word in name.upper() for word in ('TOKEN', 'SECRET', 'PASSWORD', 'API_KEY', 'PRIVATE_KEY'))):
+            secrets_to_hide.add(value)
+    # Macaroon token bundles have multiple independently sensitive components.
+    for part in re.split(r'[\s,]+', key):
+        if len(part) >= 8 and part.lower() not in ('bearer', 'flyv1'):
+            secrets_to_hide.add(part)
+    variants = set()
+    for value in secrets_to_hide:
+        if not value:
+            continue
+        variants.update((value, json.dumps(value)[1:-1], urllib.parse.quote(value, safe=''),
+                         urllib.parse.quote_plus(value, safe=''), value.encode().hex(),
+                         base64.b64encode(value.encode()).decode(),
+                         base64.urlsafe_b64encode(value.encode()).decode().rstrip('=')))
+    # Strip OSC (including hyperlinks) and ANSI display controls before masking.
+    text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+    for value in sorted(variants, key=len, reverse=True):
+        text = text.replace(value, '[REDACTED]')
+    text = re.sub(r'(?i)\bFlyV1\s+[^\r\n]+', '[REDACTED FLY CREDENTIAL]', text)
+    text = re.sub(r'(?i)\b(?:fm[12]|fo[12]|gh[pousr]|github_pat|sk)_[A-Za-z0-9_./+\-=]+', '[REDACTED]', text)
+    text = re.sub(r'(?i)((?:authorization|proxy-authorization)\s*[:=]\s*)[^\r\n]+', r'\1[REDACTED]', text)
+    text = re.sub(r'(?i)\bBearer\s+[^\r\n]+', 'Bearer [REDACTED]', text)
+    text = re.sub(r'(?i)((?:[\w-]*(?:token|password|secret|api[_-]?key)[\w-]*)[\s\"\x27]*[:=]\s*)[^\r\n]+', r'\1[REDACTED]', text)
+    text = re.sub(r'(https?://)[^\s/@]+:[^\s/@]+@', r'\1[REDACTED]@', text)
+    # Query/fragment values can carry credentials, even under unexpected names.
+    text = re.sub(r'(https?://[^\s?#]+)[?#][^\s]+', r'\1?[REDACTED]', text)
+    text = ''.join(c if (c.isprintable() or c == '\n') else ' ' for c in text)
+    return text.encode('ascii', 'backslashreplace').decode('ascii')
+
+
+def fly_failure_hint(rc, text):
+    """Heuristic labels only: never turn error text into a successful check."""
+    lower = text.lower()
+    if rc < 0 or rc in (129, 130, 131, 137, 139, 143):
+        return 'process-terminated', 'The Fly check process ended by signal or a signal-style exit; this is not a token verdict.'
+    if rc in (126, 127) or any(x in lower for x in ('unknown flag', 'unknown command', 'exec format error', 'panic:', 'yaml:', 'toml:', 'permission denied')):
+        return 'cli-configuration', 'The CLI output suggests an executable/configuration/permission problem, not necessarily a bad token.'
+    if any(x in lower for x in ('no such host', 'dial tcp', 'connection refused', 'connection reset', 'network is unreachable', 'i/o timeout', 'tls handshake', 'x509:', 'certificate', 'proxyconnect', 'context deadline exceeded', 'temporary failure in name resolution')):
+        return 'network', 'The CLI output suggests DNS/network/TLS failure; token validity is not established.'
+    if re.search(r'\b429\b|rate.?limit|too many requests', lower):
+        return 'rate-limit', 'The CLI output suggests rate limiting; retry without replacing the token.'
+    if re.search(r'\b(?:500|502|503|504)\b|bad gateway|service unavailable|internal server error', lower):
+        return 'service', 'The CLI output suggests a service failure; token validity is not established.'
+    if 'app' in lower and any(x in lower for x in ('not found', 'could not find', 'could not resolve', 'cannot find', 'does not exist')):
+        return 'app-or-access', 'Check FLY_APP and app permissions; an unavailable app is not proof the token is invalid.'
+    if re.search(r'\b401\b|unauthenticated|unauthori[sz]ed|invalid (?:access )?token|token (?:has )?expired|token (?:was )?revoked', lower):
+        return 'authentication', 'Fly reports an authentication-related rejection; check token formatting, expiry and scope.'
+    if re.search(r'\b403\b|forbidden|not authori[sz]ed|permission|access denied|insufficient.*scope', lower):
+        return 'access', 'The CLI output suggests denied access; the token may be valid for a different app or scope.'
+    return 'access-or-service', 'Fly app access was not confirmed; inspect the diagnostic, target app and CLI before replacing the token.'
+
+
+def check_fly_token(env, key, timeout):
+    import shutil
+    import subprocess
+    app = env.get('FLY_APP', '')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*', app):
+        raise TokenFailure('configuration', 'FLY_APP must be a valid app name.')
+    child_env = env.copy()
+    home = child_env.get('HOME', os.path.expanduser('~'))
+    child_env['PATH'] = home + '/.local/bin:' + home + '/.fly/bin:' + child_env.get('PATH', '/usr/local/bin:/usr/bin:/bin')
+    fly = shutil.which('fly', path=child_env['PATH']) or shutil.which('flyctl', path=child_env['PATH'])
+    if not fly:
+        raise TokenFailure('configuration', 'Fly CLI is missing on the selected Sprite; install fly/flyctl and retry.')
+    child_env['FLY_API_TOKEN'] = child_env['FLY_ACCESS_TOKEN'] = key
+    child_env['FLY_APP'] = app
+    # Do not enable verbose/debug tracing or token inspection as a workaround.
+    for name in ('LOG_LEVEL', 'FLY_LOG_LEVEL', 'FLY_DEBUG', 'DEBUG', 'FLY_VERBOSE', 'FLY_LOG_GQL_ERRORS'):
+        child_env.pop(name, None)
+    child_env['NO_COLOR'] = '1'
+    clean = lambda value: fly_redacted_text(str(value), env, key)
+    diagnostics = ['Executable: ' + clean(fly)[:520]]
+    overridden = [name for name in ('FLY_API_BASE_URL', 'FLY_FLAPS_BASE_URL', 'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY') if child_env.get(name)]
+    if overridden:
+        diagnostics.append('Inherited endpoint/proxy settings present (values hidden): ' + ', '.join(overridden))
+    # Empty transient cwd avoids a repository fly.toml. HOME and saved CLI
+    # configuration remain unchanged. No output or token is written by this code.
+    with tempfile.TemporaryDirectory(prefix='sprite-fly-check-') as workdir:
+        try:
+            rc, output, overflow = fly_capture([fly, 'status', '--app', app], child_env, workdir, timeout)
+        except subprocess.TimeoutExpired:
+            raise TokenFailure('timeout', 'fly status timed out for the selected app; token validity is not established.', diagnostics) from None
+        except OSError:
+            raise TokenFailure('cli-configuration', 'The installed Fly executable could not be started; no token was accepted.', diagnostics) from None
+    if rc == 0:
+        return 'fly status succeeded for the selected app with both Fly token aliases; deployment/SSH permissions are not proven.'
+    if overflow:
+        redacted = ''
+        diagnostics.append('CLI output exceeded 128 KiB; the entire excerpt was suppressed to avoid exposing a partial credential.')
+    else:
+        redacted = clean(output)
+        lines = [' '.join(line.split()) for line in redacted.splitlines() if line.strip()]
+        # Prefer error lines over normal status tables and update notices.
+        errors = [line for line in lines if re.search(r'(?i)error|fail|denied|unauthor|not found|could not|invalid|timeout|expired|forbidden', line)]
+        for line in (errors or lines)[-3:]:
+            diagnostics.append(line[:590])
+        if not lines:
+            diagnostics.append('fly/flyctl returned no diagnostic text.')
+    category, hint = fly_failure_hint(rc, redacted)
+    # Do not include app/paths in the fixed detail: those belong to sanitized UI.
+    raise TokenFailure(category, ('fly status exited %s. ' % rc) + hint, diagnostics[:6])
 
 def token_main(kind, nonce):
     import subprocess
@@ -9314,6 +9497,8 @@ def token_main(kind, nonce):
         result.update(passed=True, category="ok", detail=detail)
     except TokenFailure as exc:
         result.update(category=exc.category, detail=str(exc))
+        if kind == "fly" and exc.diagnostics:
+            result["diagnostics"] = exc.diagnostics
     except KeyboardInterrupt:
         result.update(category="interrupted", detail="Token check interrupted; launch is blocked.")
     except (TimeoutError, socket.timeout, subprocess.TimeoutExpired):
@@ -9496,8 +9681,34 @@ maybe_test_models_before_run() {
   return 0
 }
 
+run_fly_check_only() {
+  need_local sprite
+  need_local python3
+  step "Fly app-access diagnostic only"
+  note "uses your local Sprites login; no GitHub/model keys or agent setup"
+  note "does not install/update flyctl or change any existing Codex session"
+  pick_sprite
+  local selected_app=${FLY_APP:-} answer=""
+  [[ -n $selected_app ]] || selected_app=$(detect_fly_app || true)
+  if [[ -t 0 ]]; then
+    printf '  Target Fly app%s (not necessarily the Sprite name): ' "${selected_app:+ [$selected_app]}"
+    IFS= read -r answer || die "Fly diagnostic cancelled"
+    selected_app=${answer:-$selected_app}
+  fi
+  [[ $selected_app =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || die "set FLY_APP to the actual Fly app or enter it at the prompt"
+  FLY_APP=$selected_app
+  if [[ -n ${FLY_API_TOKEN:-} && -n ${FLY_ACCESS_TOKEN:-} && $FLY_API_TOKEN != "$FLY_ACCESS_TOKEN" ]]; then
+    warn "Fly aliases differ; this check uses FLY_API_TOKEN for BOTH aliases"
+  fi
+  FLY_API_TOKEN=${FLY_API_TOKEN:-${FLY_ACCESS_TOKEN:-}}
+  prompt_validated_secret FLY_API_TOKEN "Fly.io token for $FLY_APP" fly
+  ok "Fly app-status access verified on $SPRITE_NAME for app $FLY_APP"
+  note "no deploy/SSH/write operation was tested; running agent credentials were not changed"
+}
+
 # Test-only dispatch precedes sprite/GitHub/Fly setup and every session action.
 case "$RUN_MODE" in
+  check-fly) run_fly_check_only; exit $? ;;
   test-local) run_model_tests_local; exit $? ;;
   test-sprite) run_model_tests_sprite; exit $? ;;
 esac
