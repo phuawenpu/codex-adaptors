@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
+# v56: independent --retrieve / --recover mode (opening menu 6).
+# Bypasses the old TTY/session; probes fresh non-TTY exec via HTTP POST (when
+# supported) and WebSocket fallback for reads only. No mutation is replayed.
+# Select an existing repository through the folder browser; status, GitHub PAT
+# validation, isolated recovery-branch snapshot/push, verified existing-commit push,
+# saved-ref publication, folder ZIP, diagnostics, advanced one-command Git console.
+# No agent/provider/Fly setup, credential extraction, reset, kill or restart.
+# A cold Sprite may wake; an unreachable machine/control plane cannot be bypassed.
+# GitHub PAT is sent through exec stdin, not argv or persistent credential files.
+# Guided snapshot leaves the source HEAD/branch/index alone and excludes ignored
+# files; unfinished Git operations, submodules, LFS, sparse worktrees need manual care.
+# A verified recovery branch is not proof main is synchronized or all files backed up.
+# Advanced Git commands run ONLY as explicitly typed and confirmed; can be destructive.
+# Exit 137 stops automatic attach retry and points to recovery, not a guessed OOM fix.
+# SPRITE_RETRIEVE_TRANSPORT=auto|http-post|websocket (auto prefers advertised HTTP).
+# SPRITE_RETRIEVE_TIMEOUT=180 (1..3600), SPRITE_RETRIEVE_PROBE_TIMEOUT=30 (1..300).
+# Local control marker removal uses portable sed, not GNU-only sed -i.
+#
 #
 # v55: choose the remote ZIP source using a folder browser, not an assumed ~/output.
 # Opening menu 4 / --download-output: select Sprite, browse existing folders,
@@ -20,7 +38,7 @@
 # reject a stale session. No restart, kill, key recovery or new launch is automatic.
 # API/SDK reference: https://sprites.dev/api/sprites/exec
 # https://github.com/superfly/sprites-go/blob/main/session.go
-# sprite-codex-v55.sh — updated 2026-09-26
+# sprite-codex-v56.sh — updated 2026-09-26
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -142,17 +160,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v55.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v55.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v55.sh --attach-only --session-id 1847
-#   bash sprite-codex-v55.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v55.sh --download-output
-#   bash sprite-codex-v55.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v55.sh --show-models          # no API calls
-#   bash sprite-codex-v55.sh --test-models          # host API tests only
-#   bash sprite-codex-v55.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v55.sh --test-models-before-run
-#   bash sprite-codex-v55.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v56.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v56.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v56.sh --attach-only --session-id 1847
+#   bash sprite-codex-v56.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v56.sh --download-output
+#   bash sprite-codex-v56.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v56.sh --show-models          # no API calls
+#   bash sprite-codex-v56.sh --test-models          # host API tests only
+#   bash sprite-codex-v56.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v56.sh --test-models-before-run
+#   bash sprite-codex-v56.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -221,7 +239,7 @@ if [[ -z ${BASH_VERSION:-} ]]; then
 fi
 if (( BASH_VERSINFO[0] < 4 )); then
   echo "error: bash 4+ is required; found $BASH_VERSION" >&2
-  echo "macOS users: brew install bash && /opt/homebrew/bin/bash $0" >&2
+  echo 'macOS users: brew install bash; then use "$(brew --prefix)/bin/bash" to run this script.' >&2
   exit 1
 fi
 
@@ -231,13 +249,14 @@ umask 077
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v55.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v56.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
-  (no option)               Attach / Setup / Quit / Download / Shell-files menu.
+  (no option)               Attach / Setup / Quit / Download / Files / Retrieve menu.
   --attach-only             Select a Sprite and attach to an existing live TTY.
   --session-id ID           With --attach-only or --files + SPRITE_NAME: exact TTY.
   --files, --shell          Independent shell/file menu alongside live Codex.
-  --workdir PATH            With --files: use this existing Sprite directory.
+  --retrieve, --recover     Recover an existing repository without Codex attachment.
+  --workdir PATH            With --files/--retrieve: existing Sprite directory or browser start.
   --bootstrap               Skip the opening menu; run normal setup workflow.
   --download-output         Select a Sprite, browse folders, download one as a ZIP.
   --output-dir PATH         Start folder browser here; exact source without a TTY.
@@ -265,6 +284,37 @@ Ctrl+\ detaches. No provider keys are copied out of or injected into the process
 Bare non-interactive runs retain the previous bootstrap behavior. Explicit test
 modes and --bootstrap do not show the opening menu. --json-output is not allowed
 with --attach-only; bootstrap-only environment settings are ignored on attachment.
+
+Independent retrieve mode (--retrieve / --recover, opening menu 6):
+Select a Sprite and a repository from a folder browser; no session is required.
+Uses NEW bounded non-TTY execs; auto prefers --http-post when advertised, then
+WebSocket for READ retries only. A dead/hung TTY is not used. Cold wake may work;
+no script can bypass a failed Sprite host/control plane. No automatic restart/kill.
+Status, diagnostics and ZIP require only local Sprite authentication. GitHub writes
+request a hidden GitHub PAT; the dead agent's environment is never read. No Fly or
+model key is needed. Credentials are passed through stdin and held in memory/env,
+not written into Git URLs/config/receipts or credential files.
+Guided backup snapshots current tracked/non-ignored work into a NEW sprite-recovery/
+branch using an alternate index; leaves source HEAD/branch/index/worktree alone.
+Requires BACKUP confirmation; blocks common credential names/content and changed
+files above 100 MiB, unfinished Git ops, submodules/LFS/sparse checkouts. Basic
+secret detection is NOT exhaustive. Snapshot bypasses hooks/signing; review before
+merging. Ignored files, overwritten staged-only versions and submodule/LFS payloads
+are not backed up. Use ZIP/manual Git as appropriate. Do not delete the Sprite just
+because a recovery branch was published. Neither a file ZIP nor a recovery commit
+is an atomic snapshot while writers run. Finish writers first.
+Existing-commit push checks fast-forward safety and verifies GitHub's exact OID;
+it does NOT commit current files. Save to a recovery branch when branches diverge.
+A failed/missing write response is UNKNOWN, not retried. Saved recovery refs can be
+verified/published later. Non-secret receipts name the exact ref/commit/result.
+Advanced Git console runs a supported Git subcommand once, after RUN confirmation;
+no Bash syntax, cd, interactive editors, pager, or implicit undo. Commands can change
+or delete files AS TYPED; ordinary Git hooks execute here. No force/reset is ever
+automatically inserted. This is a fresh environment, not Codex's credential scope.
+--workdir/SPRITE_WORKDIR starts repository browsing; confirmation is still required.
+SPRITE_RETRIEVE_TIMEOUT=180 (1..3600), SPRITE_RETRIEVE_PROBE_TIMEOUT=30 (1..300).
+SPRITE_RETRIEVE_TRANSPORT=auto|http-post|websocket; no automatic write transport retry.
+--session-id, --output-dir and --json-output are rejected with retrieve mode.
 
 Simplified file mode (--files / --shell, opening menu 5):
 Select a live session's recorded workspace, or supply --workdir. --session-id ID
@@ -405,12 +455,13 @@ _FILE_WORKDIR_SELECTED=0
 while (($#)); do
   case "$1" in
     --help|-h) show_usage; exit 0 ;;
-    --attach-only|--files|--shell|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
+    --attach-only|--files|--shell|--retrieve|--recover|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
       (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
       _MODE_SELECTED=1
       case "$1" in
         --attach-only) RUN_MODE=attach ;;
         --files|--shell) RUN_MODE=files ;;
+        --retrieve|--recover) RUN_MODE=retrieve ;;
         --bootstrap) RUN_MODE=bootstrap ;;
         --download-output) RUN_MODE=download ;;
         --test-models) RUN_MODE=test-local ;;
@@ -446,8 +497,8 @@ done
 if [[ -n $ATTACH_SESSION_ID && $RUN_MODE != attach && $RUN_MODE != files ]]; then
   echo "error: --session-id must be used with --attach-only or --files" >&2; exit 2
 fi
-if [[ ( $RUN_MODE == attach || $RUN_MODE == download || $RUN_MODE == files ) && $_JSON_OUTPUT_SELECTED == 1 ]]; then
-  echo "error: --json-output cannot be used with --attach-only, --download-output or --files" >&2; exit 2
+if [[ ( $RUN_MODE == attach || $RUN_MODE == download || $RUN_MODE == files || $RUN_MODE == retrieve ) && $_JSON_OUTPUT_SELECTED == 1 ]]; then
+  echo "error: --json-output cannot be used with --attach-only, --download-output or --files/--retrieve" >&2; exit 2
 fi
 if [[ $RUN_MODE == bootstrap && $_MODE_SELECTED == 0 && $_JSON_OUTPUT_SELECTED == 0 && -t 0 && -t 1 ]]; then
   while :; do
@@ -457,7 +508,8 @@ if [[ $RUN_MODE == bootstrap && $_MODE_SELECTED == 0 && $_JSON_OUTPUT_SELECTED =
     printf '    3) Quit\n'
     printf '    4) Choose a Sprite folder and download it as a ZIP (no agent launch)\n'
     printf '    5) File picker alongside Codex (output downloads / input uploads)\n'
-    printf '  Select [1-5]: '
+    printf '    6) Retrieve / Git recovery (no Codex attachment required)\n'
+    printf '  Select [1-6]: '
     if ! IFS= read -r _startup_choice; then printf '\n'; exit 0; fi
     case "${_startup_choice,,}" in
       ''|1|a|attach) RUN_MODE=attach; break ;;
@@ -465,7 +517,8 @@ if [[ $RUN_MODE == bootstrap && $_MODE_SELECTED == 0 && $_JSON_OUTPUT_SELECTED =
       3|q|quit) exit 0 ;;
       4|d|download) RUN_MODE=download; break ;;
       5|f|files|shell) RUN_MODE=files; break ;;
-      *) printf '  Invalid selection. Choose 1, 2, 3, 4, or 5.\n' ;;
+      6|r|retrieve|recover) RUN_MODE=retrieve; break ;;
+      *) printf '  Invalid selection. Choose 1, 2, 3, 4, 5, or 6.\n' ;;
     esac
   done
 fi
@@ -1866,6 +1919,10 @@ class Picker:
             if rc == 0:
                 print("\n       Attachment ended cleanly; no replacement session was launched.")
                 return 0
+            if rc == 137:
+                print("\n       Attachment ended with exit 137; not automatically retrying this terminal.")
+                print("       This is not proof of OOM or file loss. Use opening menu 6 / --retrieve for independent Git recovery.")
+                return rc
             if rc in (129, 130, 131, 143) or not self.auto:
                 return rc
             if time.monotonic() - started >= 30:
@@ -1971,7 +2028,7 @@ run_attach_only() {
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v55.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v56.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
 import base64
@@ -3674,8 +3731,459 @@ run_file_access() (
   python3 -c "$(file_access_python)" "$local_sources" "$OUTPUT_HOST_DIR" "$ATTACH_SESSION_ID" "$FILE_WORKDIR"
 )
 
+retrieve_python() {
+  cat <<'RETRIEVE_PY'
+"""Local interactive retrieve mode. Embedded into sprite-codex-v56.sh."""
+import contextlib
+import getpass
+import hashlib
+import json
+import os
+import re
+import runpy
+import secrets
+import shlex
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import warnings
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
+
+REMOTE_RETRIEVE_PY = '"""Remote, one-request recovery worker. No old TTY/session or agent is used."""\nimport contextlib\nimport hashlib\nimport json\nimport os\nimport re\nimport signal\nimport stat\nimport subprocess\nimport sys\nimport tempfile\nimport time\nimport urllib.error\nimport urllib.request\nfrom pathlib import Path\n\nPREFIX = "SPRITE_RETRIEVE_JSON="\nMAX_OUTPUT = 2 * 1024 * 1024\nMAX_FILES = 100000\nMAX_BLOB = 100 * 1024 * 1024\nTOKEN = ""\nDEADLINE = 0.0\n\nclass RecoveryError(Exception):\n    pass\n\n\ndef redact(value):\n    text = str(value)\n    if TOKEN:\n        text = text.replace(TOKEN, "[REDACTED]")\n    text = re.sub(r"(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+)", "[REDACTED]", text)\n    text = re.sub(r"(https?://)[^/\\s@]+@", r"\\1[REDACTED]@", text)\n    return "".join(c if c in "\\n\\t" or (ord(c) >= 32 and ord(c) != 127) else "?" for c in text)\n\n\ndef clean_env():\n    keys = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR")\n    env = {k: os.environ[k] for k in keys if k in os.environ}\n    env["PATH"] = os.path.expanduser("~/.local/bin") + ":/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")\n    env.update(GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat", PAGER="cat", GIT_OPTIONAL_LOCKS="0",\n               GIT_EDITOR="false", GIT_SEQUENCE_EDITOR="false", GH_PROMPT_DISABLED="1")\n    return env\n\n\ndef run(args, cwd=None, env=None, data=None, check=True, timeout=120):\n    seconds = min(timeout, max(1, DEADLINE - time.monotonic())) if DEADLINE else timeout\n    # Spool potentially large diagnostics; never accumulate arbitrary child output in RAM.\n    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:\n        p = subprocess.Popen(args, cwd=cwd, env=env or clean_env(), stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,\n                             stdout=output, stderr=errors, start_new_session=True)\n        try:\n            p.communicate(data, timeout=seconds)\n        except (subprocess.TimeoutExpired, KeyboardInterrupt):\n            with contextlib.suppress(ProcessLookupError):\n                os.killpg(p.pid, signal.SIGTERM)\n            try:\n                p.wait(timeout=2)\n            except subprocess.TimeoutExpired:\n                with contextlib.suppress(ProcessLookupError): os.killpg(p.pid, signal.SIGKILL)\n                p.wait()\n            raise RecoveryError("This recovery command timed out. Its effects may be partial; inspect status before retrying.") from None\n        output.seek(0); errors.seek(0)\n        out, err = output.read(MAX_OUTPUT+1), errors.read(MAX_OUTPUT+1)\n    if len(out) > MAX_OUTPUT or len(err) > MAX_OUTPUT:\n        raise RecoveryError("Git output exceeded the display limit. Narrow the command; any completed changes remain.")\n    if check and p.returncode:\n        detail = redact(err.decode("utf-8", "replace") or out.decode("utf-8", "replace"))\n        raise RecoveryError("Git/command failed (exit %s): %s" % (p.returncode, detail[:6000]))\n    return p.returncode, out, err\n\n\ndef git(root, args, **kwargs):\n    return run(["git", "--no-pager", "-c", "color.ui=false", "-C", str(root), *args], **kwargs)\n\n\ndef textgit(root, args, **kwargs):\n    return git(root, args, **kwargs)[1].decode("utf-8", "replace").strip()\n\n\ndef directory(path):\n    if not isinstance(path, str) or any(ord(c) < 32 or ord(c) == 127 for c in path):\n        raise RecoveryError("Invalid directory path.")\n    if path == "~" or path.startswith("~/"):\n        path = os.path.expanduser(path)\n    if not path.startswith("/") or ".." in Path(path).parts:\n        raise RecoveryError("Choose an absolute directory or a ~/ path; parent components are not accepted.")\n    path = os.path.normpath(path)\n    if any(path == p or path.startswith(p + "/") for p in ("/proc", "/sys", "/dev")):\n        raise RecoveryError("Virtual system paths cannot be recovery repositories.")\n    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)\n    try:\n        for component in Path(path).parts[1:]:\n            nxt = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)\n            os.close(fd); fd = nxt\n    finally:\n        os.close(fd)\n    return path\n\n\ndef github_repo(url):\n    for pattern in (r"https://github\\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\\.git)?/?",\n                    r"git@github\\.com:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\\.git)?",\n                    r"ssh://git@github\\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\\.git)?/?"):\n        m = re.fullmatch(pattern, url.strip(), re.I)\n        if m and all(x not in (".", "..") for x in m[1].split("/")):\n            return m[1]\n    return ""\n\n\ndef repo_info(path):\n    path = directory(path)\n    if textgit(path, ["rev-parse", "--is-inside-work-tree"]) != "true":\n        raise RecoveryError("Select an existing non-bare Git working directory. Nothing will be cloned or replaced.")\n    root = directory(textgit(path, ["rev-parse", "--show-toplevel"]))\n    gd = textgit(root, ["rev-parse", "--absolute-git-dir"])\n    common = textgit(root, ["rev-parse", "--git-common-dir"])\n    common = os.path.abspath(os.path.join(root, common))\n    raw_origin = textgit(root, ["config", "--get", "remote.origin.url"], check=False)\n    repo = github_repo(raw_origin)\n    head = textgit(root, ["rev-parse", "--verify", "HEAD"], check=False)\n    if head and not re.fullmatch(r"[0-9a-f]{40,64}", head):\n        raise RecoveryError("Unrecognized HEAD identity.")\n    branch = textgit(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], check=False)\n    return dict(root=root, gitdir=gd, common=common, repo=repo, head=head, branch=branch,\n                origin=("https://github.com/"+repo+".git") if repo else "[missing or unsupported origin; not displayed]")\n\n\ndef index_signature(info):\n    p = Path(info["gitdir"]) / "index"\n    try:\n        with p.open("rb") as f:\n            h = hashlib.sha256()\n            for b in iter(lambda:f.read(1024*1024), b""): h.update(b)\n            return h.hexdigest()\n    except FileNotFoundError:\n        return "missing"\n\n\ndef state(info):\n    root = info["root"]\n    entries = git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])[1].split(b"\\0")\n    names = sorted(set(os.fsdecode(x) for x in entries if x))\n    if len(names) > MAX_FILES:\n        raise RecoveryError("Repository exceeds recovery\'s 100,000-file inspection limit; use a narrower archive/manual Git.")\n    h = hashlib.sha256()\n    h.update(json.dumps([info["head"], info["branch"], info["repo"], index_signature(info)], sort_keys=True).encode())\n    st = os.stat(root)\n    h.update(str((st.st_dev, st.st_ino)).encode())\n    for name in names:\n        if os.path.isabs(name) or ".." in Path(name).parts:\n            raise RecoveryError("Unexpected path in Git inventory.")\n        try:\n            s = os.lstat(os.path.join(root, name))\n            signature = (s.st_mode, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_ino, s.st_dev)\n        except FileNotFoundError:\n            signature = None\n        h.update(json.dumps([name, signature], ensure_ascii=True).encode())\n    return h.hexdigest(), len(names)\n\n\ndef status(path):\n    info = repo_info(path)\n    raw = git(info["root"], ["status", "--porcelain=v1", "-z", "--untracked-files=all"])[1]\n    parts = raw.split(b"\\0"); rows = []; i = 0\n    while i < len(parts):\n        entry = parts[i]; i += 1\n        if not entry: continue\n        code = entry[:2].decode("ascii", "replace")\n        name = os.fsdecode(entry[3:]); old = ""\n        if "R" in code or "C" in code:\n            if i < len(parts): old = os.fsdecode(parts[i]); i += 1\n        rows.append(dict(status=code, path=name, old=old))\n    digest, count = state(info)\n    info.update(fingerprint=digest, files=count, changes=rows, dirty=bool(rows))\n    info["operation"] = [p for p in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock")\n                         if os.path.exists(os.path.join(info["gitdir"], p))]\n    info["identity_name"] = textgit(info["root"], ["config", "user.name"], check=False)\n    info["identity_email"] = textgit(info["root"], ["config", "user.email"], check=False)\n    info["recent"] = textgit(info["root"], ["log", "-5", "--format=%h %s"], check=False)[:4000] if info["head"] else ""\n    return info\n\n\ndef unchanged(info, expected):\n    current = repo_info(info["root"])\n    digest, _ = state(current)\n    if not expected or digest != expected:\n        raise RecoveryError("Repository files, HEAD, origin, or index changed since review. Refresh before writing; no automatic retry.")\n\n\ndef api_json(path, token):\n    req = urllib.request.Request("https://api.github.com"+path,\n        headers={"Authorization":"Bearer "+token, "Accept":"application/vnd.github+json", "User-Agent":"sprite-codex-retrieve-v56"})\n    # Do not forward an Authorization header across a redirect.\n    class NoRedirect(urllib.request.HTTPRedirectHandler):\n        def redirect_request(self, *args, **kwargs): return None\n    try:\n        with urllib.request.build_opener(NoRedirect()).open(req, timeout=min(30, max(1, DEADLINE-time.monotonic())) if DEADLINE else 30) as r:\n            data = r.read(MAX_OUTPUT+1)\n        if len(data) > MAX_OUTPUT: raise RecoveryError("GitHub response exceeded the safe limit.")\n        return json.loads(data)\n    except urllib.error.HTTPError as e:\n        raise RecoveryError("GitHub verification failed (HTTP %d). Check token expiry, repository selection/permissions, SSO, or rate limits." % e.code) from None\n    except (urllib.error.URLError, ValueError):\n        raise RecoveryError("GitHub verification did not complete; token validity is unknown.") from None\n\n\ndef authenticate(info, token, expected_repo):\n    if not info["repo"] or info["repo"].lower() != str(expected_repo).lower():\n        raise RecoveryError("Origin changed or is not an approved github.com repository; authenticate the selected repository again.")\n    if not token or "\\n" in token or "\\r" in token or "\\x00" in token:\n        raise RecoveryError("A GitHub PAT without control characters is required.")\n    user = api_json("/user", token)\n    data = api_json("/repos/"+info["repo"], token)\n    if not isinstance(user, dict) or not user.get("login") or not isinstance(data, dict):\n        raise RecoveryError("Unexpected GitHub authentication response.")\n    if str(data.get("full_name", "")).lower() != info["repo"].lower():\n        raise RecoveryError("GitHub repository identity differs; no redirect/rename is accepted automatically.")\n    permissions = data.get("permissions", {})\n    if permissions and not any(permissions.get(x) for x in ("push", "admin", "maintain")):\n        raise RecoveryError("GitHub reports no write permission for this repository.")\n    return {"login":user["login"], "id":str(user.get("id", "")), "repo":info["repo"],\n            "note":"Authentication/repository access verified; the actual push remains subject to token scopes and branch rules."}\n\n\nCREDENTIAL = \'\'\'#!/usr/bin/env python3\nimport os, sys\nfields = dict(line.rstrip("\\\\n").split("=",1) for line in sys.stdin if "=" in line)\nrepo = os.environ.get("SPRITE_RETRIEVE_REPO", "").lower()\npath = fields.get("path", "").removesuffix(".git").lower()\nif len(sys.argv)>1 and sys.argv[1]=="get" and fields.get("protocol")=="https" and fields.get("host")=="github.com" and path==repo:\n    print("username=x-access-token")\n    print("password="+os.environ.get("SPRITE_RETRIEVE_TOKEN", ""))\n\'\'\'\n\n\n@contextlib.contextmanager\ndef credentials(info, token, hooks=False):\n    with tempfile.TemporaryDirectory(prefix="sprite-retrieve-auth-") as temp:\n        helper = Path(temp)/"credential.py"; helper.write_text(CREDENTIAL); helper.chmod(0o700)\n        import shlex\n        env = clean_env()\n        env.update(SPRITE_RETRIEVE_TOKEN=token, SPRITE_RETRIEVE_REPO=info["repo"])\n        cfg = [("credential.helper", ""), ("credential.https://github.com.helper", ""),\n               ("credential.https://github.com.helper", "!"+shlex.quote(sys.executable)+" "+shlex.quote(str(helper))),\n               ("credential.useHttpPath", "true"), ("credential.interactive", "false"),\n               ("http.extraHeader", ""), ("http.followRedirects", "false"),\n               ("remote.origin.url", info["origin"]), ("remote.origin.pushurl", info["origin"])]\n        if not hooks: cfg.append(("core.hooksPath", "/dev/null"))\n        env["GIT_CONFIG_COUNT"] = str(len(cfg))\n        for i,(k,v) in enumerate(cfg): env["GIT_CONFIG_KEY_%d"%i]=k; env["GIT_CONFIG_VALUE_%d"%i]=v\n        yield env\n\n\ndef oid_remote(info, branch, env):\n    result = textgit(info["root"], ["ls-remote", "--heads", info["origin"], "refs/heads/"+branch], env=env)\n    if not result: return ""\n    rows = result.splitlines()\n    if len(rows) != 1: raise RecoveryError("Remote branch query was ambiguous.")\n    oid, ref = rows[0].split("\\t", 1)\n    if ref != "refs/heads/"+branch or not re.fullmatch(r"[0-9a-f]{40,64}", oid):\n        raise RecoveryError("Unrecognized remote branch result.")\n    return oid\n\n\ndef validate_branch(info, branch, recovery=False):\n    if not isinstance(branch, str) or len(branch)>240 or branch.startswith("-"):\n        raise RecoveryError("Invalid branch name.")\n    if recovery and not re.fullmatch(r"sprite-recovery/[A-Za-z0-9._-]+", branch):\n        raise RecoveryError("A recovery branch must start with sprite-recovery/ and contain one safe suffix.")\n    git(info["root"], ["check-ref-format", "refs/heads/"+branch])\n\n\ndef safe_snapshot_paths(info):\n    # Registered submodules/LFS need their own payload transfer. Never falsely\n    # report those pointer-only commits as a complete backup.\n    stages = git(info["root"], ["ls-files", "--stage", "-z"])[1]\n    if any(p.startswith(b"160000 ") for p in stages.split(b"\\0")):\n        raise RecoveryError("Guided snapshots do not back up submodule worktrees. Use ZIP/manual Git for each repository.")\n    names = git(info["root"], ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])[1]\n    attrs = git(info["root"], ["check-attr", "-z", "--stdin", "filter"], data=names)[1]\n    if b"\\0filter\\0lfs\\0" in attrs:\n        raise RecoveryError("Git LFS is present. Use manual Git with LFS installed or a ZIP; guided recovery will not upload pointers alone.")\n    if info["operation"]:\n        raise RecoveryError("Unfinished Git operation or lock detected: "+", ".join(info["operation"])+". Nothing is removed automatically; use ZIP or resolve it explicitly.")\n    if textgit(info["root"], ["config", "--bool", "core.sparseCheckout"], check=False) == "true":\n        raise RecoveryError("Guided snapshots do not support sparse checkouts. Use existing-commit push or manual Git.")\n\n\ndef secret_path(name):\n    parts = Path(name).parts; base = parts[-1].lower() if parts else ""\n    return (any(p.lower() in (".ssh", ".aws", ".codex", ".sprites", ".sprite-fly-tokens") for p in parts)\n            or (base.startswith(".env") and not base.endswith((".example", ".sample", ".template")))\n            or base in ("id_rsa", "id_ed25519", ".netrc", ".git-credentials", "credentials.json", "auth.json")\n            or base.endswith((".pem", ".p12", ".pfx", ".key")))\n\n\nSECRETS = re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{24,}")\n\n\ndef scan_tree(info, tree, env):\n    args = ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", info["head"], tree] if info["head"] else ["ls-tree", "-r", "--name-only", "-z", tree]\n    names = git(info["root"], args, env=env)[1].split(b"\\0")\n    for bname in names:\n        if not bname: continue\n        name = os.fsdecode(bname)\n        spec = tree+":"+name\n        rc, raw, _ = git(info["root"], ["cat-file", "-s", spec], env=env, check=False)\n        if rc: continue  # deletion, no blob is exported\n        if secret_path(name):\n            raise RecoveryError("Potential credential file in the recovery commit: "+redact(name)+". Review/exclude it before retrying.")\n        size = int(raw)\n        if size > MAX_BLOB:\n            raise RecoveryError("Changed file exceeds 100 MiB: "+redact(name)+". Download a ZIP or use LFS deliberately; no GitHub push was attempted.")\n        # cat-file streamed to disk, with bounded scan overlap, instead of loading huge blobs.\n        p = subprocess.Popen(["git", "-C", info["root"], "cat-file", "blob", spec], env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)\n        previous = b""\n        try:\n            while True:\n                chunk = p.stdout.read(1024*1024)\n                if not chunk: break\n                data = previous + chunk\n                if SECRETS.search(data) or (TOKEN and TOKEN.encode() in data):\n                    raise RecoveryError("Potential credential content detected in "+redact(name)+". No credential value is displayed; no push was attempted.")\n                previous = data[-1024:]\n                if DEADLINE and time.monotonic() >= DEADLINE:\n                    raise RecoveryError("Credential-content scan timed out; no push was attempted.")\n            if p.wait(timeout=5): raise RecoveryError("Could not inspect a recovery blob.")\n        finally:\n            if p.poll() is None: p.kill(); p.wait()\n            p.stdout.close()\n\n\ndef journal(info, opid, data):\n    base = Path(info["common"]) / "sprite-retrieve"\n    base.mkdir(mode=0o700, exist_ok=True)\n    if base.is_symlink() or not base.is_dir(): raise RecoveryError("Unsafe recovery receipt directory.")\n    fd, temp = tempfile.mkstemp(prefix=".receipt-", dir=base)\n    try:\n        with os.fdopen(fd, "w") as f:\n            json.dump(data, f, ensure_ascii=True); f.write("\\n"); f.flush(); os.fsync(f.fileno())\n        os.replace(temp, base/(opid+".json"))\n    finally:\n        with contextlib.suppress(FileNotFoundError): os.unlink(temp)\n\n\ndef snapshot(req):\n    info = status(req["path"]); unchanged(info, req.get("expected"))\n    safe_snapshot_paths(info)\n    branch = req["branch"]; validate_branch(info, branch, recovery=True)\n    opid = req["opid"]\n    if not re.fullmatch(r"[0-9a-f]{32}", opid): raise RecoveryError("Invalid operation ID.")\n    # Revalidate credentials before creating a Git commit, not after the mutation.\n    user = authenticate(info, TOKEN, req.get("repo"))\n    ref = "refs/heads/"+branch\n    if textgit(info["root"], ["show-ref", "--hash", "--verify", ref], check=False):\n        raise RecoveryError("Recovery ref already exists. Use Publish saved recovery branch; no duplicate commit was made.")\n    with credentials(info, TOKEN) as network_env, tempfile.TemporaryDirectory(prefix="sprite-retrieve-index-") as temp:\n        # Staging/clean filters do not need GitHub credentials. Only the later\n        # network publish subprocess receives the PAT environment.\n        env = clean_env()\n        env["GIT_INDEX_FILE"] = str(Path(temp)/"index")\n        git(info["root"], ["read-tree", info["head"]] if info["head"] else ["read-tree", "--empty"], env=env)\n        git(info["root"], ["add", "-A", "--", "."], env=env)\n        tree = textgit(info["root"], ["write-tree"], env=env)\n        scan_tree(info, tree, env)\n        unchanged(info, req.get("expected"))\n        name = req.get("author_name") or info["identity_name"] or user["login"]\n        email = req.get("author_email") or info["identity_email"] or (user["id"]+"+"+user["login"]+"@users.noreply.github.com")\n        if any(c in name+email for c in "\\r\\n\\x00") or not name or "@" not in email:\n            raise RecoveryError("Provide a valid single-line commit identity.")\n        env.update(GIT_AUTHOR_NAME=name, GIT_COMMITTER_NAME=name, GIT_AUTHOR_EMAIL=email, GIT_COMMITTER_EMAIL=email)\n        message = req.get("message", "Recover Sprite workspace")\n        if not isinstance(message, str) or not message.strip() or len(message)>2000 or "\\x00" in message:\n            raise RecoveryError("Invalid commit message.")\n        commit = textgit(info["root"], ["-c", "commit.gpgSign=false", "commit-tree", tree, *(["-p", info["head"]] if info["head"] else []), "-m", message], env=env)\n        git(info["root"], ["update-ref", "-m", "Sprite recovery snapshot", ref, commit, "0"*len(commit)], env=env)\n        receipt = dict(opid=opid, branch=branch, commit=commit, tree=tree, source=info["root"], repo=info["repo"], status="saved_local", time=int(time.time()))\n        journal(info, opid, receipt)\n        try:\n            published = publish(info, branch, commit, network_env)\n            receipt.update(published); journal(info, opid, receipt)\n        except RecoveryError as e:\n            receipt["push_error"] = redact(e)\n        receipt["source_changed_after_capture"] = state(repo_info(info["root"]))[0] != req.get("expected")\n        return receipt\n\n\ndef publish(info, branch, commit, env):\n    validate_branch(info, branch, recovery=True)\n    remote = oid_remote(info, branch, env)\n    if remote and remote != commit:\n        raise RecoveryError("Remote recovery branch has different content; it will not be overwritten.")\n    if not remote:\n        git(info["root"], ["push", "--porcelain", info["origin"], commit+":refs/heads/"+branch], env=env)\n    actual = oid_remote(info, branch, env)\n    if actual != commit:\n        raise RecoveryError("Push result could not be verified on GitHub. Inspect this ref before retrying.")\n    return dict(status="verified_on_github", remote_commit=actual, branch=branch, commit=commit)\n\n\ndef push_current(req):\n    info = status(req["path"]); unchanged(info, req.get("expected"))\n    if not info["head"] or not info["branch"]:\n        raise RecoveryError("Current-branch push requires an existing commit and attached branch. Use a recovery snapshot instead.")\n    if info["operation"]: raise RecoveryError("An unfinished Git operation/lock must be inspected first.")\n    authenticate(info, TOKEN, req.get("repo"))\n    with credentials(info, TOKEN, hooks=True) as env:\n        branch = info["branch"]; validate_branch(info, branch)\n        remote = oid_remote(info, branch, env)\n        if remote and remote != info["head"]:\n            git(info["root"], ["fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", info["origin"], "refs/heads/"+branch], env=env)\n            rc, _, _ = git(info["root"], ["merge-base", "--is-ancestor", remote, info["head"]], env=env, check=False)\n            if rc:\n                raise RecoveryError("GitHub branch is ahead or divergent. No pull/reset/force-push was done; save a recovery branch instead.")\n        unchanged(info, req.get("expected"))\n        git(info["root"], ["push", "--porcelain", info["origin"], info["head"]+":refs/heads/"+branch], env=env)\n        actual = oid_remote(info, branch, env)\n        if actual != info["head"]: raise RecoveryError("Remote commit could not be verified; inspect GitHub before retrying.")\n        return dict(status="verified_on_github", branch=branch, commit=actual, uncommitted_files_not_included=info["dirty"])\n\n\nREAD_COMMANDS = {"status", "diff", "log", "show", "rev-parse", "ls-files", "ls-remote", "reflog"}\nCOMMANDS = READ_COMMANDS | {"fetch", "add", "commit", "push", "pull", "merge", "rebase", "cherry-pick", "branch", "restore", "reset", "rm", "mv", "stash"}\n\n\ndef command(req):\n    info = repo_info(req["path"])\n    args = req.get("args")\n    if (not isinstance(args, list) or not args or args[0] not in COMMANDS or len(args)>200\n            or any(not isinstance(a,str) or "\\x00" in a or len(a)>8192 for a in args)):\n        raise RecoveryError("Enter a supported Git subcommand, not a shell command, alias, or global Git option.")\n    if not req.get("confirmed"):\n        raise RecoveryError("The advanced command must be confirmed explicitly.")\n    if TOKEN:\n        authenticate(info, TOKEN, req.get("repo"))\n        with credentials(info, TOKEN, hooks=True) as env:\n            rc, out, err = git(info["root"], args, env=env, check=False, timeout=600)\n    else:\n        if args[0] not in READ_COMMANDS:\n            raise RecoveryError("Authenticate GitHub first for advanced mutation commands.")\n        rc, out, err = git(info["root"], args, check=False)\n    return dict(exit=rc, stdout=redact(out.decode("utf-8", "replace")), stderr=redact(err.decode("utf-8", "replace")),\n                note="Executed once. Inspect status; success of a command is not proof the whole workspace is backed up.")\n\n\ndef diagnostics():\n    names = []\n    rc, out, _ = run(["ps", "-eo", "pid,ppid,stat,tty,etime,comm"], check=False)\n    for line in out.decode("utf-8", "replace").splitlines():\n        if any(n in line.lower() for n in ("codex", "kimi", "git", "node", "pid")): names.append(line)\n    disk = os.statvfs(os.path.expanduser("~"))\n    return dict(home=os.path.expanduser("~"), git=run(["git", "--version"], check=False)[1].decode().strip(),\n                processes="\\n".join(names[:100]), free_bytes=disk.f_bavail*disk.f_frsize,\n                note="Process names only; no arguments/environments. Presence is not responsiveness. No process was stopped.")\n\n\ndef dispatch(req):\n    op = req.get("op")\n    if op == "probe": return dict(ok="SPRITE_RETRIEVE_OK", home=os.path.expanduser("~"), python=list(sys.version_info[:3]))\n    if op == "diagnostics": return diagnostics()\n    if op == "status": return status(req["path"])\n    if op == "auth": return authenticate(repo_info(req["path"]), TOKEN, req.get("repo"))\n    if op == "snapshot": return snapshot(req)\n    if op == "push_current": return push_current(req)\n    if op == "command": return command(req)\n    if op == "refs":\n        info = repo_info(req["path"])\n        raw = textgit(info["root"], ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/sprite-recovery/"])\n        return [dict(branch=line.split()[0], commit=line.split()[1]) for line in raw.splitlines()]\n    if op == "publish":\n        info = repo_info(req["path"]); validate_branch(info, req["branch"], recovery=True)\n        authenticate(info, TOKEN, req.get("repo"))\n        commit = textgit(info["root"], ["rev-parse", "--verify", "refs/heads/"+req["branch"]+"^{commit}"])\n        if commit != req.get("commit"): raise RecoveryError("Saved recovery ref changed since selection.")\n        with credentials(info, TOKEN) as env: return publish(info, req["branch"], commit, env)\n    raise RecoveryError("Unknown recovery action.")\n\n\ndef main():\n    global TOKEN, DEADLINE\n    if sys.version_info < (3,9): raise RecoveryError("Python 3.9+ is required on the Sprite.")\n    raw = sys.stdin.buffer.read(65537)\n    if len(raw)>65536: raise RecoveryError("Request too large.")\n    req = json.loads(raw)\n    nonce = req.get("nonce", "")\n    if not re.fullmatch(r"[0-9a-f]{32}", nonce): raise RecoveryError("Invalid request identity.")\n    TOKEN = req.pop("token", "")\n    DEADLINE = time.monotonic() + min(3600, max(5, int(req.get("timeout", 180))))\n    try:\n        result = dict(nonce=nonce, ok=True, data=dispatch(req))\n    except (RecoveryError, OSError, ValueError) as e:\n        msg = redact(e) if isinstance(e, RecoveryError) else "Filesystem/command error (%s); inspect permissions, tools, disk space and connection."%type(e).__name__\n        result = dict(nonce=nonce, ok=False, error=msg)\n    print(PREFIX+json.dumps(result, ensure_ascii=True, separators=(",", ":")), flush=True)\n\nif __name__ == "__main__":\n    main()\n'
+
+class RetrieveError(Exception):
+    pass
+
+class Cancelled(Exception):
+    pass
+
+
+def safe(value):
+    return ''.join(c if c in '\n\t' or (c.isprintable() and ord(c) != 127) else '?' for c in str(value))
+
+
+def ask(prompt):
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        raise Cancelled() from None
+
+
+def integer(name, default, high):
+    value = os.environ.get(name, str(default))
+    if not re.fullmatch(r'[1-9][0-9]*', value) or int(value)>high:
+        raise RetrieveError(name+' must be 1..'+str(high))
+    return int(value)
+
+
+class Channel:
+    """New exec commands only. An old session's ID, state and transport are irrelevant."""
+    def __init__(self, picker, sprite, remote_code=REMOTE_RETRIEVE_PY):
+        self.picker, self.sprite, self.code = picker, sprite, remote_code
+        self.context, self.cli, self.org = picker.context, picker.cli, picker.org
+        self.timeout = integer('SPRITE_RETRIEVE_TIMEOUT', 180, 3600)
+        self.probe_timeout = integer('SPRITE_RETRIEVE_PROBE_TIMEOUT', 30, 300)
+        choice = os.environ.get('SPRITE_RETRIEVE_TRANSPORT', 'auto')
+        if choice not in ('auto', 'websocket', 'http-post'):
+            raise RetrieveError('SPRITE_RETRIEVE_TRANSPORT must be auto, websocket, or http-post.')
+        help_result = picker.capture(['exec', '--help'], check=False)
+        supports_http = '--http-post' in (help_result.stdout + help_result.stderr)
+        if choice == 'http-post' and not supports_http:
+            raise RetrieveError('This local Sprite CLI does not advertise --http-post; upgrade it or select websocket.')
+        self.modes = (['http-post', 'websocket'] if supports_http else ['websocket']) if choice == 'auto' else [choice]
+        self.mode = self.modes[0]
+        self.last_status = None
+
+    def _call(self, request, mode, timeout):
+        nonce = secrets.token_hex(16)
+        payload = dict(request, nonce=nonce, timeout=max(5, timeout-5))
+        args = [self.cli, 'exec', *self.org, '-s', self.sprite]
+        if mode == 'http-post': args.append('--http-post')
+        args += ['--no-port-forward', '--', 'python3', '-c', self.code]
+        local_env = os.environ.copy()
+        # The local Sprites CLI needs its own login, not the separate GitHub token.
+        for key in ('GITHUB_PAT', 'GH_TOKEN', 'GITHUB_TOKEN', 'FLY_API_TOKEN', 'FLY_ACCESS_TOKEN',
+                    'DEEPSEEK_API_KEY', 'MINIMAX_API_KEY', 'MOONSHOT_API_KEY', 'OPENAI_API_KEY'):
+            local_env.pop(key, None)
+        p = None
+        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+            try:
+                p = subprocess.Popen(args, cwd=self.context, env=local_env, stdin=subprocess.PIPE,
+                                     stdout=output, stderr=errors, start_new_session=True)
+                try:
+                    p.communicate(json.dumps(payload, ensure_ascii=True).encode(), timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    raise RetrieveError('Recovery exec timed out; command outcome is unknown. A remote operation may still be running.') from None
+                output.seek(0); raw = output.read(4*1024*1024+1)
+                if len(raw)>4*1024*1024:
+                    raise RetrieveError('Recovery result exceeded the safe display limit; inspect the repository before retrying.')
+                markers = [line[len(b'SPRITE_RETRIEVE_JSON='):] for line in raw.splitlines() if line.startswith(b'SPRITE_RETRIEVE_JSON=')]
+                if len(markers)!=1:
+                    raise RetrieveError('No verified recovery response (local CLI exit %s). Command outcome is unknown.'%p.returncode)
+                try: result = json.loads(markers[0])
+                except (ValueError, UnicodeError): raise RetrieveError('Malformed recovery response; no success is claimed.') from None
+                if (not isinstance(result, dict) or result.get('nonce') != nonce or type(result.get('ok')) is not bool):
+                    raise RetrieveError('Recovery response identity failed verification; no success is claimed.')
+                # A matching completion marker is authoritative even if the CLI
+                # later loses its exit frame. Raw stderr is never echoed (may have secrets).
+                if p.returncode:
+                    print('       Verified completion received despite local CLI exit %s.'%p.returncode)
+                return result
+            finally:
+                if p is not None and p.poll() is None:
+                    with contextlib.suppress(ProcessLookupError): os.killpg(p.pid, signal.SIGTERM)
+                    try: p.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        with contextlib.suppress(ProcessLookupError): os.killpg(p.pid, signal.SIGKILL)
+                        p.wait()
+
+    def call(self, op, *, mutation=False, token='', **kwargs):
+        modes = [self.mode]+[m for m in self.modes if m!=self.mode]
+        if mutation: modes = modes[:1]
+        errors = []
+        timeout = self.probe_timeout if op == 'probe' else self.timeout
+        for mode in modes:
+            try:
+                result = self._call(dict(op=op, token=token, **kwargs), mode, timeout)
+            except RetrieveError as e:
+                errors.append(mode+': '+str(e))
+                if mutation:
+                    raise RetrieveError(str(e)+' This write was NOT retried. Refresh status / inspect saved recovery branches before another write.') from None
+                continue
+            self.mode = mode
+            if not result['ok']:
+                message = safe(result.get('error', 'Recovery command failed.'))
+                if token: message = message.replace(token, '[REDACTED]')
+                raise RetrieveError(message)
+            return result.get('data')
+        raise RetrieveError('\n       '.join(errors)+'\n       Neither a running label nor an old TTY can guarantee exec access. No destructive restart is attempted.')
+
+    def probe(self):
+        value = self.call('probe')
+        if not isinstance(value, dict) or value.get('ok') != 'SPRITE_RETRIEVE_OK':
+            raise RetrieveError('Unexpected probe marker.')
+        print('       Independent command access verified via '+self.mode+'. No Codex terminal was attached.')
+        return value
+
+
+class Retrieve:
+    def __init__(self, picker, output, context, local_dir):
+        self.picker, self.o, self.context, self.local_dir = picker, output, context, local_dir
+        self.channel = None; self.sprite = ''; self.path = ''; self.token = ''; self.auth_repo = ''; self.user = None
+        self.context_file = str(Path(context)/'.sprite')
+        self.pinned = ''
+
+    def pin(self, sprite):
+        self.picker.capture(['use', *self.picker.org, sprite])
+        self.sprite = sprite
+        self.pinned = self.context_file if Path(self.context_file).is_file() else ''
+        self.channel = Channel(self.picker, sprite)
+        self.token = ''; self.auth_repo = ''; self.user = None; self.path = ''
+
+    def wait_for_access(self):
+        while True:
+            print('\n=== independent recovery access — '+self.sprite, flush=True)
+            print('       A fresh exec may wake a cold Sprite. It does not restart or replace an existing agent.')
+            try:
+                self.channel.probe()
+                return True
+            except RetrieveError as e:
+                print('       '+str(e))
+            choice = ask('  R = retry probes, S = another Sprite, Q = quit [Q]: ').lower()
+            if choice=='r': continue
+            if choice=='s': return False
+            raise Cancelled()
+
+    def folder_picker(self):
+        # Reuse the non-secret browser with the independently tested transport.
+        org = self.picker.org[1] if self.picker.org else ''
+        folder = self.o.FolderPicker(self.sprite, org, self.pinned)
+        folder.transport = self.channel.mode
+        folder.timeout = min(self.channel.timeout, 300)
+        return folder
+
+    def select_repository(self, start='~'):
+        folder = self.folder_picker(); path = start or '~'; page=0; hidden=False
+        while True:
+            print('\n=== choose existing Git repository — '+self.sprite, flush=True)
+            info = None
+            try:
+                info = folder.request(path, page=page, hidden=hidden); path=info['path']; page=info['page']
+                print('       REMOTE: '+safe(path))
+                for i,name in enumerate(info['folders'],1): print('    %d) %s/'%(i,safe(name)))
+                if info['files']:
+                    print('       Files: '+', '.join(safe(x['name']) for x in info['files']))
+                if info['pages']>1: print('       Page %s/%s (N next / B previous)'%(page+1,info['pages']))
+            except self.o.DownloadError as e:
+                print('       '+str(e))
+            print('       Number = open folder | G = use repository here | W = workspace shortcuts')
+            print('       U = parent | H = home | / = root | P = path | T = hidden | R = refresh | Q = back')
+            c=ask('  Repository action: ').lower()
+            if c in ('','q'): raise Cancelled()
+            if c=='g' and info:
+                try:
+                    s=self.channel.call('status', path=path)
+                    print('       Git root: '+safe(s['root'])+'\n       Origin: '+safe(s['origin']))
+                    if ask('  Use this repository? [y/N]: ').lower() not in ('y','yes'): continue
+                    self.path=s['root']; self.token=''; self.auth_repo=''; self.user=None
+                    return
+                except RetrieveError as e: print('       '+str(e))
+            elif c=='w':
+                try:
+                    target=folder.places()
+                    if target: path=target; page=0
+                except self.o.DownloadError as e: print('       '+str(e))
+            elif c=='u': path=str(PurePosixPath(path).parent) if path.startswith('/') else '~'; page=0
+            elif c=='h': path='~'; page=0
+            elif c=='/': path='/'; page=0
+            elif c=='p':
+                target=ask('  Existing absolute or ~/ directory: ')
+                if target: path=target; page=0
+            elif c=='t': hidden=not hidden; page=0
+            elif c in ('n','b') and info: page=min(info['pages']-1,page+1) if c=='n' else max(0,page-1)
+            elif c=='r': pass
+            elif info and c.isdecimal() and 1<=int(c)<=len(info['folders']):
+                path=str(PurePosixPath(path)/info['folders'][int(c)-1]); page=0
+            else: print('       Select a displayed action. No folder is created or replaced.')
+
+    def show_status(self):
+        s=self.channel.call('status',path=self.path)
+        print('\n       Repository: '+safe(s['root'])+'\n       Origin: '+safe(s['origin']))
+        print('       Branch: '+safe(s['branch'] or '(detached HEAD)')+' | HEAD: '+safe(s['head'] or '(no commit)'))
+        print('       %s tracked/non-ignored paths; %s changed entries.'%(s['files'],len(s['changes'])))
+        for r in s['changes'][:200]: print('         '+safe(r['status'])+' '+safe(r['path']))
+        if len(s['changes'])>200: print('       Display capped at 200 changes. Use advanced git status to narrow inspection.')
+        if s['operation']: print('       Git operation/lock: '+', '.join(s['operation']))
+        print('       Ignored/untracked secrets are NOT a Git backup. This status has not fetched GitHub.')
+        print('       Review contents privately before publishing. Basic secret checks are not exhaustive.')
+        return s
+
+    def authenticate(self, s=None):
+        s=s or self.channel.call('status',path=self.path)
+        if not s['repo']: raise RetrieveError('Origin is not a supported github.com repository; no remote is rewritten.')
+        if self.token and self.auth_repo==s['repo']: return
+        print('\n       GitHub target: '+safe(s['repo']))
+        print('       Only a repository-scoped GitHub PAT is needed. No Fly or model key is requested.')
+        print('       The PAT stays in this recovery process and remote command environments; not on disk or in command arguments.')
+        # Reuse only a local token the user explicitly supplies to this invocation,
+        # never /proc or the dead agent's environment.
+        candidate=os.environ.get('GITHUB_PAT') or os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN') or ''
+        if candidate and ask('  Use the GitHub token already in this LOCAL environment? [y/N]: ').lower() not in ('y','yes'):
+            candidate=''
+        while True:
+            if not candidate:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('error', getpass.GetPassWarning)
+                    try:
+                        candidate=getpass.getpass('  GitHub PAT (hidden; Enter cancels): ')
+                    except getpass.GetPassWarning:
+                        raise RetrieveError('Hidden token entry is unavailable; no echoed fallback is allowed.') from None
+            if not candidate: raise Cancelled()
+            try:
+                user=self.channel.call('auth',path=self.path,token=candidate,repo=s['repo'])
+            except RetrieveError as e:
+                print('       '+str(e).replace(candidate,'[REDACTED]')); candidate=''
+                if ask('  Enter a replacement token? [y/N]: ').lower() in ('y','yes'): continue
+                raise Cancelled()
+            self.token=candidate; self.auth_repo=s['repo']; self.user=user
+            print('       GitHub user '+safe(user['login'])+' verified for '+safe(user['repo'])+'.')
+            print('       '+safe(user['note']))
+            return
+
+    def receipt(self, result, opid):
+        # Local receipt is deliberately non-secret. Worktree files are not copied here.
+        fd,name=tempfile.mkstemp(prefix='sprite-retrieve-'+self.sprite+'-',suffix='.json',dir=self.local_dir)
+        with os.fdopen(fd,'w') as f:
+            json.dump(dict(sprite=self.sprite,operation_id=opid,**result),f,indent=2,ensure_ascii=True); f.write('\n')
+        print('       Recovery receipt: '+safe(name))
+
+    def report_push(self, r, opid):
+        self.receipt(r,opid)
+        print('       Branch: '+safe(r.get('branch',''))+'\n       Commit: '+safe(r.get('commit','')))
+        if r.get('status')=='verified_on_github':
+            print('       VERIFIED: GitHub currently advertises this exact commit on that branch.')
+        else:
+            print('       SAVED ON SPRITE ONLY. GitHub backup has NOT been verified.')
+            if r.get('push_error'): print('       '+safe(r['push_error']))
+            print('       Use Publish saved recovery branch to inspect/retry without creating another commit.')
+        if r.get('source_changed_after_capture'):
+            print('       Source changed after capture. This does NOT back up those later edits.')
+        if r.get('uncommitted_files_not_included'):
+            print('       Uncommitted/staged files were NOT included in this current-branch push.')
+
+    def snapshot(self):
+        s=self.show_status(); self.authenticate(s)
+        opid=secrets.token_hex(16)
+        branch='sprite-recovery/'+self.sprite+'-'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())+'-'+opid[:8]
+        print('\n=== save current work to a NEW recovery branch')
+        print('       Target: '+safe(s['repo'])+' / '+branch)
+        print('       Includes current tracked files/deletions and non-ignored untracked files.')
+        print('       Preserves the original branch, HEAD and staging index. Does not pull, reset, checkout, merge, or stop Codex.')
+        print('       Staged-only versions overwritten in the working tree are not a separate backup. Ignored files require ZIP.')
+        print('       This is a recovery commit, not an update to main. Commit hooks/signing are bypassed for this snapshot only.')
+        print('       Finish writers first. Submodules, LFS, sparse checkouts and unfinished Git operations need manual handling.')
+        if ask('  Type BACKUP to confirm this GitHub write, or Enter to cancel: ')!='BACKUP': return
+        message=ask('  Commit message [Recover Sprite workspace]: ') or 'Recover Sprite workspace'
+        name=s['identity_name'] or (self.user['login'] if self.user else '')
+        email=s['identity_email'] or (self.user['id']+'+'+self.user['login']+'@users.noreply.github.com')
+        print('       Commit identity: '+safe(name)+' <'+safe(email)+'>')
+        if ask('  Use this identity? [Y/n]: ').lower() in ('n','no'):
+            name=ask('  Author name: '); email=ask('  Author email: ')
+        print('       Request ID: '+opid+'; intended branch: '+branch,flush=True)
+        r=self.channel.call('snapshot',mutation=True,path=self.path,token=self.token,repo=self.auth_repo,
+                            expected=s['fingerprint'],opid=opid,branch=branch,message=message,author_name=name,author_email=email)
+        self.report_push(r,opid)
+        print('       The normal branch was not moved. Merge/review the recovery branch separately.')
+
+    def publish_saved(self):
+        refs=self.channel.call('refs',path=self.path)
+        if not refs: print('       No saved sprite-recovery/ branches were found.'); return
+        for i,r in enumerate(refs,1): print('    %d) %s  %s'%(i,safe(r['branch']),r['commit']))
+        c=ask('  Saved branch number; Enter cancels: ')
+        if not c.isdecimal() or not 1<=int(c)<=len(refs): return
+        r=refs[int(c)-1]; self.authenticate()
+        if ask('  Verify/publish this exact saved commit to GitHub? Type PUSH: ')!='PUSH': return
+        value=self.channel.call('publish',mutation=True,path=self.path,token=self.token,repo=self.auth_repo,**r)
+        self.report_push(value,secrets.token_hex(16))
+
+    def push_current(self):
+        s=self.show_status(); self.authenticate(s)
+        print('       Push EXISTING HEAD to '+safe(s['repo'])+' branch '+safe(s['branch'] or '(detached)'))
+        print('       This does NOT commit staged/uncommitted files. No force-push or automatic pull/merge.')
+        if ask('  Type PUSH to confirm, or Enter to cancel: ')!='PUSH': return
+        r=self.channel.call('push_current',mutation=True,path=self.path,token=self.token,repo=self.auth_repo,expected=s['fingerprint'])
+        self.report_push(r,secrets.token_hex(16))
+
+    def zip(self):
+        folder=self.folder_picker()
+        path,checks=folder.choose(self.local_dir,self.path or '~')
+        key='SPRITE_DOWNLOAD_TRANSPORT'; old=os.environ.get(key); os.environ[key]=self.channel.mode
+        try:
+            self.o.download(self.sprite,path,self.local_dir,self.picker.org[1] if self.picker.org else '',self.pinned,checks=checks)
+        finally:
+            if old is None: os.environ.pop(key,None)
+            else: os.environ[key]=old
+        print('       ZIP is a file export, not a GitHub sync. Symlinks/special files are skipped; linked-worktree external Git metadata may be outside the chosen folder.')
+
+    def git_console(self):
+        print('\n=== advanced Git command console (independent NON-TTY exec)')
+        print('       Each command runs ONCE in '+safe(self.path)+'. No Bash syntax, cd, pager, or interactive editor.')
+        print('       Use full commands such as git status or git commit -m "Recovery". Q returns to the menu.')
+        print('       Commands can change/delete files and refs AS TYPED. Nothing is automatically undone or retried.')
+        print('       Do not paste tokens. Origins on github.com use temporary credentials, not saved global configuration.')
+        while True:
+            line=ask('  git> ')
+            if line.lower() in ('','q','quit'): return
+            try: args=shlex.split(line)
+            except ValueError: print('       Unbalanced quotes.'); continue
+            if args and args[0]=='git': args=args[1:]
+            if not args or args[0] not in {'status','diff','log','show','rev-parse','ls-files','ls-remote','reflog','fetch','add','commit','push','pull','merge','rebase','cherry-pick','branch','restore','reset','rm','mv','stash'}:
+                print('       Unsupported command. Use a normal Git subcommand, not a shell/global Git option.'); continue
+            if any(x in args for x in (';', '&&', '|', '>', '<')):
+                print('       Shell operators are not supported.'); continue
+            if args[0] not in {'status','diff','log','show','rev-parse','ls-files','ls-remote','reflog'}: self.authenticate()
+            print('       RUN ON '+safe(self.sprite)+': '+safe(shlex.join(['git',*args])))
+            if ask('  Execute this exact command? Type RUN: ')!='RUN': continue
+            try:
+                r=self.channel.call('command',mutation=True,path=self.path,token=self.token,repo=self.auth_repo,args=args,confirmed=True)
+                print(safe(r['stdout'])); print(safe(r['stderr'])); print('       Git exit: '+str(r['exit']))
+            except RetrieveError as e:
+                print('       '+str(e)); print('       Refresh status before retrying a write.')
+
+    def menu(self):
+        while True:
+            print('\n=== retrieve / Git recovery — '+self.sprite)
+            print('       Repository: '+safe(self.path)+'\n       Local downloads/receipts: '+safe(self.local_dir))
+            print('    1) Inspect Git status and changed filenames')
+            print('    2) Save current work to a NEW recovery branch on GitHub')
+            print('    3) Publish / verify a saved recovery branch')
+            print('    4) Push current branch\'s EXISTING commits (does not commit files)')
+            print('    5) Download a folder as a ZIP (no GitHub token needed)')
+            print('    6) Advanced Git command console (independent non-TTY commands)')
+            print('    7) Check command access, disk space and process names')
+            print('    8) Select another existing repository')
+            print('    9) Choose another Sprite')
+            print('    0) Quit (leave Sprite and Codex untouched)')
+            c=ask('  Recovery action: ')
+            if c in ('','0','q'): return
+            try:
+                if c=='1': self.show_status()
+                elif c=='2': self.snapshot()
+                elif c=='3': self.publish_saved()
+                elif c=='4': self.push_current()
+                elif c=='5': self.zip()
+                elif c=='6': self.git_console()
+                elif c=='7':
+                    self.channel.probe(); d=self.channel.call('diagnostics')
+                    print('       Free bytes: '+str(d['free_bytes'])+'\n'+safe(d['processes'])+'\n       '+safe(d['note']))
+                elif c=='8': self.select_repository(self.path)
+                elif c=='9': return 'another'
+                else: print('       Select a displayed number.')
+            except (RetrieveError,self.o.DownloadError) as e: print('error: '+str(e))
+            except (Cancelled,self.o.FolderCancelled): print('       Action cancelled; earlier completed work remains.')
+
+
+def main():
+    if sys.version_info<(3,9): raise RetrieveError('Local Python 3.9+ is required.')
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise RetrieveError('Retrieve mode requires an interactive local terminal for review/confirmation; no remote action was started.')
+    sources,local_dir,start=sys.argv[1:4]
+    a=SimpleNamespace(**runpy.run_path(str(Path(sources)/'picker.py')))
+    o=SimpleNamespace(**runpy.run_path(str(Path(sources)/'output.py')))
+    print('\n=== Retrieve repository without attaching to Codex')
+    print('       No provider/Fly keys, agent setup/update, restart, kill, checkout or repository replacement.')
+    print('       Cold/hung TTY is bypassed; an unreachable Sprite/exec service cannot be bypassed.')
+    print('       GitHub writes need your PAT and explicit confirmation. Downloads need only your Sprite login.')
+    try:
+        with tempfile.TemporaryDirectory(prefix='sprite-retrieve-context-') as context:
+            picker=a.Picker(context,selection_only=True)
+            r=Retrieve(picker,o,context,local_dir)
+            requested=os.environ.get('SPRITE_NAME','')
+            while True:
+                r.pin(picker.choose_sprite(requested)); requested=''
+                if not r.wait_for_access(): continue
+                r.select_repository(start or '~'); start=''
+                if r.menu()!='another': return 0
+    except a.AttachError as e:
+        raise RetrieveError(str(e)) from None
+    except (a.Cancelled,Cancelled,o.FolderCancelled):
+        print('       Recovery closed. No Sprite/agent was stopped; completed writes remain.')
+        return 0
+
+if __name__=='__main__':
+    try: raise SystemExit(main())
+    except KeyboardInterrupt:
+        print('\n       Recovery interrupted. Do not assume a pending Git write was rolled back; inspect status before retrying.',file=sys.stderr)
+        raise SystemExit(130)
+    except (RetrieveError,OSError) as e:
+        print('error: '+safe(e),file=sys.stderr)
+        raise SystemExit(1)
+RETRIEVE_PY
+}
+
+run_retrieve() (
+  command -v python3 >/dev/null 2>&1 || { echo "error: local python3 is required" >&2; exit 127; }
+  local_sources=$(mktemp -d)
+  trap 'rm -rf -- "$local_sources"' EXIT
+  attach_only_python >"$local_sources/picker.py"
+  output_download_python >"$local_sources/output.py"
+  # Source is secret-free; credentials enter only the interactive helper in memory.
+  retrieve_python >"$local_sources/retrieve.py"
+  python3 "$local_sources/retrieve.py" "$local_sources" "$OUTPUT_HOST_DIR" "$FILE_WORKDIR"
+)
+
+if [[ $RUN_MODE == retrieve ]]; then
+  if [[ -n $ATTACH_SESSION_ID ]] || (( _OUTPUT_DIR_SELECTED == 1 || _JSON_OUTPUT_SELECTED == 1 )); then
+    echo "error: --retrieve does not accept --session-id, --output-dir, or --json-output" >&2; exit 2
+  fi
+  if run_retrieve; then exit 0; else exit $?; fi
+fi
+
 if (( _FILE_WORKDIR_SELECTED == 1 )) && [[ $RUN_MODE != files ]]; then
-  echo "error: --workdir requires --files or --shell (or opening menu choice 5)" >&2; exit 2
+  echo "error: --workdir requires --files/--shell or --retrieve (or opening menu choice 5/6)" >&2; exit 2
 fi
 if [[ $RUN_MODE == files ]]; then
   if (( _OUTPUT_DIR_SELECTED == 1 )); then
@@ -4280,7 +4788,12 @@ _control_exec_attempt() {
   rm -f "$raw_out" "$raw_err" 2>/dev/null || true
   if [[ $remote_rc =~ ^[0-9]+$ ]]; then
     # Remove only our sentinel line; preserve the command's actual stdout.
-    sed -i '/^__SPRITE_CODEX_REMOTE_RC__=[0-9][0-9]*$/d' "$out_file" 2>/dev/null || true
+    local clean_out
+    clean_out=$(mktemp)
+    if sed '/^__SPRITE_CODEX_REMOTE_RC__=[0-9][0-9]*$/d' "$out_file" >"$clean_out"; then
+      cat "$clean_out" >"$out_file"
+    fi
+    rm -f -- "$clean_out"
     CONTROL_ATTEMPT_REMOTE_SEEN=1
     CONTROL_ATTEMPT_REMOTE_RC=$remote_rc
     CONTROL_ATTEMPT_CLI_RC=$rc
@@ -4828,8 +5341,26 @@ raise SystemExit(0 if row["passed"] else (130 if category == "interrupted" else 
 ' "$kind" "$nonce" "$name" "$cli_rc"
 }
 
+# Disable echo before publishing the prompt, not only when read starts.  A fast
+# paste or automated terminal may send input as soon as the prompt is visible.
+# The subshell owns restoration traps; it does not alter the caller's traps.
+read_hidden_credential() (
+  local prompt=$1 value terminal_state
+  [[ -t 0 ]] || return 1
+  terminal_state=$(stty -g) || return 1
+  stty -echo || return 1
+  trap 'stty "$terminal_state" 2>/dev/null || true' EXIT
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
+  trap 'exit 143' TERM
+  printf '%s' "$prompt" >&2
+  if ! IFS= read -r value; then printf '\n' >&2; return 1; fi
+  printf '\n' >&2
+  printf '%s' "$value"
+)
+
 prompt_validated_secret() {
-  local name=$1 label=$2 kind=$3 fingerprint choice rc
+  local name=$1 label=$2 kind=$3 fingerprint choice rc entered_secret
   fingerprint=$(credential_fingerprint "$name" "$kind") || die "cannot fingerprint credential context"
   if [[ -n ${!name:-} && ${TOKEN_VALIDATED[$name]:-} == "$fingerprint" ]]; then
     note "$name already verified for this Sprite and target in this run"
@@ -4838,9 +5369,11 @@ prompt_validated_secret() {
   while :; do
     if [[ -z ${!name:-} ]]; then
       [[ -t 0 ]] || die "$name is required; no interactive terminal is available"
-      printf '  %s, hidden (Enter aborts): ' "$label"
-      if ! IFS= read -rs "$name"; then printf '\n'; die "credential entry cancelled; no new agent launched"; fi
-      printf '\n'
+      if ! entered_secret=$(read_hidden_credential "  $label, hidden (Enter aborts): "); then
+        die "credential entry cancelled; no new agent launched"
+      fi
+      printf -v "$name" '%s' "$entered_secret"
+      unset entered_secret
       [[ -n ${!name:-} ]] || die "credential entry cancelled; no new agent launched"
     fi
     note "validating $name on Sprite $SPRITE_NAME"
@@ -7985,6 +8518,7 @@ attach_native_session_resilient() {
       if session_id_is_active "$sid"; then note "detached from native Sprite TTY session $sid; $AGENT_LABEL remains running"; note "rerun this script or use 'sprite sessions attach $sid' to reconnect"; fi
       return 0
     fi
+    if (( rc == 137 )); then warn "attachment exited 137; use opening menu 6 / --retrieve for independent repository recovery"; return "$rc"; fi
     (( rc == 130 || rc == 129 || rc == 131 )) && return "$rc"
     (( TTY_AUTO_REATTACH == 1 )) || return "$rc"
     (( elapsed >= 30 )) && failures=0; failures=$((failures+1))
