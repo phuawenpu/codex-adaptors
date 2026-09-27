@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
+# v59: diagnose global Fly YAML parse errors before blaming a token.
+# Shows config path/source, bounded metadata and forbidden-character counts,
+# never config contents. Compares the same token/app with temporary clean
+# FLY_CONFIG_DIR; comparison success alone NEVER satisfies the launch gate.
+# On confirmed corrupt owned files AND a successful isolated app check, option 5
+# offers a guarded backup/reset requiring RESET FLY CONFIG. No automatic reset.
+# Resets only config.yml, preserving its original bytes in a private 0600 backup;
+# saved Fly login/settings are no longer active. Existing agent processes, binary,
+# repository fly.toml, Git state and other .fly files are not rewritten by repair.
+# Pause concurrent Fly writers before repair. Recheck normally after repair;
+# interrupted writes have unknown outcome and are never replayed automatically.
+# --check-fly works independently of normal setup. Other modes are unchanged.
+# Sources (checked 2026-09-27):
+# https://raw.githubusercontent.com/superfly/flyctl/master/flyctl/flyctl.go
+# https://raw.githubusercontent.com/superfly/flyctl/master/helpers/config.go
+# https://raw.githubusercontent.com/superfly/flyctl/master/internal/config/config.go
+# https://raw.githubusercontent.com/superfly/flyctl/master/internal/command/command.go
+#
 # v58: Fly validation diagnostics and target correction. The status check remains
 # mandatory; a nonzero exit is NOT treated as proof of an invalid token.
 # --check-fly selects a Sprite/app and runs only that check, without GitHub/model
@@ -55,7 +73,7 @@
 # reject a stale session. No restart, kill, key recovery or new launch is automatic.
 # API/SDK reference: https://sprites.dev/api/sprites/exec
 # https://github.com/superfly/sprites-go/blob/main/session.go
-# sprite-codex-v58.sh — updated 2026-09-26
+# sprite-codex-v59.sh — updated 2026-09-26
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -177,17 +195,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v58.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v58.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v58.sh --attach-only --session-id 1847
-#   bash sprite-codex-v58.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v58.sh --download-output
-#   bash sprite-codex-v58.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v58.sh --show-models          # no API calls
-#   bash sprite-codex-v58.sh --test-models          # host API tests only
-#   bash sprite-codex-v58.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v58.sh --test-models-before-run
-#   bash sprite-codex-v58.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v59.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v59.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v59.sh --attach-only --session-id 1847
+#   bash sprite-codex-v59.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v59.sh --download-output
+#   bash sprite-codex-v59.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v59.sh --show-models          # no API calls
+#   bash sprite-codex-v59.sh --test-models          # host API tests only
+#   bash sprite-codex-v59.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v59.sh --test-models-before-run
+#   bash sprite-codex-v59.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -266,7 +284,7 @@ umask 077
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v58.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v59.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
   (no option)               Attach / Setup / Quit / Download / Files / Retrieve menu.
   --attach-only             Select a Sprite and attach to an existing live TTY.
@@ -433,6 +451,13 @@ GitHub authentication + repository/write-service access, Fly app status, and a
 completion from each selected/experiment provider. Failed checks offer hidden
 replacement, retry, or abort; noninteractive failures stop before agent launch.
 TOKEN_CHECK_TIMEOUT=180 (1..900) bounds each request; checks cannot be skipped.
+Fly YAML startup errors show the expected remote global config path, metadata and
+forbidden-character counts (never file contents). A temporary clean-config status
+comparison uses the same token/app; passing it does not bypass the normal gate.
+Only a confirmed corrupt owned config with a successful clean comparison permits
+menu option 5: back up/reset config.yml after typing RESET FLY CONFIG. Pause other
+Fly writers first. Old saved login/settings become inactive; the backup is secret.
+No automatic reset or interrupted-write replay. Recheck normal app access afterward.
 MODEL_TEST_MODE=never disables only the optional full suite, NOT token validation.
 Fly accepts FLY_API_TOKEN or FLY_ACCESS_TOKEN; successful validation sets both.
 Live-session reattachment preserves the existing process and its credentials.
@@ -2064,7 +2089,7 @@ run_attach_only() {
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v58.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v59.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
 import base64
@@ -3769,7 +3794,7 @@ run_file_access() (
 
 retrieve_python() {
   cat <<'RETRIEVE_PY'
-"""Local interactive retrieve mode. Embedded into sprite-codex-v58.sh."""
+"""Local interactive retrieve mode. Embedded into sprite-codex-v59.sh."""
 import contextlib
 import getpass
 import hashlib
@@ -5520,8 +5545,16 @@ credential_fingerprint() {
 }
 
 validate_token_once() {
-  local name=$1 kind=$2 nonce packed output cli_rc=0
+  local name=$1 kind=$2 operation=${3:-check} repair_ticket=${4:-} nonce packed output cli_rc=0 parsed_rc=1 result_file
+  local SPRITE_FLY_CONFIG_ACTION=$operation SPRITE_FLY_CONFIG_RECEIPT=$repair_ticket
+  TOKEN_LAST_FLY_REPAIR=""
+  TOKEN_LAST_CATEGORY=""
+  [[ $operation == check || ( $operation == repair && $kind == fly && -n $repair_ticket ) ]] || return 2
   local -a names=("$name" TOKEN_CHECK_TIMEOUT)
+  if [[ $kind == fly ]]; then
+    names+=(SPRITE_FLY_CONFIG_ACTION)
+    [[ $operation != repair ]] || names+=(SPRITE_FLY_CONFIG_RECEIPT)
+  fi
   case "$kind" in
     github) names+=(GITHUB_REPOSITORY) ;;
     fly) names+=(FLY_APP) ;;
@@ -5543,9 +5576,11 @@ validate_token_once() {
   (( cli_rc != 130 && cli_rc != 143 )) || return 130
   # Never print raw Sprite CLI errors: they could echo the --env argument.
   # Require a result for this exact request, even when the CLI claims exit 0.
-  printf '%s' "$output" | python3 -c '
+  result_file=$(mktemp) || return 1
+  cleanup_files+=("$result_file")
+  if printf '%s' "$output" | python3 -c '
 import json, re, sys
-kind, nonce, name, cli_rc = sys.argv[1:]
+kind, nonce, name, cli_rc, operation, result_file = sys.argv[1:]
 try:
     rows = [json.loads(line.split("=",1)[1]) for line in sys.stdin.read().splitlines()
             if line.startswith("SPRITE_TOKEN_RESULT=")]
@@ -5561,8 +5596,17 @@ try:
         raise ValueError()
     if row["passed"] != (category == "ok"):
         raise ValueError()
+    if category == "config-repaired" and (operation != "repair" or kind != "fly"):
+        raise ValueError()
+    if operation == "repair" and row["passed"]:
+        raise ValueError()
+    repair_ticket = row.get("fly_config_repair", "")
+    if (not isinstance(repair_ticket, str) or (repair_ticket and
+        (kind != "fly" or category != "cli-config-parse" or operation != "check" or
+         not re.fullmatch(r"[a-f0-9]{2,16384}", repair_ticket)))):
+        raise ValueError()
     diagnostics = row.get("diagnostics", [])
-    if (not isinstance(diagnostics, list) or len(diagnostics) > 6 or
+    if (not isinstance(diagnostics, list) or len(diagnostics) > 16 or
         any(not isinstance(d, str) or not d.isascii() or len(d) > 600 or
             not all(c.isprintable() for c in d) for d in diagnostics) or
         (diagnostics and kind != "fly")):
@@ -5570,11 +5614,26 @@ try:
 except (ValueError, TypeError, KeyError):
     print("       FAIL %s: Sprite did not confirm this validation request (transport rc=%s). No token was accepted." % (name, cli_rc))
     raise SystemExit(1)
-print("       %s %s [%s]: %s" % ("PASS" if row["passed"] else "FAIL", name, category, detail))
+with open(result_file, "w", encoding="utf-8") as f:
+    json.dump({"category": category, "ticket": repair_ticket}, f)
+label = "DONE" if category == "config-repaired" else ("PASS" if row["passed"] else "FAIL")
+print("       %s %s [%s]: %s" % (label, name, category, detail))
 for diagnostic in diagnostics:
     print("       Fly diagnostic: " + diagnostic)
-raise SystemExit(0 if row["passed"] else (130 if category == "interrupted" else 1))
-' "$kind" "$nonce" "$name" "$cli_rc"
+raise SystemExit(0 if row["passed"] or category == "config-repaired" else (130 if category == "interrupted" else 1))
+' "$kind" "$nonce" "$name" "$cli_rc" "$operation" "$result_file"; then
+    parsed_rc=0
+  else
+    parsed_rc=$?
+  fi
+  if [[ -s $result_file ]]; then
+    local -a result_values=()
+    mapfile -t result_values < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["category"]); print(d["ticket"])' "$result_file")
+    TOKEN_LAST_CATEGORY=${result_values[0]:-}
+    TOKEN_LAST_FLY_REPAIR=${result_values[1]:-}
+  fi
+  rm -f -- "$result_file"
+  return "$parsed_rc"
 }
 
 # Disable echo before publishing the prompt, not only when read starts.  A fast
@@ -5596,7 +5655,7 @@ read_hidden_credential() (
 )
 
 prompt_validated_secret() {
-  local name=$1 label=$2 kind=$3 fingerprint choice rc entered_secret target_app
+  local name=$1 label=$2 kind=$3 fingerprint choice rc entered_secret target_app repair_ticket confirmation
   fingerprint=$(credential_fingerprint "$name" "$kind") || die "cannot fingerprint credential context"
   if [[ -n ${!name:-} && ${TOKEN_VALIDATED[$name]:-} == "$fingerprint" ]]; then
     note "$name already verified for this Sprite and target in this run"
@@ -5633,10 +5692,15 @@ prompt_validated_secret() {
     (( rc != 130 )) || die "credential validation interrupted; no new agent launched"
     [[ -t 0 ]] || die "$name did not pass validation; no new agent launched (non-interactive run)"
     while :; do
-      printf '\n  %s did not pass validation.\n' "$name"
+      if [[ $kind == fly && ${TOKEN_LAST_CATEGORY:-} == cli-config-parse ]]; then
+        printf '\n  Fly configuration must be addressed; this is not a rejected-token result.\n'
+      else
+        printf '\n  %s did not pass validation.\n' "$name"
+      fi
       if [[ $kind == fly ]]; then
         printf '    1) Enter a replacement token\n    2) Retry the same token [default]\n    3) Abort without launching\n    4) Change the target Fly app (keep this token)\n'
-        printf '  Select [1-4]: '
+        printf '    5) Back up/reset diagnosed corrupt Fly config (confirmation required)\n'
+        printf '  Select [1-5]: '
       else
         printf '    1) Enter a replacement token [default]\n    2) Retry the same token\n    3) Abort without launching\n'
         printf '  Select [1-3]: '
@@ -5659,6 +5723,31 @@ prompt_validated_secret() {
           label="Fly.io token for $FLY_APP"
           note "retrying app=$FLY_APP with the same hidden token; nothing was launched"
           break ;;
+        5|repair)
+          if [[ $kind != fly || -z ${TOKEN_LAST_FLY_REPAIR:-} ]]; then
+            warn "no confirmed corrupt-config repair is available; rerun the check and inspect its diagnostics"
+            continue
+          fi
+          repair_ticket=$TOKEN_LAST_FLY_REPAIR
+          warn "this will back up and reset ONLY the diagnosed global Fly config.yml on Sprite $SPRITE_NAME"
+          note "saved Fly login/settings will be replaced with empty-token defaults; pause other Fly commands first"
+          note "the protected backup can contain old credentials; never upload or paste it"
+          note "Codex, Git files, repository fly.toml and the Fly executable will not be replaced"
+          printf '  Type RESET FLY CONFIG to confirm, or Enter to cancel: '
+          IFS= read -r confirmation || die "Fly config repair cancelled; nothing launched"
+          if [[ $confirmation != 'RESET FLY CONFIG' ]]; then
+            note "repair cancelled; no config change requested"
+            continue
+          fi
+          if validate_token_once "$name" "$kind" repair "$repair_ticket"; then
+            note "retrying the NORMAL app-access check with the same hidden token; repair alone does not validate it"
+            break
+          else
+            rc=$?
+            (( rc != 130 )) || die "repair interrupted; outcome may be unknown; inspect with --check-fly before retrying"
+            warn "repair was not confirmed; it will NOT be replayed automatically"
+            note "choose 2 to inspect/recheck the current state before any further repair"
+          fi ;;
         *) warn "invalid selection" ;;
       esac
     done
@@ -8918,6 +9007,7 @@ All three providers run independently. A successful HTTP status alone is not PAS
 import contextlib
 import datetime
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -9233,6 +9323,7 @@ class TokenFailure(Exception):
         super().__init__(detail)
         self.category = category
         self.diagnostics = diagnostics or []
+        self.fly_config_repair = ""
 
 
 def token_http_failure(status, headers=None):
@@ -9416,6 +9507,223 @@ def fly_failure_hint(rc, text):
     return 'access-or-service', 'Fly app access was not confirmed; inspect the diagnostic, target app and CLI before replacing the token.'
 
 
+# v59 global config diagnosis: content never leaves the Sprite.
+FLY_EMPTY_CONFIG = (b'# Recreated after explicit sprite-codex confirmation. No saved tokens.\n'
+                    b'access_token: ""\nmetrics_token: ""\n'
+                    b'send_metrics: false\nauto_update: false\nsynthetics_agent: false\n')
+
+
+def fly_global_config_error(text):
+    lower = text.lower()
+    return ('yaml:' in lower and any(word in lower for word in
+            ('error loading config', 'while parsing config', 'control characters are not allowed',
+             'invalid leading utf-8', 'invalid trailing utf-8')))
+
+
+def fly_config_inspect(child_env, workdir):
+    """Bounded metadata/character scan, NOT a full YAML parser. No values returned."""
+    import stat
+    raw_dir = child_env.get('FLY_CONFIG_DIR') if 'FLY_CONFIG_DIR' in child_env else os.path.join(child_env.get('HOME', os.path.expanduser('~')), '.fly')
+    info = {'source': 'FLY_CONFIG_DIR' if 'FLY_CONFIG_DIR' in child_env else 'HOME/.fly',
+            'path': '', 'issue': '', 'eligible': False}
+    if not raw_dir or not os.path.isabs(raw_dir) or any(ord(c) < 32 or ord(c) == 127 for c in raw_dir):
+        info['issue'] = 'Config directory is empty, relative or contains control characters; automatic repair is disabled.'
+        return info
+    directory = os.path.normpath(raw_dir)
+    path = os.path.join(directory, 'config.yml')
+    info['path'] = path
+    if len(path) > 2048 or os.path.realpath(path) != path:
+        info['issue'] = 'Symlinked or overlong config path; contents not inspected and automatic repair disabled.'
+        return info
+    fd = None
+    try:
+        parent = os.stat(directory, follow_symlinks=False)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            info['issue'] = 'Config is not a regular file; contents not inspected.'
+            return info
+        info.update(size=before.st_size, mode=stat.S_IMODE(before.st_mode), uid=before.st_uid)
+        if before.st_size > 1024 * 1024:
+            info['issue'] = 'Config exceeds the 1 MiB inspection limit; automatic repair disabled.'
+            return info
+        data = bytearray()
+        while len(data) <= 1024 * 1024:
+            chunk = os.read(fd, min(65536, 1024 * 1024 + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        after = os.fstat(fd)
+        if len(data) > 1024 * 1024 or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            info['issue'] = 'Config changed during inspection; retry before any repair.'
+            return info
+        data = bytes(data)
+        encoding = 'utf-16' if data.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
+        try:
+            decoded = data.decode(encoding)
+        except UnicodeError:
+            info.update(invalid_encoding=True, forbidden=0, examples=[])
+        else:
+            def allowed(n):
+                return n in (9, 10, 13, 0x85) or 0x20 <= n <= 0x7e or 0xa0 <= n <= 0xd7ff or 0xe000 <= n <= 0xfffd or 0x10000 <= n <= 0x10ffff
+            count, examples = 0, []
+            for i, c in enumerate(decoded):
+                if not allowed(ord(c)):
+                    count += 1
+                    if len(examples) < 4:
+                        examples.append((i, ord(c)))
+            info.update(invalid_encoding=False, forbidden=count, examples=examples)
+        info['fingerprint'] = {'sha256': hashlib.sha256(data).hexdigest(), 'dev': before.st_dev,
+                               'ino': before.st_ino, 'size': before.st_size, 'mtime_ns': before.st_mtime_ns,
+                               'ctime_ns': before.st_ctime_ns, 'mode': before.st_mode, 'uid': before.st_uid,
+                               'nlink': before.st_nlink, 'parent_dev': parent.st_dev, 'parent_ino': parent.st_ino}
+        info['eligible'] = bool(info['invalid_encoding'] or info['forbidden']) and before.st_uid == os.geteuid() and before.st_nlink == 1 and parent.st_uid == os.geteuid() and stat.S_ISDIR(parent.st_mode) and directory != '/'
+        return info
+    except FileNotFoundError:
+        info['issue'] = 'Expected config.yml was not found; this path is not proven to be the failing input.'
+    except PermissionError:
+        info['issue'] = 'Config or its directory is not readable by this Sprite user; automatic repair disabled.'
+    except OSError:
+        info['issue'] = 'Config metadata could not be read safely; automatic repair disabled.'
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return info
+
+
+def fly_config_diagnose(fly, child_env, workdir, key, timeout, diagnostics):
+    """A clean config status check is comparison evidence, NEVER a launch pass."""
+    import subprocess
+    clean = lambda value: fly_redacted_text(str(value), child_env, key)
+    info = fly_config_inspect(child_env, workdir)
+    diagnostics = list(diagnostics)
+    diagnostics.append('Stage: global YAML config load. This failure precedes app authentication; token validity is not established by the original command.')
+    if info['path']:
+        diagnostics.append(('Expected global config (%s): ' % info['source']) + clean(info['path'])[:490])
+    if 'size' in info:
+        diagnostics.append('File metadata: %d bytes; mode %03o; owner uid %d. Contents are NOT displayed.' % (info['size'], info['mode'], info['uid']))
+    if info['issue']:
+        diagnostics.append(info['issue'])
+    elif info.get('invalid_encoding'):
+        diagnostics.append('File scan: invalid UTF-8/UTF-16 text encoding; file content and offending byte values withheld.')
+    elif info.get('forbidden'):
+        diagnostics.append('File scan: %d forbidden YAML character(s); %s. Offsets are character offsets, not file contents.' % (info['forbidden'], ', '.join('U+%04X at offset %d' % (code, offset) for offset, code in info['examples'])))
+    else:
+        diagnostics.append('File scan: no forbidden characters detected. This is not a complete YAML syntax/type validation.')
+    ticket = ''
+    # FLY_CONFIG_DIR changes only for this child. HOME, endpoints, proxies, app,
+    # binary and supplied token remain the same. No saved login is copied.
+    with tempfile.TemporaryDirectory(prefix='sprite-fly-clean-config-') as fresh:
+        path = os.path.join(fresh, 'config.yml')
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(FLY_EMPTY_CONFIG)
+        isolated = child_env.copy()
+        isolated['FLY_CONFIG_DIR'] = fresh
+        try:
+            rc, output, overflow = fly_capture([fly, 'status', '--app', child_env['FLY_APP']], isolated, workdir, min(timeout, 30))
+        except subprocess.TimeoutExpired:
+            diagnostics.append('Clean-config comparison: TIMEOUT; no token verdict and no config changes.')
+        except OSError:
+            diagnostics.append('Clean-config comparison: could not start/complete; no token verdict and no config changes.')
+        else:
+            if rc == 0 and not overflow and not fly_global_config_error(output):
+                diagnostics.append('Clean-config comparison: PASS with the SAME entered token/app/binary. The original global config is still broken; this is NOT a normal-launch pass.')
+                current = fly_config_inspect(child_env, workdir)
+                if info['eligible'] and current.get('fingerprint') == info.get('fingerprint'):
+                    ticket = json.dumps({'version': 1, 'path': info['path'], 'source': info['source'],
+                                         'fingerprint': info['fingerprint']}, sort_keys=True, separators=(',', ':')).encode().hex()
+                    diagnostics.append('Repair available: choose 5, then type RESET FLY CONFIG. Only this diagnosed config.yml is backed up and reset; a normal app-access check is still required.')
+                else:
+                    diagnostics.append('No automatic reset offered: the file is not a stable, owned regular file with confirmed invalid text. Review configuration separately.')
+            elif not overflow and fly_global_config_error(output):
+                diagnostics.append('Clean-config comparison: YAML failure persists. FLY_CONFIG_DIR may be ignored or another input may be involved; do not reset a guessed file.')
+            elif overflow:
+                diagnostics.append('Clean-config comparison: output exceeded the safe cap; excerpt suppressed, no token verdict.')
+            else:
+                category, hint = fly_failure_hint(rc, clean(output))
+                diagnostics.append(('Clean-config comparison: exit %s [%s]. ' % (rc, category)) + hint)
+                text = clean(output)
+                lines = [' '.join(line.split()) for line in text.splitlines() if line.strip()]
+                errors = [line for line in lines if re.search(r'(?i)error|fail|denied|unauthor|not found|invalid|timeout|expired|forbidden', line)]
+                for line in (errors or lines)[-2:]:
+                    diagnostics.append('Clean-config diagnostic: ' + line[:560])
+    failure = TokenFailure('cli-config-parse', 'Fly could not load its global YAML configuration. Replacing the token or changing the app does not repair that file. See the configuration and isolated-test diagnostics.', diagnostics[:16])
+    failure.fly_config_repair = ticket
+    return failure
+
+
+def repair_fly_config(child_env, workdir, key, ticket_hex):
+    """Explicitly authorized, guarded reset. Never a credential-validation pass."""
+    import fcntl
+    import stat
+    clean = lambda value: fly_redacted_text(str(value), child_env, key)
+    if not re.fullmatch(r'[a-f0-9]{2,16384}', ticket_hex or ''):
+        raise TokenFailure('configuration', 'No valid diagnosed config receipt; run the ordinary Fly check again.')
+    try:
+        ticket = json.loads(bytes.fromhex(ticket_hex))
+    except (ValueError, UnicodeError):
+        raise TokenFailure('configuration', 'Invalid config repair receipt; nothing reset.') from None
+    info = fly_config_inspect(child_env, workdir)
+    expected = {'version': 1, 'path': info['path'], 'source': info['source'], 'fingerprint': info.get('fingerprint')}
+    if not info['eligible'] or ticket != expected:
+        raise TokenFailure('config-changed', 'The diagnosed file changed, is unsafe, or is no longer corrupt. Nothing reset; run the ordinary Fly check again.')
+    directory = os.path.dirname(info['path'])
+    backup_dir = ''
+    temporary = ''
+    lockfd = dirfd = None
+    try:
+        dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        parent = os.fstat(dirfd)
+        if (parent.st_dev, parent.st_ino) != (ticket['fingerprint']['parent_dev'], ticket['fingerprint']['parent_ino']):
+            raise TokenFailure('config-changed', 'Config directory changed; nothing reset.')
+        # Serializes our repair attempts only. Pause other Fly writers first;
+        # old flyctl versions do not necessarily use a compatible file lock.
+        lockfd = os.open('.sprite-codex-repair.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dirfd)
+        lockstat = os.fstat(lockfd)
+        if not stat.S_ISREG(lockstat.st_mode) or lockstat.st_uid != os.geteuid() or lockstat.st_nlink != 1:
+            raise TokenFailure('configuration', 'Unsafe repair lock; nothing reset.')
+        try:
+            fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise TokenFailure('config-busy', 'Another config repair is in progress; nothing reset.') from None
+        current = fly_config_inspect(child_env, workdir)
+        if not current['eligible'] or current.get('fingerprint') != ticket['fingerprint']:
+            raise TokenFailure('config-changed', 'Config changed before backup; nothing reset.')
+        original_fd = os.open('config.yml', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd)
+        with os.fdopen(original_fd, 'rb') as f:
+            original = f.read(1024 * 1024 + 1)
+        if hashlib.sha256(original).hexdigest() != ticket['fingerprint']['sha256']:
+            raise TokenFailure('config-changed', 'Config changed while backing up; nothing reset.')
+        backup_dir = tempfile.mkdtemp(prefix='sprite-codex-config-backup-', dir=directory)
+        backup = os.path.join(backup_dir, 'config.yml')
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(original); f.flush(); os.fsync(f.fileno())
+        bfd = os.open(backup_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try: os.fsync(bfd)
+        finally: os.close(bfd)
+        fd, temporary = tempfile.mkstemp(prefix='.sprite-fly-reset-', dir=directory)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(FLY_EMPTY_CONFIG); f.flush(); os.fsync(f.fileno())
+        current = fly_config_inspect(child_env, workdir)
+        if not current['eligible'] or current.get('fingerprint') != ticket['fingerprint']:
+            raise TokenFailure('config-changed', 'Config changed before replacement; original path was not reset. A private backup may have been retained.')
+        os.replace(temporary, 'config.yml', dst_dir_fd=dirfd)
+        temporary = ''
+        os.fsync(dirfd)
+    finally:
+        if temporary:
+            try: os.unlink(temporary)
+            except OSError: pass
+        if lockfd is not None: os.close(lockfd)
+        if dirfd is not None: os.close(dirfd)
+    return ['Private original backup (may contain old credentials; do NOT share): ' + clean(backup)[:490],
+            'Reset only: ' + clean(info['path'])[:530],
+            'Saved Fly login/settings were replaced with empty-token defaults. Binary, project fly.toml, Git files and Codex sessions were not changed.',
+            'No app-access success is inferred from this repair. Retry the normal check with the same token.']
+
+
 def check_fly_token(env, key, timeout):
     import shutil
     import subprocess
@@ -9434,6 +9742,10 @@ def check_fly_token(env, key, timeout):
     for name in ('LOG_LEVEL', 'FLY_LOG_LEVEL', 'FLY_DEBUG', 'DEBUG', 'FLY_VERBOSE', 'FLY_LOG_GQL_ERRORS'):
         child_env.pop(name, None)
     child_env['NO_COLOR'] = '1'
+    child_env.pop('FLY_UPDATE_CHECK', None)
+    child_env['FLY_NO_UPDATE_CHECK'] = '1'
+    child_env['FLY_SEND_METRICS'] = 'false'
+    child_env['FLY_SYNTHETICS_AGENT'] = 'false'
     clean = lambda value: fly_redacted_text(str(value), env, key)
     diagnostics = ['Executable: ' + clean(fly)[:520]]
     overridden = [name for name in ('FLY_API_BASE_URL', 'FLY_FLAPS_BASE_URL', 'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY') if child_env.get(name)]
@@ -9448,6 +9760,10 @@ def check_fly_token(env, key, timeout):
             raise TokenFailure('timeout', 'fly status timed out for the selected app; token validity is not established.', diagnostics) from None
         except OSError:
             raise TokenFailure('cli-configuration', 'The installed Fly executable could not be started; no token was accepted.', diagnostics) from None
+        # Configuration errors may reveal YAML values in the raw excerpt. Do not
+        # relay that excerpt. Report metadata and a clean-config A/B check instead.
+        if not overflow and fly_global_config_error(output):
+            raise fly_config_diagnose(fly, child_env, workdir, key, timeout, diagnostics)
     if rc == 0:
         return 'fly status succeeded for the selected app with both Fly token aliases; deployment/SSH permissions are not proven.'
     if overflow:
@@ -9483,6 +9799,14 @@ def token_main(kind, nonce):
         if not key.isascii() or any(ord(c) < 32 or ord(c) == 127 for c in key) or key != key.strip():
             raise TokenFailure("format", "Credential contains control/non-ASCII characters or leading/trailing whitespace; re-enter it without changing internal spaces/commas.")
         timeout = positive_int(env, "TOKEN_CHECK_TIMEOUT", 180, 1, 900)
+        action = env.get("SPRITE_FLY_CONFIG_ACTION", "check")
+        if action not in ("check", "repair") or (action == "repair" and kind != "fly"):
+            raise TokenFailure("configuration", "Invalid Fly config operation; nothing reset.")
+        if action == "repair":
+            # Same remote config scope as the normal checker. No token is written.
+            with tempfile.TemporaryDirectory(prefix="sprite-fly-check-") as cwd:
+                diagnostics = repair_fly_config(env, cwd, key, env.get("SPRITE_FLY_CONFIG_RECEIPT", ""))
+            raise TokenFailure("config-repaired", "Global config backed up/reset by explicit request. Retry the normal Fly check; app access has not been accepted.", diagnostics)
         if kind == "github":
             detail = check_github_token(env, key, timeout)
         elif kind == "fly":
@@ -9499,6 +9823,8 @@ def token_main(kind, nonce):
         result.update(category=exc.category, detail=str(exc))
         if kind == "fly" and exc.diagnostics:
             result["diagnostics"] = exc.diagnostics
+        if kind == "fly" and exc.fly_config_repair:
+            result["fly_config_repair"] = exc.fly_config_repair
     except KeyboardInterrupt:
         result.update(category="interrupted", detail="Token check interrupted; launch is blocked.")
     except (TimeoutError, socket.timeout, subprocess.TimeoutExpired):
@@ -9513,7 +9839,7 @@ def token_main(kind, nonce):
     except Exception:
         result.update(category="response", detail="Unexpected validation failure; launch is blocked. No credential or upstream body was logged.")
     print("SPRITE_TOKEN_RESULT=" + json.dumps(result, separators=(",", ":")), flush=True)
-    return 0 if result["passed"] else 1
+    return 0 if result["passed"] or result.get("category") == "config-repaired" else 1
 
 
 def main():
@@ -9687,6 +10013,7 @@ run_fly_check_only() {
   step "Fly app-access diagnostic only"
   note "uses your local Sprites login; no GitHub/model keys or agent setup"
   note "does not install/update flyctl or change any existing Codex session"
+  note "global YAML errors trigger a clean-config comparison; config reset is opt-in with explicit confirmation"
   pick_sprite
   local selected_app=${FLY_APP:-} answer=""
   [[ -n $selected_app ]] || selected_app=$(detect_fly_app || true)
