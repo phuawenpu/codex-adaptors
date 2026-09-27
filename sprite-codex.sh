@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+#
+# v55: choose the remote ZIP source using a folder browser, not an assumed ~/output.
+# Opening menu 4 / --download-output: select Sprite, browse existing folders,
+# D to select the current folder, then confirm its absolute path before transfer.
+# H=home, U=parent, /=filesystem root, W=saved workspace/folder shortcuts, T=hidden.
+# No live Codex terminal is needed. --output-dir / SPRITE_OUTPUT_DIR start the
+# interactive browser at an explicit path. Noninteractive downloads require one.
+# Post-session offers use the same browser. File mode input/output roots are unchanged.
+# Archives from this browser use the selected folder name as their top-level member.
+# Browse timeout: SPRITE_FOLDER_TIMEOUT=45 (1..300 seconds per read-only request).
+# The local launch directory remains the ZIP destination; source files are unchanged.
+#
 # v54: session discovery must not equate is_active=false with process exit.
 # Offer listed TTY sessions with false/missing activity metadata; exclude explicit
 # ended statuses and invalid/non-TTY rows. Attachment still rechecks identity.
@@ -8,7 +20,7 @@
 # reject a stale session. No restart, kill, key recovery or new launch is automatic.
 # API/SDK reference: https://sprites.dev/api/sprites/exec
 # https://github.com/superfly/sprites-go/blob/main/session.go
-# sprite-codex-v54.sh — updated 2026-09-26
+# sprite-codex-v55.sh — updated 2026-09-26
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -51,8 +63,8 @@
 #
 # v51 adds optional output ZIP download when an agent terminal returns, including
 # early attach-only, normal reattachment, and newly launched sessions.
-# Default remote folder: $HOME/output (create it from Codex when needed).
-# SPRITE_OUTPUT_DIR or --output-dir selects another absolute folder, e.g. /output.
+# v51 originally defaulted to $HOME/output; v55 replaces that assumption with browsing.
+# v55: SPRITE_OUTPUT_DIR / --output-dir sets the browser start, or an explicit noninteractive source.
 # SPRITE_OUTPUT_DOWNLOAD=ask|always|never (default ask, default answer No).
 # --download-output retrieves files without launching/attaching to an agent.
 # ZIPs are saved in the LOCAL directory where this invocation started, not on
@@ -130,17 +142,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v54.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v54.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v54.sh --attach-only --session-id 1847
-#   bash sprite-codex-v54.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v54.sh --download-output
-#   bash sprite-codex-v54.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v54.sh --show-models          # no API calls
-#   bash sprite-codex-v54.sh --test-models          # host API tests only
-#   bash sprite-codex-v54.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v54.sh --test-models-before-run
-#   bash sprite-codex-v54.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v55.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v55.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v55.sh --attach-only --session-id 1847
+#   bash sprite-codex-v55.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v55.sh --download-output
+#   bash sprite-codex-v55.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v55.sh --show-models          # no API calls
+#   bash sprite-codex-v55.sh --test-models          # host API tests only
+#   bash sprite-codex-v55.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v55.sh --test-models-before-run
+#   bash sprite-codex-v55.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -219,7 +231,7 @@ umask 077
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v54.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v55.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
   (no option)               Attach / Setup / Quit / Download / Shell-files menu.
   --attach-only             Select a Sprite and attach to an existing live TTY.
@@ -227,8 +239,8 @@ Usage: bash sprite-codex-v54.sh [option] [--output-dir PATH] [--json-output PATH
   --files, --shell          Independent shell/file menu alongside live Codex.
   --workdir PATH            With --files: use this existing Sprite directory.
   --bootstrap               Skip the opening menu; run normal setup workflow.
-  --download-output         Select a Sprite and download its output as a local ZIP.
-  --output-dir PATH         Remote folder (default ~/output); /output is supported.
+  --download-output         Select a Sprite, browse folders, download one as a ZIP.
+  --output-dir PATH         Start folder browser here; exact source without a TTY.
   --test-models             Test DeepSeek, MiniMax and Moonshot from this host.
   --test-models-sprite      Test all three from one selected Sprite.
   --test-models-before-run  Require host tests to pass, then run normal bootstrap.
@@ -284,15 +296,28 @@ unchanged: that is a DIFFERENT folder convention from file mode's ./output/.
 The explicit advanced shell is separate and is NOT restricted to input/output;
 it shares files/permissions, not the running Codex process's credentials.
 
-Output download:
-After an actual attachment/agent return, offers a ZIP of ~/output on the Sprite.
-Ask Codex to create that folder and save completed deliverables there. /output at
-filesystem root is different: use --output-dir /output when that folder exists.
-No folder is created/cleared on attachment. The destination is the local working
-DIRECTORY AT SCRIPT START, not the temporary CLI context or the script directory.
+Folder ZIP download (opening menu 4 / --download-output):
+Select a Sprite, then browse existing folders. No ~/output or workspace is assumed.
+Numbers open folders; D selects the current folder and asks for final confirmation.
+U=parent, H=home, /=filesystem root, W=workspace shortcuts, T=hidden, R=refresh,
+N/B=next/previous folder page, Q=cancel. P optionally accepts an exact remote path.
+Names/sizes of some files are shown to identify a folder; contents are not previewed.
+Saved workspace shortcuts are hints, not live-session claims. No Codex is launched.
+The chosen folder name is the ZIP's top-level folder. File mode remains limited
+to <workspace>/output downloads and <workspace>/input uploads as before.
+A missing ~/output is no longer an error unless it is explicitly selected. Browse
+any readable, non-symlinked folder; /, the whole home directory, and virtual system
+folders /proc, /sys, /dev cannot be archived. No directory is created or cleared.
+--output-dir / SPRITE_OUTPUT_DIR set the starting location for interactive browsing.
+Without a terminal, an explicit folder AND SPRITE_NAME are required; no guessing.
+The destination is the local working DIRECTORY AT SCRIPT START, not the script's
+location or temporary CLI context. No live Codex terminal is needed for download.
+SPRITE_FOLDER_TIMEOUT=45 (1..300) bounds each directory/shortcut listing.
 SPRITE_OUTPUT_DOWNLOAD=ask|always|never controls the post-session offer (default ask).
-'ask' skips when noninteractive; --download-output itself explicitly requests a
-transfer and needs SPRITE_NAME when no interactive terminal is available.
+After an actual attachment/agent return, 'ask' offers the same folder browser.
+Declining that offer performs NO remote exec. 'ask' skips noninteractive runs.
+'--download-output' explicitly requests download mode; an interactive run still
+requires confirmation of the selected folder. Errors allow browsing another folder.
 SPRITE_DOWNLOAD_TIMEOUT=3600 (1..86400) bounds scan/compression/transfer.
 SPRITE_OUTPUT_COMPRESSION=1 (0..9, 0 = uncompressed ZIP).
 SPRITE_DOWNLOAD_TRANSPORT=websocket|http-post; default websocket.
@@ -369,7 +394,9 @@ _JSON_OUTPUT_SELECTED=0
 ATTACH_SESSION_ID=""
 OUTPUT_HOST_DIR="$PWD"
 SPRITE_OUTPUT_DIR="${SPRITE_OUTPUT_DIR:-}"
-[[ -n $SPRITE_OUTPUT_DIR ]] || SPRITE_OUTPUT_DIR='~/output'
+OUTPUT_PATH_EXPLICIT=0
+[[ -z $SPRITE_OUTPUT_DIR ]] || OUTPUT_PATH_EXPLICIT=1
+[[ -n $SPRITE_OUTPUT_DIR ]] || SPRITE_OUTPUT_DIR='~/output' 
 SPRITE_OUTPUT_DOWNLOAD="${SPRITE_OUTPUT_DOWNLOAD:-ask}"
 OUTPUT_PINNED_CONTEXT=""
 _OUTPUT_DIR_SELECTED=0
@@ -399,7 +426,7 @@ while (($#)); do
       [[ $# -ge 2 && -n $2 && $2 != --* && $_OUTPUT_DIR_SELECTED == 0 ]] || {
         echo "error: --output-dir requires one remote folder path" >&2; exit 2;
       }
-      SPRITE_OUTPUT_DIR=$2; _OUTPUT_DIR_SELECTED=1; shift 2 ;;
+      SPRITE_OUTPUT_DIR=$2; _OUTPUT_DIR_SELECTED=1; OUTPUT_PATH_EXPLICIT=1; shift 2 ;;
     --workdir)
       [[ $# -ge 2 && -n $2 && $2 != --* && $_FILE_WORKDIR_SELECTED == 0 ]] || {
         echo "error: --workdir requires one existing Sprite directory" >&2; exit 2;
@@ -428,7 +455,7 @@ if [[ $RUN_MODE == bootstrap && $_MODE_SELECTED == 0 && $_JSON_OUTPUT_SELECTED =
     printf '    1) Attach to an existing Sprite terminal session [default]\n'
     printf '    2) Normal setup / launch or resume a saved conversation\n'
     printf '    3) Quit\n'
-    printf '    4) Download output folder as a ZIP (no agent attach/launch)\n'
+    printf '    4) Choose a Sprite folder and download it as a ZIP (no agent launch)\n'
     printf '    5) File picker alongside Codex (output downloads / input uploads)\n'
     printf '  Select [1-5]: '
     if ! IFS= read -r _startup_choice; then printf '\n'; exit 0; fi
@@ -592,10 +619,10 @@ def zip_info(name, st, directory=False, level=1):
     return info
 
 
-def write_tree(archive, fd, initial, level, prefix=""):
+def write_tree(archive, fd, initial, level, prefix="", archive_root="output"):
     if signature(os.fstat(fd)) != initial[prefix][1]:
         raise OutputError("changed")
-    archive.writestr(zip_info("output/" + prefix, os.fstat(fd), True, level), b"")
+    archive.writestr(zip_info(archive_root + "/" + prefix, os.fstat(fd), True, level), b"")
     with os.scandir(fd) as entries:
         names = sorted(entry.name for entry in entries)
     for name in names:
@@ -607,7 +634,7 @@ def write_tree(archive, fd, initial, level, prefix=""):
                 raise OutputError("changed")
             child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             try:
-                write_tree(archive, child, initial, level, key)
+                write_tree(archive, child, initial, level, key, archive_root)
             finally:
                 os.close(child)
         elif stat.S_ISREG(st.st_mode):
@@ -619,7 +646,7 @@ def write_tree(archive, fd, initial, level, prefix=""):
                 if not stat.S_ISREG(before.st_mode) or signature(before) != signature(st):
                     raise OutputError("changed")
                 # ZIP64 is enabled before writing the header, including >4 GiB files.
-                with archive.open(zip_info("output/" + rel, before, level=level), "w", force_zip64=True) as target:
+                with archive.open(zip_info(archive_root + "/" + rel, before, level=level), "w", force_zip64=True) as target:
                     remaining = before.st_size
                     while remaining:
                         data = source.read(min(CHUNK, remaining))
@@ -636,7 +663,18 @@ def write_tree(archive, fd, initial, level, prefix=""):
 def validate_selection(path, root, checks):
     if checks is None:
         return
-    if not isinstance(checks, dict) or not isinstance(checks.get("scope"), dict):
+    if not isinstance(checks, dict):
+        raise OutputError("invalid_request")
+    if checks.get("kind") == "directory":
+        absolute = os.path.normpath(os.path.expanduser(path))
+        if path.startswith("$HOME/"):
+            absolute = os.path.normpath(os.path.join(os.path.expanduser("~"), path[6:]))
+        if any(absolute == p or absolute.startswith(p + "/") for p in ("/proc", "/sys", "/dev")):
+            raise OutputError("unsafe_path")
+        if checks.get("expected") is not None and list(signature(os.fstat(root))) != checks["expected"]:
+            raise OutputError("changed")
+        return
+    if not isinstance(checks.get("scope"), dict):
         raise OutputError("invalid_request")
     scope = checks["scope"]
     workspace = scope.get("workspace", "")
@@ -664,6 +702,11 @@ def validate_selection(path, root, checks):
 def stream_output(path, nonce, level, checks=None):
     if not re.fullmatch(r"[0-9a-f]{32}", nonce) or not 0 <= level <= 9:
         raise OutputError("invalid_request")
+    archive_root = checks.get("archive_root", "output") if isinstance(checks, dict) else "output"
+    if (not isinstance(archive_root, str) or not archive_root or archive_root in (".", "..")
+            or any(c in archive_root for c in ("/", "\\", ":"))
+            or any(ord(c) < 32 or ord(c) == 127 for c in archive_root)):
+        raise OutputError("unsafe_name")
     root = open_directory(path)
     try:
         validate_selection(path, root, checks)
@@ -675,7 +718,7 @@ def stream_output(path, nonce, level, checks=None):
         raw_bytes = sum(sig[3] for kind, sig in initial.values() if kind == "file")
         writer = HashWriter(sys.stdout.buffer)
         with zipfile.ZipFile(writer, "w", allowZip64=True) as archive:
-            write_tree(archive, root, initial, level)
+            write_tree(archive, root, initial, level, archive_root=archive_root)
         # This is a checked read, not an atomic filesystem snapshot. Stop writers
         # first; changes visible during either scan invalidate the whole transfer.
         if scan(root) != initial:
@@ -755,7 +798,7 @@ def stop_local_transfer(proc):
                 proc.wait()
 
 
-def verify_download(handle, nonce):
+def verify_download(handle, nonce, archive_root="output"):
     """Verify nonce/length/SHA-256 and every ZIP CRC; never extract any file."""
     size = handle.seek(0, os.SEEK_END)
     if size <= FOOTER_SIZE:
@@ -797,7 +840,7 @@ def verify_download(handle, nonce):
             seen, files, raw_bytes = set(), 0, 0
             for item in archive.infolist():
                 parts = PurePosixPath(item.filename).parts
-                if (not parts or parts[0] != "output" or item.filename.startswith("/")
+                if (not parts or parts[0] != archive_root or item.filename.startswith("/")
                     or ".." in parts or "\\" in item.filename or ":" in item.filename
                     or item.filename in seen or item.flag_bits & 1
                     or stat.S_ISLNK(item.external_attr >> 16)):
@@ -822,9 +865,9 @@ def remote_failure(stderr):
     text = stderr.read().decode("utf-8", "replace")
     messages = {
         "empty": "The remote output folder contains no regular files; nothing was downloaded.",
-        "missing_or_changed": "The output folder/file is missing or changed during reading. Create it and finish writes before retrying.",
+        "missing_or_changed": "The selected folder/file is missing or changed during reading. Choose the correct folder and finish writes before retrying.",
         "permission": "The Sprite user cannot read that output folder. Check its ownership and permissions.",
-        "unsafe_path": "Use one absolute output directory or ~/output, not /, the whole home directory, or a path containing '..'.",
+        "unsafe_path": "Choose a specific folder, not /, the whole home directory, or a path containing '..'.",
         "unsafe_name": "A filename has control characters, a backslash, or colon; rename it for a portable ZIP.",
         "changed": "Output changed while being archived; finish writing and retry. No final ZIP was saved.",
         "read_failed": "Remote output could not be read. Check permissions, symlinked path components and available resources.",
@@ -856,21 +899,15 @@ def download(sprite, output_dir, local_dir, org, context_file="", checks=None):
     transport = os.environ.get("SPRITE_DOWNLOAD_TRANSPORT", "websocket")
     if transport not in ("websocket", "http-post"):
         raise DownloadError("SPRITE_DOWNLOAD_TRANSPORT must be websocket or http-post.")
+    archive_root = archive_component(checks.get("archive_root", "output") if isinstance(checks, dict) else "output")
     nonce = secrets.token_hex(16)
     proc, partial = None, None
     try:
         # A private CLI cwd prevents the local project's .sprite from changing
         # either the download target or the destination directory.
         with tempfile.TemporaryDirectory(prefix="sprite-output-context-") as context, tempfile.TemporaryFile() as errors:
-            if context_file:
-                # Preserve the exact CLI target context used for attachment.
-                # This is local selection metadata, not an API-token export.
-                raw_context = Path(context_file).read_bytes()
-                if len(raw_context) > 65536 or not isinstance(json.loads(raw_context), dict):
-                    raise DownloadError("Invalid saved Sprite CLI context; refusing to guess a download organization.")
-                pinned = Path(context) / ".sprite"
-                pinned.write_bytes(raw_context)
-                pinned.chmod(0o600)
+            # Preserve the exact selected organization without reading credentials.
+            copy_download_context(context_file, context)
             fd, partial = tempfile.mkstemp(prefix=".sprite-output-", suffix=".partial", dir=directory)
             with os.fdopen(fd, "w+b") as handle:
                 args = [cli, "exec", *(["-o", org] if org else []), "-s", sprite]
@@ -896,14 +933,15 @@ def download(sprite, output_dir, local_dir, org, context_file="", checks=None):
                 if problem:
                     raise DownloadError(problem)
                 print("       Verifying SHA-256 and ZIP contents...", flush=True)
-                meta = verify_download(handle, nonce)
+                meta = verify_download(handle, nonce, archive_root)
                 if proc.returncode:
                     # A received footer confirms completion of this request,
                     # and checksum/CRC verify its exact received bytes. The CLI
                     # connection, not an unkeyed checksum, handles authentication.
                     # This also handles known CLI missing-exit-frame failures.
                     print(f"       Warning: Sprite CLI exited {proc.returncode}, but the complete archive passed integrity checks.", flush=True)
-                filename = f"sprite-{sprite}-output-{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-{nonce[:8]}.zip"
+                folder_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", archive_root).strip(".-")[:64] or "folder"
+                filename = f"sprite-{sprite}-{folder_slug}-{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-{nonce[:8]}.zip"
                 target = directory / filename
                 # Atomic no-clobber promotion: never overwrite an existing user file.
                 os.link(partial, target)
@@ -925,29 +963,463 @@ def download(sprite, output_dir, local_dir, org, context_file="", checks=None):
                 pass
 
 
+REMOTE_FOLDER_PY = r'''
+# This source is run only inside a separate non-TTY Sprite exec.
+import errno
+import json
+import os
+import re
+import stat
+import sys
+
+library = {"__name__": "sprite_zip_library"}
+exec(compile(archive_source, "sprite_zip_library", "exec"), library)
+open_directory = library["open_directory"]
+signature = library["signature"]
+OutputError = library["OutputError"]
+PAGE_SIZE = 30
+MAX_ENTRIES = 100000
+
+
+def folder_path(value):
+    home = os.path.normpath(os.path.expanduser("~"))
+    if value in ("", "~", "$HOME"):
+        value = home
+    elif value.startswith("~/"):
+        value = os.path.join(home, value[2:])
+    elif value.startswith("$HOME/"):
+        value = os.path.join(home, value[6:])
+    if (not value.startswith("/") or len(value) > 8192 or ".." in value.split("/")
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise OutputError("unsafe_path")
+    return os.path.normpath(value)
+
+
+def virtual(path):
+    return any(path == p or path.startswith(p + "/") for p in ("/proc", "/sys", "/dev"))
+
+
+def list_folder(req):
+    path = folder_path(req.get("path", "~"))
+    home = folder_path("~")
+    if virtual(path):
+        raise OutputError("virtual_path")
+    fd = open_directory(path, allow_base=True)
+    try:
+        before = signature(os.fstat(fd))
+        dirs, files, skipped, hidden = [], [], 0, 0
+        file_count = 0
+        with os.scandir(fd) as iterator:
+            for count, entry in enumerate(iterator, 1):
+                if count > MAX_ENTRIES:
+                    raise OutputError("too_many_entries")
+                st = entry.stat(follow_symlinks=False)
+                if entry.name.startswith(".") and not req.get("hidden", False):
+                    hidden += 1
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    dirs.append(entry.name)
+                elif stat.S_ISREG(st.st_mode):
+                    file_count += 1
+                    # Names/sizes only; no file contents are read for previews.
+                    files.append({"name": entry.name, "size": st.st_size})
+                else:
+                    skipped += 1
+        if signature(os.fstat(fd)) != before:
+            raise OutputError("changed")
+        dirs.sort(key=lambda s: (s.casefold(), s))
+        files.sort(key=lambda r: (r["name"].casefold(), r["name"]))
+        pages = max(1, (len(dirs) + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = min(max(0, int(req.get("page", 0))), pages - 1)
+        return dict(path=path, home=home, signature=list(before),
+                    folders=dirs[page*PAGE_SIZE:(page+1)*PAGE_SIZE],
+                    folder_count=len(dirs), files=files[:8], file_count=file_count,
+                    hidden=hidden, skipped=skipped, page=page, pages=pages,
+                    can_download=path not in ("/", home))
+    finally:
+        os.close(fd)
+
+
+def workspace_places():
+    home = folder_path("~")
+    found = {}
+    def add(path, label):
+        try:
+            path = folder_path(path)
+            if virtual(path):
+                return
+            fd = open_directory(path, allow_base=True)
+            os.close(fd)
+            found.setdefault(path, label)
+        except (OSError, ValueError, OutputError):
+            pass
+    # Bounded saved workspace hints; never inspect credentials, history or envs.
+    try:
+        fd = open_directory(home + "/.local/state/sprite-codex", allow_base=True)
+    except (OSError, OutputError):
+        fd = None
+    if fd is not None:
+        try:
+            with os.scandir(fd) as iterator:
+                for count, entry in enumerate(iterator, 1):
+                    if count > 4096 or len(found) >= 128:
+                        break
+                    if not entry.name.startswith("workdir-"):
+                        continue
+                    try:
+                        f = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                        try:
+                            st = os.fstat(f)
+                            if not stat.S_ISREG(st.st_mode) or st.st_size > 8192:
+                                continue
+                            path = os.read(f, 8193).decode("utf-8").strip()
+                            if path.startswith("/"):
+                                add(path, "saved workspace hint")
+                        finally:
+                            os.close(f)
+                    except (OSError, UnicodeError):
+                        pass
+        finally:
+            os.close(fd)
+    for base in (home + "/workspaces", "/workspaces", "/workspace"):
+        add(base, "workspace directory")
+        try:
+            fd = open_directory(base, allow_base=True)
+            try:
+                with os.scandir(fd) as iterator:
+                    for count, entry in enumerate(iterator, 1):
+                        if count > 2048 or len(found) >= 256:
+                            break
+                        if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False):
+                            add(base + "/" + entry.name, "workspace folder")
+            finally:
+                os.close(fd)
+        except (OSError, OutputError):
+            pass
+    # Common output locations are shortcuts only, not assumed correct targets.
+    for path in (home + "/output", "/output", "/app"):
+        add(path, "existing folder")
+    return {"places": [{"path": p, "label": found[p]} for p in sorted(found, key=lambda p: (p.casefold(), p))]}
+
+
+def serve():
+    req = json.loads(sys.argv[1])
+    nonce = req.get("nonce", "")
+    if not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        raise ValueError("invalid nonce")
+    try:
+        if sys.version_info < (3, 9):
+            raise OutputError("python_version")
+        if req.get("op") == "list":
+            value = list_folder(req)
+        elif req.get("op") == "places":
+            value = workspace_places()
+        else:
+            raise OutputError("invalid_request")
+        result = {"nonce": nonce, "ok": True, "data": value}
+    except (OutputError, OSError, ValueError) as exc:
+        if isinstance(exc, OutputError):
+            reason = str(exc)
+        elif isinstance(exc, FileNotFoundError):
+            reason = "missing"
+        elif isinstance(exc, PermissionError):
+            reason = "permission"
+        elif isinstance(exc, OSError) and exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            reason = "not_directory"
+        else:
+            reason = "read_failed"
+        result = {"nonce": nonce, "ok": False, "error": reason}
+    print("SPRITE_FOLDER_JSON=" + json.dumps(result, ensure_ascii=True, separators=(",", ":")), flush=True)
+
+
+if __name__ == "__main__":
+    serve()
+'''
+
+class FolderCancelled(Exception):
+    pass
+
+
+def archive_component(value):
+    """Use one safe, literal directory name as the ZIP's top-level folder."""
+    if (not isinstance(value, str) or not value or value in (".", "..")
+            or any(c in value for c in ("/", "\\", ":"))
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise DownloadError("The folder name is not portable in a ZIP; select or rename a different folder.")
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        raise DownloadError("The folder name cannot be encoded as UTF-8.") from None
+    return value
+
+
+def copy_download_context(context_file, context):
+    if not context_file:
+        return
+    with open(context_file, "rb") as source:
+        raw_context = source.read(65537)
+    if len(raw_context) > 65536 or not isinstance(json.loads(raw_context), dict):
+        raise DownloadError("Invalid saved Sprite CLI context; refusing to guess a download organization.")
+    pinned = Path(context) / ".sprite"
+    pinned.write_bytes(raw_context)
+    pinned.chmod(0o600)
+
+
+class FolderPicker:
+    """Numbered remote folder browser. No shell commands or paths are required."""
+    def __init__(self, sprite, org, context_file=""):
+        cli = shutil.which("sprite")
+        if not cli:
+            raise DownloadError("The local sprite CLI was not found; authenticate it with sprite login.")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", sprite):
+            raise DownloadError("Invalid Sprite name.")
+        if org and (org.startswith("-") or any(c.isspace() or not c.isprintable() for c in org)):
+            raise DownloadError("Invalid SPRITE_ORG.")
+        self.cli, self.sprite, self.org = os.path.abspath(cli), sprite, org
+        self.context_file = context_file
+        self.timeout = integer("SPRITE_FOLDER_TIMEOUT", 45, 1, 300)
+        self.transport = os.environ.get("SPRITE_DOWNLOAD_TRANSPORT", "websocket")
+        if self.transport not in ("websocket", "http-post"):
+            raise DownloadError("SPRITE_DOWNLOAD_TRANSPORT must be websocket or http-post.")
+
+    def request(self, path="~", *, page=0, hidden=False, op="list"):
+        nonce = secrets.token_hex(16)
+        req = dict(nonce=nonce, op=op, path=path, page=page, hidden=hidden)
+        code = "archive_source = " + repr(REMOTE_OUTPUT_PY) + "\n" + REMOTE_FOLDER_PY
+        args = [self.cli, "exec", *(["-o", self.org] if self.org else []), "-s", self.sprite]
+        if self.transport == "http-post":
+            args.append("--http-post")
+        args += ["--no-port-forward", "--", "python3", "-c", code,
+                 json.dumps(req, ensure_ascii=True, separators=(",", ":"))]
+        proc = None
+        with tempfile.TemporaryDirectory(prefix="sprite-folder-context-") as context, \
+                tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+            copy_download_context(self.context_file, context)
+            try:
+                proc = subprocess.Popen(args, cwd=context, stdin=subprocess.DEVNULL,
+                                        stdout=output, stderr=errors, start_new_session=True)
+                try:
+                    proc.wait(timeout=self.timeout)
+                except subprocess.TimeoutExpired:
+                    raise DownloadError(f"Folder listing timed out after {self.timeout}s; retry or choose another folder.") from None
+                output.seek(0)
+                raw = output.read(512*1024 + 1)
+                if len(raw) > 512*1024:
+                    raise DownloadError("Folder listing was too large; no download was started.")
+                lines = [line[len(b"SPRITE_FOLDER_JSON="):] for line in raw.splitlines()
+                         if line.startswith(b"SPRITE_FOLDER_JSON=")]
+                if len(lines) != 1:
+                    raise DownloadError("No verified folder listing was received; check the Sprite connection and Python 3.9+.")
+                try:
+                    result = json.loads(lines[0])
+                except (ValueError, UnicodeError):
+                    raise DownloadError("Invalid folder-listing response; no folder was selected.") from None
+                if not isinstance(result, dict) or result.get("nonce") != nonce or type(result.get("ok")) is not bool:
+                    raise DownloadError("Invalid folder-listing completion record; no folder was selected.")
+                if not result["ok"]:
+                    messages = {
+                        "missing": "That folder does not exist on the Sprite. Choose another folder; nothing was created.",
+                        "permission": "The Sprite user cannot read that folder. Choose a readable folder (no sudo is used).",
+                        "not_directory": "That path is not a directory or includes a symlink. Links are not followed.",
+                        "unsafe_path": "Use an absolute remote folder or a ~/ path without '..' or control characters.",
+                        "virtual_path": "Virtual system folders /proc, /sys and /dev cannot be browsed or archived here.",
+                        "changed": "The directory changed while listing. Refresh after its file writes finish.",
+                        "too_many_entries": "Too many entries in this directory; use P to open a specific subfolder.",
+                        "python_version": "Python 3.9 or newer is required on the Sprite.",
+                    }
+                    raise DownloadError(messages.get(result.get("error"), "The remote folder could not be read."))
+                data = result.get("data")
+                if not isinstance(data, dict):
+                    raise DownloadError("Invalid folder-listing data.")
+                if op == "list":
+                    if (not isinstance(data.get("path"), str) or not data["path"].startswith("/")
+                            or not isinstance(data.get("home"), str) or not data["home"].startswith("/")
+                            or not isinstance(data.get("signature"), list) or len(data["signature"]) != 6
+                            or not all(type(x) is int for x in data["signature"])
+                            or not isinstance(data.get("folders"), list) or len(data["folders"]) > 30
+                            or not all(isinstance(x, str) and x not in ("", ".", "..") and "/" not in x for x in data["folders"])
+                            or not isinstance(data.get("files"), list)
+                            or not all(isinstance(x, dict) and isinstance(x.get("name"), str) and type(x.get("size")) is int for x in data["files"])
+                            or not all(type(data.get(k)) is int and data[k] >= 0 for k in ("page", "pages", "file_count", "folder_count", "hidden", "skipped"))
+                            or data["pages"] < 1 or data["page"] >= data["pages"] or len(data["files"]) > 8
+                            or type(data.get("can_download")) is not bool):
+                        raise DownloadError("Invalid folder metadata; no folder was selected.")
+                elif not isinstance(data.get("places"), list) or not all(
+                        isinstance(x, dict) and isinstance(x.get("path"), str) and x["path"].startswith("/")
+                        and isinstance(x.get("label"), str) for x in data["places"]):
+                    raise DownloadError("Invalid workspace shortcuts.")
+                # The nonce completion record is authoritative for read-only probes
+                # even if the local CLI subsequently loses an exit frame.
+                return data
+            finally:
+                stop_local_transfer(proc)
+
+    @staticmethod
+    def ask(prompt):
+        try:
+            return input(prompt).strip()
+        except EOFError:
+            raise FolderCancelled() from None
+
+    def places(self):
+        print("\n=== workspace / output shortcuts", flush=True)
+        print("       Saved paths are hints, not proof of a live Codex session.")
+        places = self.request(op="places")["places"]
+        if not places:
+            print("       No saved workspace folders found. Browse from home or / instead.")
+            return None
+        for i, place in enumerate(places, 1):
+            print(f"    {i}) {safe(place['path'])}  [{safe(place['label'])}]")
+        while True:
+            choice = self.ask("  Open shortcut number, or Enter to go back: ").lower()
+            if choice in ("", "b", "q"):
+                return None
+            if choice.isdecimal() and 1 <= int(choice) <= len(places):
+                return places[int(choice)-1]["path"]
+            print("       Choose a displayed number, or Enter to go back.")
+
+    def choose(self, local_dir, start="~"):
+        path, page, hidden = start or "~", 0, False
+        while True:
+            print(f"\n=== choose remote folder to download as ZIP — {safe(self.sprite)}", flush=True)
+            try:
+                info = self.request(path, page=page, hidden=hidden)
+                path, page = info["path"], info["page"]
+            except DownloadError as exc:
+                info = None
+                print(f"       Cannot browse {safe(path)}: {exc}")
+            if info is not None:
+                print(f"       REMOTE folder: {safe(path)}")
+                print(f"       LOCAL ZIP directory: {safe(local_dir)}")
+                for i, name in enumerate(info["folders"], 1):
+                    print(f"    {i}) {safe(name)}/")
+                if not info["folders"]:
+                    print("       No visible subfolders here.")
+                if info["files"]:
+                    print(f"       Files here (names only; showing {len(info['files'])} of {info['file_count']}):")
+                    for item in info["files"]:
+                        print(f"         {safe(item['name'])}  ({item['size']:,} bytes)")
+                if info["hidden"]:
+                    print(f"       {info['hidden']} hidden entries not shown; T toggles their display.")
+                if info["skipped"]:
+                    print(f"       {info['skipped']} symlink/special entries not offered.")
+                if info["pages"] > 1:
+                    print(f"       Folder page {page+1}/{info['pages']} — N next, B previous page.")
+                if not info["can_download"]:
+                    print("       Open a subfolder: archiving / or the entire home folder is disabled.")
+            print("       Number = open folder | D = ZIP this folder | U = parent | H = home")
+            print("       W = workspace shortcuts | / = filesystem root | P = enter path (optional)")
+            print("       T = hidden names | R = refresh | Q = cancel")
+            choice = self.ask("  Folder action: ").lower()
+            if choice in ("q", "quit", ""):
+                raise FolderCancelled()
+            if choice == "d":
+                if info is None:
+                    print("       A verified folder listing is required before downloading.")
+                    continue
+                if not info["can_download"]:
+                    print("       Choose a specific subfolder rather than / or the entire home folder.")
+                    continue
+                try:
+                    root_name = archive_component(PurePosixPath(path).name)
+                except DownloadError as exc:
+                    print("       " + str(exc))
+                    continue
+                print("\n=== confirm folder ZIP")
+                print(f"       Sprite: {safe(self.sprite)}")
+                print(f"       Source: {safe(path)}")
+                print(f"       ZIP contents start with: {safe(root_name)}/")
+                print(f"       Save into: {safe(local_dir)}")
+                print("       Includes nested folders and ALL regular files, including hidden files.")
+                print("       Check for credentials before confirming; symlinks/special files are skipped.")
+                print("       Finish writes first. Codex is not paused; no source files will be deleted.")
+                if self.ask("  Download this selected folder as a ZIP? [y/N]: ").lower() not in ("y", "yes"):
+                    print("       Not downloaded. You can choose another folder.")
+                    continue
+                return path, {"kind": "directory", "expected": info["signature"], "archive_root": root_name}
+            if choice == "r":
+                continue
+            if choice == "t":
+                hidden, page = not hidden, 0
+                continue
+            if choice in ("n", "b") and info is not None:
+                page = min(info["pages"] - 1, page + 1) if choice == "n" else max(0, page - 1)
+                continue
+            if choice == "h":
+                path, page = "~", 0
+                continue
+            if choice == "/":
+                path, page = "/", 0
+                continue
+            if choice == "u":
+                path, page = (str(PurePosixPath(path).parent) if path.startswith("/") else "~"), 0
+                continue
+            if choice == "w":
+                try:
+                    target = self.places()
+                    if target:
+                        path, page = target, 0
+                except DownloadError as exc:
+                    print("       " + str(exc))
+                continue
+            if choice == "p":
+                target = self.ask("  Remote folder (absolute or ~/; Enter cancels): ")
+                if target:
+                    path, page = target, 0
+                continue
+            if info is not None and choice.isdecimal() and 1 <= int(choice) <= len(info["folders"]):
+                path, page = str(PurePosixPath(path) / info["folders"][int(choice)-1]), 0
+                continue
+            print("       Choose a listed number or one of the actions above.")
+
+
 def main():
     if sys.version_info < (3, 9):
         raise DownloadError("Local Python 3.9 or newer is required.")
     sprite, mode, local_dir, output_dir, org = sys.argv[1:6]
     context_file = sys.argv[6] if len(sys.argv) > 6 else ""
+    # The shell always supplies 0/1; direct old helper callers provide an explicit
+    # output_dir and retain their noninteractive semantics.
+    explicit = sys.argv[7] if len(sys.argv) > 7 else "1"
+    if explicit not in ("0", "1"):
+        raise DownloadError("Invalid folder-selection mode.")
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
     if mode not in ("ask", "always", "never"):
         raise DownloadError("SPRITE_OUTPUT_DOWNLOAD must be ask, always, or never.")
-    if mode == "never" or (mode == "ask" and (not sys.stdin.isatty() or not sys.stdout.isatty())):
+    if mode == "never" or (mode == "ask" and not interactive):
         return 0
-    print("\n=== download Sprite output", flush=True)
-    print(f"       Sprite: {safe(sprite)}\n       Remote folder: {safe(output_dir)}\n       Local ZIP directory: {safe(local_dir)}")
-    print("       Finish file writes first. This reads files without stopping or pausing Codex.")
-    print("       All regular files in that folder, including hidden files, are included. Keep credentials out of it.")
+    print("\n=== download Sprite folder as ZIP", flush=True)
+    print(f"       Sprite: {safe(sprite)}\n       Local ZIP directory: {safe(local_dir)}")
     if mode == "ask":
         try:
-            answer = input("  Download this output folder as a ZIP now? [y/N]: ").strip().lower()
+            answer = input("  Browse Sprite folders and download one as a ZIP now? [y/N]: ").strip().lower()
         except EOFError:
             answer = "n"
         if answer not in ("y", "yes"):
             print("       Download skipped; remote files are unchanged.")
             return 0
-    return download(sprite, output_dir, local_dir, org, context_file)
-
+    if not interactive:
+        if explicit != "1":
+            raise DownloadError("Without an interactive terminal, specify --output-dir or SPRITE_OUTPUT_DIR; no default folder is assumed.")
+        root_name = archive_component(PurePosixPath(output_dir).name)
+        print(f"       Explicit remote folder: {safe(output_dir)}")
+        print("       Includes hidden regular files; finish writes first. Source files remain unchanged.")
+        return download(sprite, output_dir, local_dir, org, context_file,
+                        checks={"kind": "directory", "archive_root": root_name})
+    picker = FolderPicker(sprite, org, context_file)
+    start, failed = (output_dir if explicit == "1" else "~"), False
+    while True:
+        try:
+            path, checks = picker.choose(local_dir, start)
+        except FolderCancelled:
+            print("       Folder download cancelled. No final ZIP was saved; source files are unchanged.")
+            return 1 if failed else 0
+        try:
+            return download(sprite, path, local_dir, org, context_file, checks=checks)
+        except DownloadError as exc:
+            print("error: " + str(exc), file=sys.stderr)
+            print("       No final ZIP was saved. You can choose another folder or retry after writes finish.")
+            start, failed = path, True
 
 if __name__ == "__main__":
     def interrupted(signum, frame):
@@ -971,7 +1443,7 @@ run_output_download() {
   local selected_sprite=$1 mode=${2:-$SPRITE_OUTPUT_DOWNLOAD} context_file=${3:-${OUTPUT_PINNED_CONTEXT:-}}
   [[ $mode != never ]] || return 0
   command -v python3 >/dev/null 2>&1 || { echo "warning: output download requires local python3" >&2; return 127; }
-  python3 -c "$(output_download_python)" "$selected_sprite" "$mode" "$OUTPUT_HOST_DIR" "$SPRITE_OUTPUT_DIR" "${SPRITE_ORG:-}" "$context_file"
+  python3 -c "$(output_download_python)" "$selected_sprite" "$mode" "$OUTPUT_HOST_DIR" "$SPRITE_OUTPUT_DIR" "${SPRITE_ORG:-}" "$context_file" "${OUTPUT_PATH_EXPLICIT:-1}"
 }
 
 maybe_download_output() {
@@ -1499,7 +1971,7 @@ run_attach_only() {
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v54.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v55.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
 import base64
@@ -8889,7 +9361,11 @@ note "the native TTY session itself is also Sprite activity while it remains liv
 note "detach cleanly with Ctrl+\\; there is no tmux prefix, mouse mode, or copy mode"
 note "on a non-zero transport failure, the script reattaches to the same native session ID"
 
-note "generated deliverables: ask Codex to create and write to $SPRITE_OUTPUT_DIR on the Sprite"
+if [[ $OUTPUT_PATH_EXPLICIT == 1 ]]; then
+  note "generated deliverables: requested folder is $SPRITE_OUTPUT_DIR on the Sprite"
+else
+  note "generated deliverables: use ./output in Codex's workspace; the ZIP menu lets you choose any specific folder"
+fi
 note "after the terminal returns, output ZIP downloads go to: $OUTPUT_HOST_DIR"
 if start_native_agent_session "$REMOTE_ENTRY" "$REMOTE_RUNNER"; then
   launch_rc=0
