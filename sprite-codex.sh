@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
+# v60: verified cloud-side keep-awake, independent of laptop sleep/disconnection.
+# New managed runs and managed-session attachments install/verify a private worker
+# on the Sprite. It owns a separate Unix session, closes all terminal descriptors,
+# inherits NO agent/API credentials, and checks Tasks API HTTP + JSON expiration.
+# Default duration is the managed runner's lifetime, including idle prompts:
+# COMPUTE BILLING CAN CONTINUE WHILE YOUR LAPTOP SLEEPS. Exit Codex to end its run.
+# SPRITE_RUN_HOURS=session (default), or a positive cap up to 168 hours.
+# Attach with no explicit duration preserves an existing v60 cap; it upgrades an
+# old runner with a separate guard without restarting it or changing credentials.
+# --keep-awake-status checks cloud worker/process identity and current API leases.
+# A fresh protection receipt is required; an API error is never a verified hold.
+# No Mac sleep setting, local polling loop, caffeinate, or tmux is used.
+# Native TTY protection still depends on the platform retaining that remote TTY.
+# Cannot survive host shutdown, OOM/SIGKILL, an exited agent, or task API outage.
+# Sources: https://docs.fly.io/sprites/keeping-sprites-running
+#          https://docs.sprites.dev/cli/commands/
+# Checked 2026-09-28. Cloud/lid tests must be run on the user's real environment.
+#
 # v59: diagnose global Fly YAML parse errors before blaming a token.
 # Shows config path/source, bounded metadata and forbidden-character counts,
 # never config contents. Compares the same token/app with temporary clean
@@ -73,7 +91,7 @@
 # reject a stale session. No restart, kill, key recovery or new launch is automatic.
 # API/SDK reference: https://sprites.dev/api/sprites/exec
 # https://github.com/superfly/sprites-go/blob/main/session.go
-# sprite-codex-v59.sh — updated 2026-09-26
+# sprite-codex-v60.sh — updated 2026-09-28
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -131,7 +149,7 @@
 # SPRITE_DOWNLOAD_TIMEOUT=3600 bounds remote scan/compression/transfer (1..86400).
 # SPRITE_OUTPUT_COMPRESSION=1 (0..9); 0 stores without compression.
 # SPRITE_DOWNLOAD_TRANSPORT=websocket|http-post (default websocket).
-# With download declined/disabled, attach-only still executes no remote command.
+# Managed attachment also installs/verifies a separate credential-free cloud guard.
 # Download failures preserve the preceding agent/attach exit status; explicit
 # --download-output reports its own failure status. No automatic resume of .partial.
 #
@@ -141,8 +159,8 @@
 # --attach-only skips straight to Sprite/session selection; --session-id ID plus
 # SPRITE_NAME selects one exact native terminal after a fresh inventory check.
 # All active native TTYs on the chosen Sprite are listed, regardless of project.
-# Attachment itself never executes a new remote command, kills a session, writes
-# project state, or falls through to bootstrap. A confirmed output download does
+# Managed attachment verifies a cloud keep-awake worker through a separate command;
+# it never kills an agent, writes project state, or falls through to bootstrap. A confirmed output download does
 # run a separate read-only non-TTY archive command. It needs only local sprite + Python 3.9+.
 # --bootstrap skips the new opening menu and preserves the old setup workflow.
 # Bare non-interactive runs retain the old bootstrap behavior; attach needs a TTY.
@@ -195,17 +213,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v59.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v59.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v59.sh --attach-only --session-id 1847
-#   bash sprite-codex-v59.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v59.sh --download-output
-#   bash sprite-codex-v59.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v59.sh --show-models          # no API calls
-#   bash sprite-codex-v59.sh --test-models          # host API tests only
-#   bash sprite-codex-v59.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v59.sh --test-models-before-run
-#   bash sprite-codex-v59.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v60.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v60.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v60.sh --attach-only --session-id 1847
+#   bash sprite-codex-v60.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v60.sh --download-output
+#   bash sprite-codex-v60.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v60.sh --show-models          # no API calls
+#   bash sprite-codex-v60.sh --test-models          # host API tests only
+#   bash sprite-codex-v60.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v60.sh --test-models-before-run
+#   bash sprite-codex-v60.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -284,7 +302,7 @@ umask 077
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v59.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v60.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
   (no option)               Attach / Setup / Quit / Download / Files / Retrieve menu.
   --attach-only             Select a Sprite and attach to an existing live TTY.
@@ -303,8 +321,9 @@ Usage: bash sprite-codex-v59.sh [option] [--output-dir PATH] [--json-output PATH
 
 Attach-only bypasses all model/agent choices, credential entry/validation, model
 API tests, Codex updates, Mobbin and workspace setup. Attachment never launches or
-replaces an agent, or falls back into bootstrap. Only an accepted output download
-runs a separate read-only remote archive command. Works from ANY local directory;
+replaces an agent, or falls back into bootstrap. Managed attachment now performs
+a separate secret-free cloud guard setup/check. Accepted downloads also run
+a separate remote archive command. Works from ANY local directory;
 all active native TTYs on the chosen Sprite are considered, not just this project.
 Requires an authenticated local sprite CLI, Python 3.9+, and an interactive TTY.
 SPRITE_NAME / SPRITE_ORG can preselect the Sprite / organization. Without an org,
@@ -318,7 +337,8 @@ TTY_AUTO_REATTACH and TTY_REATTACH_* control retries to the same live session.
 Ctrl+\ detaches. No provider keys are copied out of or injected into the process.
 Bare non-interactive runs retain the previous bootstrap behavior. Explicit test
 modes and --bootstrap do not show the opening menu. --json-output is not allowed
-with --attach-only; bootstrap-only environment settings are ignored on attachment.
+with --attach-only. SPRITE_RUN_HOURS controls guard policy on managed attachment;
+other bootstrap-only environment settings remain ignored.
 
 Repository-first retrieve mode (--retrieve / --recover, opening menu 6):
 1. Enter GitHub OWNER/REPO (or repository URL), then a hidden PAT; authenticate
@@ -489,6 +509,20 @@ configuration requires Python 3.11+ on the Sprite, or Python with tomli installe
 --json-output is a remote path with --test-models-sprite, local otherwise.
 Tests make billable API calls; no agent, GitHub or Fly credentials are needed.
 All three must pass for exit 0. Failures/missing keys exit 1; bad arguments exit 2.
+
+Cloud keep-awake (v60):
+  Managed new runs and attachments verify a detached cloud worker before use.
+  --keep-awake-status        Select a Sprite and check current protection; no agent attach.
+  SPRITE_RUN_HOURS=session   Keep renewing while the managed runner exists (default).
+  SPRITE_RUN_HOURS=8         Explicitly bound protection to eight hours.
+  Attach without SPRITE_RUN_HOURS preserves an existing v60 deadline; an old
+  runner gets session-lifetime protection. A cap expiring does NOT kill Codex.
+  API lease is five minutes, renewed every minute with HTTP/JSON verification.
+  Mac sleep/network loss does not drive the renewal loop. Compute can remain
+  billable at an idle prompt; exit the cloud agent when finished.
+  If verification fails, managed attachment/new agent launch fails closed; your
+  existing agent is not killed. Direct sprite attachment remains manual recovery.
+  File/ZIP/Retrieve/Fly-test modes do not create a keep-awake worker.
 HELP
 }
 
@@ -511,7 +545,7 @@ _FILE_WORKDIR_SELECTED=0
 while (($#)); do
   case "$1" in
     --help|-h) show_usage; exit 0 ;;
-    --attach-only|--files|--shell|--retrieve|--recover|--check-fly|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
+    --attach-only|--files|--shell|--retrieve|--recover|--check-fly|--keep-awake-status|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
       (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
       _MODE_SELECTED=1
       case "$1" in
@@ -519,6 +553,7 @@ while (($#)); do
         --files|--shell) RUN_MODE=files ;;
         --retrieve|--recover) RUN_MODE=retrieve ;;
         --check-fly) RUN_MODE=check-fly ;;
+        --keep-awake-status) RUN_MODE=guard-status ;;
         --bootstrap) RUN_MODE=bootstrap ;;
         --download-output) RUN_MODE=download ;;
         --test-models) RUN_MODE=test-local ;;
@@ -1575,9 +1610,682 @@ maybe_download_output() {
   fi
 }
 
+cloud_guard_python() {
+  cat <<'CLOUD_GUARD_PY'
+#!/usr/bin/env python3
+"""v60 cloud-side keep-awake guard; no agent credentials or terminal I/O.
+
+Tasks API: https://docs.fly.io/sprites/keeping-sprites-running
+This guards an existing Linux process identity; it does not resurrect agents.
+Only this program's own task is created/refreshed/deleted. No agent is signalled.
+"""
+from __future__ import annotations
+
+import datetime as dt
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
+import fcntl
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+SOCKET_PATH = '/.sprite/api.sock'
+PROC = Path('/proc')
+API_TIMEOUT = 8
+REFRESH_SECONDS = 60
+POLL_SECONDS = 2
+RETRY_SECONDS = 5
+STARTUP_TIMEOUT = 40
+LEASE_SECONDS = 300
+TAG_RE = r'sprite-(?:codex|kimi-code)-native-[A-Za-z0-9._-]{1,100}'
+MARKER = 'SPRITE_CLOUD_GUARD_V60='
+
+
+class GuardError(Exception):
+    pass
+
+
+class TaskError(GuardError):
+    pass
+
+
+def source_text():
+    return globals().get('_SOURCE') or Path(__file__).read_text(encoding='utf-8')
+
+
+def seconds_from_hours(value):
+    """None means preserve existing policy; zero means process lifetime."""
+    if value in (None, ''):
+        return None
+    if str(value).lower() == 'session':
+        return 0
+    try:
+        hours = Decimal(str(value))
+    except InvalidOperation:
+        raise GuardError('SPRITE_RUN_HOURS must be session or a positive number up to 168.') from None
+    if not hours.is_finite() or not 0 < hours <= 168:
+        raise GuardError('SPRITE_RUN_HOURS must be session or a positive number up to 168.')
+    return int((hours * 3600).to_integral_value(rounding=ROUND_CEILING))
+
+
+def timestamp(value):
+    if not isinstance(value, str):
+        raise TaskError('Tasks API expires_at is not an RFC3339 timestamp.')
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            raise ValueError()
+        result = parsed.timestamp()
+    except (ValueError, OverflowError, OSError):
+        raise TaskError('Tasks API expires_at is invalid or has no timezone.') from None
+    return result
+
+
+def utc(value):
+    return dt.datetime.fromtimestamp(value, dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC') if value else 'session lifetime'
+
+
+class UnixHTTP(http.client.HTTPConnection):
+    def __init__(self):
+        super().__init__('sprite', timeout=API_TIMEOUT)
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(SOCKET_PATH)
+
+
+class Tasks:
+    def call(self, method, path, body=None):
+        conn = UnixHTTP()
+        data = None if body is None else json.dumps(body).encode('utf-8')
+        try:
+            conn.request(method, path, body=data, headers={'Content-Type': 'application/json', 'Connection': 'close'})
+            response = conn.getresponse()
+            raw = response.read(65537)
+            code = response.status
+        except (OSError, http.client.HTTPException):
+            raise TaskError('Tasks API socket/HTTP request failed; no verified renewal.') from None
+        finally:
+            conn.close()
+        if method == 'DELETE' and code == 404:
+            return None
+        if not 200 <= code < 300:
+            # Never echo arbitrary bodies or redirect to another host.
+            raise TaskError(f'Tasks API {method} returned HTTP {code}; request was not accepted.')
+        if len(raw) > 65536:
+            raise TaskError('Tasks API response exceeded the bounded read limit.')
+        return raw
+
+    def verify(self, name, minimum_remaining=1):
+        raw = self.call('GET', '/v1/tasks/' + name)
+        try:
+            task = json.loads(raw)
+        except (ValueError, TypeError):
+            raise TaskError('Tasks API verification returned invalid JSON.') from None
+        if isinstance(task, dict) and isinstance(task.get('task'), dict):
+            task = task['task']
+        if not isinstance(task, dict) or task.get('error') or task.get('name') != name:
+            raise TaskError('Tasks API verification did not identify the expected task.')
+        expires = timestamp(task.get('expires_at'))
+        remaining = expires - time.time()
+        if remaining < minimum_remaining or remaining > 3660:
+            raise TaskError('Tasks API task expiration is past, too close, or outside the documented one-hour limit.')
+        return expires
+
+    def renew(self, name, seconds=LEASE_SECONDS):
+        if not isinstance(seconds, int) or not 1 <= seconds <= 3600:
+            raise TaskError('Invalid task lease duration.')
+        self.call('PUT', '/v1/tasks/' + name, {'expire': seconds})
+        # Require nearly the requested lease, not merely a future timestamp.
+        # A 45-second lease would be insufficient for a 60-second renewal loop.
+        return self.verify(name, max(0.1, seconds - 2 * API_TIMEOUT - 5))
+
+    def release(self, name):
+        self.call('DELETE', '/v1/tasks/' + name)
+
+
+def process_identity(pid):
+    """Use boot ID + PID + Linux start ticks, not kill(pid, 0) alone."""
+    try:
+        pid = int(pid)
+        if pid <= 1:
+            return None
+        directory = PROC / str(pid)
+        owner = directory.stat().st_uid
+        if owner != os.getuid():
+            return None
+        raw = (directory / 'stat').read_text()
+        fields = raw[raw.rindex(')') + 2:].split()
+        if len(fields) < 20 or fields[0] in ('Z', 'X', 'x'):
+            return None
+        return {'pid': pid, 'start_ticks': fields[19], 'boot_id': (PROC / 'sys/kernel/random/boot_id').read_text().strip(), 'uid': owner}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def same_process(identity):
+    return isinstance(identity, dict) and process_identity(identity.get('pid', 0)) == identity
+
+
+def runner_record(pid, tag, runner_path=''):
+    identity = process_identity(pid)
+    if identity is None:
+        return None
+    try:
+        with (PROC / str(pid) / 'cmdline').open('rb') as handle:
+            raw = handle.read(65537)
+        if len(raw) > 65536:
+            return None
+        args = [x.decode('utf-8', 'strict') for x in raw.rstrip(b'\0').split(b'\0')]
+        # Python helpers, arbitrary shell command text and unrelated agents do not match.
+        if not args or os.path.basename(args[0]) not in ('bash', 'sh'):
+            return None
+        for index, arg in enumerate(args[1:], 1):
+            if arg.startswith('-'):
+                continue
+            base = os.path.basename(arg)
+            if not (base == tag + '-runner' or base.startswith(tag + '-runner-')):
+                return None  # the script, not any later argument, must be the runner
+            if runner_path and arg != runner_path:
+                return None
+            if len(args) <= index + 7 or not args[index + 1].isdigit():
+                return None
+            if args[index + 3] != tag or not args[index + 4].startswith('/'):
+                return None
+            kind = 'kimi-code' if tag.startswith('sprite-kimi-code-') else 'codex'
+            if args[index + 6] != kind:
+                return None
+            # Recheck birth after reading argv (PID could have been reused).
+            if not same_process(identity):
+                return None
+            return {'identity': identity, 'runner': arg, 'tag': tag, 'workdir': args[index + 4]}
+    except (OSError, UnicodeError):
+        return None
+    return None
+
+
+def parent_pid(pid):
+    try:
+        raw = (PROC / str(pid) / 'stat').read_text()
+        return int(raw[raw.rindex(')') + 2:].split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def find_runner(tag, runner_path='', pid=0):
+    if not re.fullmatch(TAG_RE, tag):
+        raise GuardError('Cannot identify a managed Codex/Kimi runner tag.')
+    if pid:
+        record = runner_record(pid, tag, runner_path)
+        if record is None:
+            raise GuardError('The requested managed runner is not a live owned process.')
+        return record
+    records = {}
+    for entry in PROC.iterdir():
+        if entry.name.isdigit():
+            record = runner_record(int(entry.name), tag, runner_path)
+            if record:
+                records[int(entry.name)] = record
+    # Old Bash heartbeat subshells retain their parent's argv. They are not agents.
+    roots = []
+    for candidate, record in records.items():
+        ancestor, visited, child = parent_pid(candidate), set(), False
+        while ancestor > 1 and ancestor not in visited:
+            if ancestor in records:
+                child = True
+                break
+            visited.add(ancestor)
+            ancestor = parent_pid(ancestor)
+        if not child:
+            roots.append(record)
+    if len(roots) != 1:
+        raise GuardError('Managed runner discovery is absent or ambiguous; no process was started/replaced. Recheck the selected session.')
+    return roots[0]
+
+
+def private_dir(path):
+    path = Path(path)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise GuardError('Keep-awake state directory must be a private owned directory, not a symlink.')
+    return path
+
+
+def state_root():
+    home = Path.home()
+    # Verify each managed path component. Do not follow an injected .local/state link.
+    current = home
+    for part in ('.local', 'state', 'sprite-codex', 'keepawake-v60'):
+        current = current / part
+        if current.is_symlink():
+            raise GuardError('Refusing a symlink in the cloud guard state path.')
+        current.mkdir(mode=0o700, exist_ok=True)
+        info = current.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise GuardError('Cloud guard state path is not an owned, non-writable-by-others directory.')
+    return private_dir(current)
+
+
+def read_json(path):
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    try:
+        # Atomic replacement can unlink the already-open old inode (nlink=0).
+        # That is safe; multiple links, symlinks and wrong ownership are not.
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink > 1:
+            raise GuardError('Unsafe keep-awake state file; refusing to read it.')
+        with os.fdopen(fd, 'rb') as handle:
+            fd = -1
+            raw = handle.read(65537)
+        if len(raw) > 65536:
+            raise GuardError('Keep-awake state file is oversized.')
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError()
+        return data
+    except (ValueError, UnicodeError):
+        raise GuardError('Keep-awake state file is malformed.') from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def write_json(path, data):
+    fd, temporary = tempfile.mkstemp(prefix='.guard-', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, sort_keys=True)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def lock_file(path):
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+        os.close(fd)
+        raise GuardError('Unsafe keep-awake lock file.')
+    return fd
+
+
+def log_event(directory, message):
+    """Fixed messages only; no command lines, credentials, or HTTP bodies."""
+    path = directory / 'events.log'
+    if path.exists() and not path.is_symlink() and path.stat().st_size > 262144:
+        os.replace(path, directory / 'events.previous.log')
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+            raise GuardError('Unsafe guard log file.')
+        os.write(fd, (utc(time.time()) + ' ' + message + '\n').encode())
+    finally:
+        os.close(fd)
+
+
+def source_install(root):
+    source = source_text().encode('utf-8')
+    digest = hashlib.sha256(source).hexdigest()
+    path = root / ('guard-' + digest[:24] + '.py')
+    if path.exists() or path.is_symlink():
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+            raise GuardError('Unsafe installed cloud guard file.')
+        if path.read_bytes() != source:
+            raise GuardError('Installed cloud guard content mismatch.')
+        return path
+    fd, temporary = tempfile.mkstemp(prefix='.source-', dir=root)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(source)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.is_symlink() or path.read_bytes() != source:
+                raise GuardError('Cloud guard installation raced with another file.')
+    finally:
+        os.unlink(temporary)
+    return path
+
+
+def guard_directory(record):
+    key = hashlib.sha256(json.dumps(record['identity'], sort_keys=True).encode()).hexdigest()[:24]
+    return private_dir(state_root() / key), 'sprite-codex-guard-' + key
+
+
+def worker(directory):
+    directory = private_dir(directory)
+    fd = lock_file(directory / 'worker.lock')
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return 0
+    stopped = [False]
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, lambda *args: stopped.__setitem__(0, True))
+    signal.signal(signal.SIGTERM, lambda *args: stopped.__setitem__(0, True))
+    api = Tasks()
+    config = read_json(directory / 'config.json')
+    if not config:
+        os.close(fd)
+        return 1
+    identity = config['target']
+    task = config['task']
+    own = process_identity(os.getpid())
+    state = {'version': 60, 'worker': own, 'target': identity, 'task': task,
+             'status': 'starting', 'last_success': 0, 'expires_at': 0, 'failures': 0}
+    next_renew = 0.0
+    reason = 'stopped'
+    try:
+        log_event(directory, 'worker started; no controlling terminal')
+        while not stopped[0]:
+            config = read_json(directory / 'config.json')
+            if not config or config.get('target') != identity or config.get('task') != task:
+                reason = 'configuration-changed'
+                break
+            if config.get('disabled'):
+                reason = 'released-by-user'
+                break
+            if not same_process(identity):
+                reason = 'runner-ended'
+                break
+            deadline = config.get('deadline', 0)
+            if deadline and time.time() >= deadline:
+                reason = 'deadline-reached'
+                break
+            if state.get('generation') != config['generation']:
+                next_renew = 0.0
+            state['deadline'] = deadline
+            state['generation'] = config['generation']
+            if time.monotonic() >= next_renew:
+                lease = LEASE_SECONDS if not deadline else min(LEASE_SECONDS, max(1, int(deadline - time.time())))
+                try:
+                    expires = api.renew(task, lease)
+                    state.update(status='verified', last_success=time.time(), expires_at=expires, failures=0, error='')
+                    log_event(directory, 'task verified until ' + utc(expires))
+                    next_renew = time.monotonic() + min(REFRESH_SECONDS, max(0.2, lease / 3))
+                except TaskError as exc:
+                    state.update(status='unverified', failures=state['failures'] + 1, error=str(exc))
+                    log_event(directory, str(exc))
+                    next_renew = time.monotonic() + RETRY_SECONDS
+            state['checked_at'] = time.time()
+            write_json(directory / 'status.json', state)
+            time.sleep(POLL_SECONDS)
+    except (GuardError, OSError, KeyError, TypeError):
+        reason = 'worker-error'
+    finally:
+        try:
+            api.release(task)
+            state['release_verified'] = True
+        except TaskError:
+            state['release_verified'] = False  # short API lease expires by itself
+        state.update(status=reason, checked_at=time.time())
+        try:
+            write_json(directory / 'status.json', state)
+            log_event(directory, 'worker ended: ' + reason + '; agent was not signalled')
+        except (OSError, GuardError):
+            pass
+        os.close(fd)
+    return 0
+
+
+def ensure(tag, duration=None, runner_path='', pid=0):
+    record = find_runner(tag, runner_path, pid)
+    directory, task = guard_directory(record)
+    root = directory.parent
+    installed = source_install(root)
+    fd = lock_file(directory / 'control.lock')
+    cutoff = time.monotonic() + STARTUP_TIMEOUT
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= cutoff:
+                    raise GuardError('Another guard installation is busy; no agent was changed.')
+                time.sleep(0.1)
+        existing = read_json(directory / 'config.json')
+        if existing and existing.get('target') != record['identity']:
+            raise GuardError('Guard process identity changed; refusing to reuse it.')
+        if existing and duration is None:
+            deadline = existing.get('deadline', 0)
+            if existing.get('disabled'):
+                raise GuardError('Protection was explicitly released. Set SPRITE_RUN_HOURS=session or a duration to enable it again.')
+            if deadline and deadline <= time.time():
+                raise GuardError('The chosen keep-awake deadline has expired. Set SPRITE_RUN_HOURS=session or a duration to renew it.')
+        else:
+            deadline = time.time() + duration if duration else 0
+        generation = secrets.token_hex(12)
+        config = {'target': record['identity'], 'tag': tag, 'task': task, 'deadline': deadline,
+                  'generation': generation, 'disabled': False}
+        write_json(directory / 'config.json', config)
+        old = read_json(directory / 'status.json')
+        active = old and same_process(old.get('worker')) and old.get('status') not in (
+            'runner-ended', 'deadline-reached', 'worker-error', 'released-by-user', 'configuration-changed', 'stopped')
+        if not active:
+            # A previous worker may be finishing its final status write and lock release.
+            while old and same_process(old.get('worker')):
+                if time.monotonic() >= cutoff:
+                    raise GuardError('Previous guard is still shutting down; retry protection setup.')
+                time.sleep(0.05)
+            # The worker gets neither this terminal nor the agent's credentials.
+            env = {'HOME': str(Path.home()), 'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'PYTHONUNBUFFERED': '1'}
+            subprocess.Popen([sys.executable, str(installed), 'worker', str(directory)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, close_fds=True, cwd=str(root), env=env)
+        while time.monotonic() < cutoff:
+            if not same_process(record['identity']):
+                raise GuardError('The original runner ended during keep-awake verification; nothing was relaunched.')
+            state = read_json(directory / 'status.json')
+            if state and state.get('generation') == generation and state.get('status') == 'verified' and same_process(state.get('worker')):
+                if time.time() - state.get('last_success', 0) <= REFRESH_SECONDS + 10:
+                    expires = Tasks().verify(task, min(30, max(0.1, (deadline - time.time()) / 2)) if deadline else 30)
+                    # The API hold must be tied to the same live worker AND runner.
+                    if not same_process(state['worker']) or not same_process(record['identity']):
+                        raise GuardError('Guard or runner ended during final verification.')
+                    return {'ok': True, 'tag': tag, 'task': task, 'pid': record['identity']['pid'],
+                            'worker_pid': state['worker']['pid'], 'expires_at': expires, 'deadline': deadline,
+                            'status_file': str(directory / 'status.json'), 'log_file': str(directory / 'events.log')}
+            if state and state.get('generation') == generation and state.get('status') in ('worker-error', 'configuration-changed', 'deadline-reached', 'runner-ended'):
+                raise GuardError('Cloud guard stopped before verification; no protection was confirmed.')
+            time.sleep(0.15)
+        state = read_json(directory / 'status.json') or {}
+        detail = state.get('error', 'Cloud worker readiness timed out.')
+        raise GuardError(detail + ' Existing agent was not killed; do not assume unattended protection.')
+    finally:
+        os.close(fd)
+
+
+def status_all():
+    root = state_root()
+    rows = []
+    for path in sorted(root.iterdir()):
+        if not re.fullmatch(r'[0-9a-f]{24}', path.name):
+            continue
+        directory = private_dir(path)
+        config = read_json(directory / 'config.json')
+        state = read_json(directory / 'status.json') or {}
+        if not config:
+            continue
+        live = same_process(config.get('target'))
+        watcher = same_process(state.get('worker'))
+        verified = False
+        error = ''
+        if live and watcher and not config.get('disabled'):
+            try:
+                expires = Tasks().verify(config['task'])
+                verified = (state.get('status') == 'verified' and time.time() - state.get('last_success', 0) <= REFRESH_SECONDS + 10)
+            except TaskError as exc:
+                expires, error = 0, str(exc)
+        else:
+            expires = 0
+        rows.append({'tag': config.get('tag'), 'pid': (config.get('target') or {}).get('pid'),
+                     'runner_alive': live, 'worker_alive': bool(watcher), 'verified': verified,
+                     'last_success': state.get('last_success', 0), 'expires_at': expires,
+                     'deadline': config.get('deadline', 0), 'status': state.get('status', 'unknown'),
+                     'error': error or state.get('error', ''), 'status_file': str(directory / 'status.json')})
+    return {'ok': True, 'guards': rows}
+
+
+def release_tag(tag):
+    if not re.fullmatch(TAG_RE, tag):
+        raise GuardError('Invalid managed tag for keep-awake release.')
+    changed = 0
+    for path in state_root().iterdir():
+        if not re.fullmatch(r'[0-9a-f]{24}', path.name):
+            continue
+        fd = lock_file(private_dir(path) / 'control.lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            config = read_json(path / 'config.json')
+            if config and config.get('tag') == tag:
+                config['disabled'] = True
+                write_json(path / 'config.json', config)
+                changed += 1
+        except BlockingIOError:
+            raise GuardError('Cloud guard is being updated; retry release.') from None
+        finally:
+            os.close(fd)
+    return {'ok': True, 'released': changed, 'note': 'Stops only v60 holds within a few seconds; does not kill Codex or stop legacy holds.'}
+
+
+def remote_request(request):
+    if request.get('operation') == 'status':
+        return status_all()
+    if request.get('operation') == 'release':
+        return release_tag(request.get('tag', ''))
+    if request.get('operation') != 'ensure':
+        raise GuardError('Unrecognized cloud guard operation.')
+    duration = request.get('seconds')
+    if duration is not None and (type(duration) is not int or not 0 <= duration <= 604800):
+        raise GuardError('Invalid keep-awake duration.')
+    return ensure(request.get('tag', ''), duration, request.get('runner', ''), request.get('pid', 0))
+
+
+def client(cli, context, org, sprite, request):
+    """No mutation retry on timeout. Source and non-secret request go via stdin."""
+    nonce = secrets.token_hex(16)
+    payload = json.dumps({'source': source_text(), 'request': request, 'nonce': nonce}).encode()
+    # Use an explicit namespace; only our fixed entrypoint handles the request.
+    receiver = ("import json,sys; p=json.load(sys.stdin); n={'__name__':'cloud_guard_received','_SOURCE':p['source']}; "
+                "exec(compile(p['source'],'<cloud-guard-v60>','exec'),n); n['received'](p)")
+    try:
+        help_result = subprocess.run([cli, 'exec', '--help'], cwd=context, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    except (subprocess.TimeoutExpired, OSError):
+        raise GuardError('Cannot check the local Sprite CLI transport capabilities; no cloud protection was confirmed.') from None
+    args = [cli, 'exec', *org, '-s', sprite]
+    if b'--http-post' in help_result.stdout + help_result.stderr:
+        args.append('--http-post')
+    args += ['--no-port-forward', '--', 'python3', '-c', receiver]
+    try:
+        result = subprocess.run(args, cwd=context, input=payload, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=STARTUP_TIMEOUT + 30)
+    except subprocess.TimeoutExpired:
+        raise GuardError('Cloud protection setup timed out (outcome unknown). It was not automatically replayed; rerun to check the same runner.') from None
+    except OSError:
+        raise GuardError('Cannot start the local Sprite CLI for protection verification.') from None
+    receipt = None
+    if len(result.stdout) <= 131072:
+        for line in result.stdout.decode('utf-8', 'replace').splitlines():
+            if line.startswith(MARKER):
+                try:
+                    candidate = json.loads(line[len(MARKER):])
+                    if candidate.get('nonce') == nonce:
+                        receipt = candidate
+                except (ValueError, AttributeError):
+                    pass
+    if not receipt:
+        raise GuardError(f'No verified cloud-protection receipt (Sprite CLI exit {result.returncode}). No agent was killed or relaunched.')
+    if not receipt.get('ok'):
+        # Only fixed error strings from this module are returned, not CLI output.
+        raise GuardError(str(receipt.get('error', 'Cloud protection not confirmed.'))[:700])
+    return receipt
+
+
+def report(receipt):
+    print('\n       CLOUD KEEP-AWAKE VERIFIED', flush=True)
+    print('       Renewal runs on the Sprite, independently of your laptop/terminal.')
+    print('       API lease verified until: ' + utc(receipt['expires_at']))
+    print('       Protection duration: ' + (('until ' + utc(receipt['deadline'])) if receipt.get('deadline') else 'while this managed runner remains alive (including idle prompts)'))
+    print('       Compute billing can continue while your laptop sleeps.')
+    print('       Status: ' + receipt['status_file'])
+    print('       No Codex restart or credential replacement was performed.', flush=True)
+
+
+def received(payload):
+    # A Sprite exec may inherit tokens. Do not pass them to the cloud guard.
+    home = str(Path.home())
+    os.environ.clear()
+    os.environ.update(HOME=home, PATH='/usr/local/bin:/usr/bin:/bin', LANG='C.UTF-8')
+    nonce = payload.get('nonce', '')
+    try:
+        reply = remote_request(payload.get('request', {}))
+    except GuardError as exc:
+        reply = {'ok': False, 'error': str(exc)}
+    except (OSError, ValueError, KeyError, TypeError):
+        reply = {'ok': False, 'error': 'Cloud guard operation failed (permissions, disk, process metadata, or configuration); no protection confirmed.'}
+    reply['nonce'] = nonce
+    print(MARKER + json.dumps(reply, separators=(',', ':')), flush=True)
+
+
+def main():
+    if len(sys.argv) < 2:
+        raise GuardError('Cloud guard action required.')
+    if sys.argv[1] == 'worker':
+        return worker(sys.argv[2])
+    if sys.argv[1] == 'ensure':
+        duration = int(sys.argv[3])
+        receipt = ensure(sys.argv[2], duration, pid=int(sys.argv[4]))
+        report(receipt)
+        return 0
+    if sys.argv[1] == 'status':
+        print(json.dumps(status_all(), indent=2))
+        return 0
+    if sys.argv[1] == 'release':
+        print(json.dumps(release_tag(sys.argv[2]), indent=2))
+        return 0
+    raise GuardError('Unknown cloud guard action.')
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except GuardError as exc:
+        print('error: ' + str(exc), file=sys.stderr)
+        raise SystemExit(1)
+CLOUD_GUARD_PY
+}
+
 attach_only_python() {
   cat <<'ATTACH_ONLY_PY'
-"""Local-only Sprite/session picker. Optional download is a separate host hook.
+"""Sprite/session picker with cloud keep-awake verification for managed runners.
 
 CLI/API contracts checked 2026-09-24:
 https://docs.sprites.dev/api/dev-latest/exec/
@@ -1734,6 +2442,29 @@ def command_info(record: dict):
     return command, label, safe(workdir) or "unknown"
 
 
+def managed_guard_target(record):
+    command = record.get('command', record.get('cmd', ''))
+    if isinstance(command, list) and all(isinstance(v, str) for v in command):
+        args = command
+    elif isinstance(command, str):
+        try:
+            args = shlex.split(command)
+        except ValueError:
+            return None
+    else:
+        return None
+    for index, arg in enumerate(args):
+        if len(args) <= index + 7 or not args[index + 1].isdigit():
+            continue
+        tag = args[index + 3]
+        if not re.fullmatch(r'sprite-(?:codex|kimi-code)-native-[A-Za-z0-9._-]{1,100}', tag):
+            continue
+        base = os.path.basename(arg)
+        if (base == tag + '-runner' or base.startswith(tag + '-runner-')) and arg.startswith('/'):
+            return {'tag': tag, 'runner': arg}
+    return None
+
+
 def parse_sessions(root: object):
     records, meta = collection(root, ("sessions", "items", "data"))
     if flag(meta.get("has_more")) is True or meta.get("next_continuation_token"):
@@ -1772,7 +2503,7 @@ def parse_sessions(root: object):
         created, epoch, display = created_info(record)
         identity = hashlib.sha256(json.dumps([sid, command, created], sort_keys=True).encode()).hexdigest()
         rows.append({"id": sid, "label": label, "workdir": workdir, "created": display,
-                     "epoch": epoch, "identity": identity, "activity": active})
+                     "epoch": epoch, "identity": identity, "activity": active, "guard_target": managed_guard_target(record)})
     rows.sort(key=lambda r: (r["epoch"], r["id"]), reverse=True)
     return rows, excluded
 
@@ -1947,6 +2678,42 @@ class Picker:
             raise AttachError("Session identity changed since selection; refusing to attach to a potentially reused ID.")
         return current is not None
 
+    def cloud_protection(self, sprite, row=None, status_only=False):
+        import runpy
+        if not status_only and not row.get('guard_target'):
+            if row.get('label') in ('Codex runner', 'Kimi Code runner'):
+                raise AttachError('Managed runner metadata is incomplete; cannot verify cloud keep-awake protection.')
+            print('       Unmanaged terminal: no automatic cloud keep-awake was installed.')
+            return
+        path = os.environ.get('SPRITE_CLOUD_GUARD_HELPER', '')
+        if not path or not os.path.isfile(path):
+            raise AttachError('Cloud guard helper is unavailable locally; rerun the complete v60 script.')
+        module = runpy.run_path(path)
+        try:
+            if status_only:
+                request = {'operation': 'status'}
+            else:
+                request = {'operation': 'ensure', **row['guard_target'],
+                           'seconds': module['seconds_from_hours'](os.environ.get('SPRITE_RUN_HOURS'))}
+                print('       Verifying independent cloud keep-awake before attachment...', flush=True)
+            receipt = module['client'](self.cli, self.context, self.org, sprite, request)
+            if status_only:
+                if not receipt.get('guards'):
+                    print('       No v60 guard has been recorded on this Sprite.')
+                for item in receipt.get('guards', []):
+                    print('       ' + safe(item.get('tag')) + ': ' + ('VERIFIED' if item.get('verified') else 'NOT VERIFIED'))
+                    print('       Runner PID=' + str(item.get('pid')) + '; alive=' + str(item.get('runner_alive')) + '; worker alive=' + str(item.get('worker_alive')))
+                    print('       Last renewal: ' + (module['utc'](item['last_success']) if item.get('last_success') else 'never') + '; lease: ' + (module['utc'](item['expires_at']) if item.get('expires_at') else 'none verified'))
+                    print('       Policy: ' + module['utc'](item.get('deadline', 0)) + '; state=' + safe(item.get('status')))
+                    print('       Status file: ' + safe(item.get('status_file'), 600))
+                    if item.get('error'):
+                        print('       ' + safe(item['error'], 700))
+                print('       This check may wake a cold Sprite; it cannot prove uninterrupted past uptime.')
+            else:
+                module['report'](receipt)
+        except module['GuardError'] as exc:
+            raise AttachError(str(exc)) from None
+
     def attach(self, sprite: str, row: dict) -> int:
         # Keep the caller's .sprite file and project resume-state files untouched.
         self.capture(["use", *self.org, sprite])
@@ -1960,6 +2727,9 @@ class Picker:
         # Recheck AFTER the picker and context creation, immediately before attach.
         if not self.live_same_session(sprite, row):
             raise AttachError("Selected session ended before attachment. No replacement was started.", 3)
+        self.cloud_protection(sprite, row)
+        if not self.live_same_session(sprite, row):
+            raise AttachError("Session changed during cloud protection setup; no attachment was made.", 3)
         print(f"\n       Attaching to {sprite}, native session {row['id']} ({row['label']}).")
         print("       Existing process credentials are unchanged; no keys, updates or setup.")
         print("       Detach with Ctrl+\\. This is NOT codex resume; no new Codex is launched.", flush=True)
@@ -2015,8 +2785,11 @@ class Picker:
 def main() -> int:
     if sys.version_info < (3, 9):
         raise AttachError("Attach-only requires local Python 3.9 or newer.", 2)
-    selection_only = len(sys.argv) > 3 and sys.argv[3] == "download"
-    if not selection_only and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+    action = sys.argv[3] if len(sys.argv) > 3 else 'attach'
+    protection_only = action == 'protect'
+    status_only = action == 'guard-status'
+    selection_only = action in ('download', 'guard-status')
+    if not selection_only and not protection_only and (not sys.stdin.isatty() or not sys.stdout.isatty()):
         raise AttachError("Attach-only requires an interactive terminal for stdin and stdout. Nothing was launched.", 2)
     requested_id = sys.argv[1] if len(sys.argv) > 1 else ""
     requested_sprite = os.environ.get("SPRITE_NAME", "")
@@ -2034,18 +2807,22 @@ def main() -> int:
                 with open(receipt + ".context", "wb") as target:
                     target.write(data)
     if selection_only and not requested_sprite and (not sys.stdin.isatty() or not sys.stdout.isatty()):
-        raise AttachError("Noninteractive --download-output requires SPRITE_NAME.", 2)
+        raise AttachError("Noninteractive Sprite selection requires SPRITE_NAME.", 2)
     if requested_id:
         identifier(requested_id, "--session-id", SESSION_PATTERN)
         if not requested_sprite:
             raise AttachError("--session-id requires SPRITE_NAME to avoid attaching to the same ID on the wrong Sprite.", 2)
-    print("\n=== choose Sprite for output download" if selection_only else "\n=== attach-only: existing native Sprite terminal", flush=True)
+    print("\n=== cloud keep-awake status" if status_only else "\n=== choose Sprite for output download" if selection_only else "\n=== attach-only: existing native Sprite terminal", flush=True)
     print("       Uses your local Sprites login; no GitHub, Fly-app or model keys are requested.")
     if os.environ.get("FORCE_NEW_SESSION") == "1":
         print("       FORCE_NEW_SESSION=1 is ignored in attach-only mode; existing sessions will not be killed.")
     with tempfile.TemporaryDirectory(prefix="sprite-codex-attach-") as context:
         picker = Picker(context, selection_only=selection_only)
         sprite = picker.choose_sprite(requested_sprite)
+        if status_only:
+            picker.capture(["use", *picker.org, sprite])
+            picker.cloud_protection(sprite, status_only=True)
+            return 0
         if selection_only:
             write_receipt(sprite)
             return 0
@@ -2054,6 +2831,10 @@ def main() -> int:
             if row is None:
                 sprite = picker.choose_sprite()
                 continue
+            if protection_only:
+                picker.capture(["use", *picker.org, sprite])
+                picker.cloud_protection(sprite, row)
+                return 0
             rc = picker.attach(sprite, row)
             write_receipt(sprite)
             return rc
@@ -2077,19 +2858,22 @@ if __name__ == "__main__":
 ATTACH_ONLY_PY
 }
 
-run_attach_only() {
+run_attach_only() (
   command -v python3 >/dev/null 2>&1 || { echo "error: local python3 is required for attach-only" >&2; return 127; }
-  # -c leaves stdin attached to the real terminal for the picker and Sprite CLI.
-  # All inventory parsing happens locally. No helper is uploaded to the Sprite.
-  python3 -c "$(attach_only_python)" "$ATTACH_SESSION_ID" "${1:-}" "$RUN_MODE"
-}
+  local_guard_dir=$(mktemp -d) || return 1
+  trap 'rm -rf -- "$local_guard_dir"' EXIT
+  cloud_guard_python >"$local_guard_dir/guard.py"
+  # Only managed attachments upload a secret-free guard. Files/ZIP selection does not.
+  SPRITE_CLOUD_GUARD_HELPER="$local_guard_dir/guard.py" \
+    python3 -c "$(attach_only_python)" "$ATTACH_SESSION_ID" "${1:-}" "$RUN_MODE"
+)
 
 
 # v52: all file-mode dispatch stays above bootstrap config/credentials/side effects.
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v59.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v60.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
 import base64
@@ -3794,7 +4578,7 @@ run_file_access() (
 
 retrieve_python() {
   cat <<'RETRIEVE_PY'
-"""Local interactive retrieve mode. Embedded into sprite-codex-v59.sh."""
+"""Local interactive retrieve mode. Embedded into sprite-codex-v60.sh."""
 import contextlib
 import getpass
 import hashlib
@@ -4425,6 +5209,13 @@ run_retrieve() (
   python3 "$local_sources/retrieve.py" "$local_sources" "$OUTPUT_HOST_DIR" "$FILE_WORKDIR"
 )
 
+if [[ $RUN_MODE == guard-status ]]; then
+  if [[ -n $ATTACH_SESSION_ID ]] || (( _OUTPUT_DIR_SELECTED || _JSON_OUTPUT_SELECTED || _FILE_WORKDIR_SELECTED )); then
+    echo "error: --keep-awake-status does not accept session/path/report selectors" >&2; exit 2
+  fi
+  if run_attach_only; then exit 0; else exit $?; fi
+fi
+
 if [[ $RUN_MODE == retrieve ]]; then
   if [[ -n $ATTACH_SESSION_ID ]] || (( _OUTPUT_DIR_SELECTED == 1 || _JSON_OUTPUT_SELECTED == 1 )); then
     echo "error: --retrieve does not accept --session-id, --output-dir, or --json-output" >&2; exit 2
@@ -4660,7 +5451,7 @@ KIMI_CODE_MODE_SELECTED=0
 AGENT_KIND=""
 AGENT_LABEL=""
 AGENT_PROVIDER=""
-DEFAULT_RUN_HOURS="${DEFAULT_RUN_HOURS:-8}"
+DEFAULT_RUN_HOURS="${DEFAULT_RUN_HOURS:-session}"
 SPRITE_RUN_HOURS="${SPRITE_RUN_HOURS:-}"
 STARTUP_REPO_PUSH_MODE="${STARTUP_REPO_PUSH_MODE:-ask}"
 EXIT_AFTER_STARTUP_REPO_PUSH="${EXIT_AFTER_STARTUP_REPO_PUSH:-0}"
@@ -8114,7 +8905,7 @@ AGENT_KIND=${6:-codex}
 AGENT_PROVIDER=${7:-deepseek}
 KIMI_CODE_APPROVAL_MODE=${8:-normal}
 
-[[ $RUN_SECONDS =~ ^[0-9]+$ ]] && ((RUN_SECONDS > 0)) || { echo "invalid run duration: $RUN_SECONDS" >&2; exit 80; }
+[[ $RUN_SECONDS =~ ^[0-9]+$ ]] && ((RUN_SECONDS >= 0)) || { echo "invalid run duration: $RUN_SECONDS" >&2; exit 80; }
 [[ $TASK_NAME =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid task name: $TASK_NAME" >&2; exit 81; }
 [[ $SESSION_TAG =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid session tag: $SESSION_TAG" >&2; exit 85; }
 case "$AGENT_KIND" in codex|kimi-code) ;; *) echo "invalid agent kind: $AGENT_KIND" >&2; exit 84 ;; esac
@@ -8127,92 +8918,709 @@ else
 fi
 case "$KIMI_CODE_APPROVAL_MODE" in normal|yolo|auto) ;; *) echo "invalid Kimi Code approval mode: $KIMI_CODE_APPROVAL_MODE" >&2; exit 84 ;; esac
 
-api() {
-  curl -sS --max-time 8 --unix-socket /.sprite/api.sock -H 'Content-Type: application/json' "$@"
-}
-
 RUNNER_PID=$$
-DEADLINE=$(( $(date +%s) + RUN_SECONDS ))
-HB_PID=""
+DEADLINE=0
+(( RUN_SECONDS == 0 )) || DEADLINE=$(( $(date +%s) + RUN_SECONDS ))
 STATE_DIR="$HOME/.local/state/sprite-codex"
-HOLD_STATE_FILE="$STATE_DIR/hold-state-${SESSION_TAG}"
-HOLD_DEADLINE_FILE="$STATE_DIR/hold-deadline-${SESSION_TAG}"
-HOLD_RELEASED_MARKER="$STATE_DIR/hold-released-${SESSION_TAG}.marker"
-HOLD_ENDED_FILE="$STATE_DIR/hold-ended-${SESSION_TAG}.marker"
-RUNNER_PID_FILE="$STATE_DIR/runner-pid-${SESSION_TAG}"
-PROVIDER_FILE="$STATE_DIR/provider-${SESSION_TAG}"
-WORKDIR_FILE="$STATE_DIR/workdir-${SESSION_TAG}"
 mkdir -p "$STATE_DIR"
-printf 'active\n' >"$HOLD_STATE_FILE"
-printf '%s\n' "$DEADLINE" >"$HOLD_DEADLINE_FILE"
-printf '%s\n' "$RUNNER_PID" >"$RUNNER_PID_FILE"
-printf '%s\n' "$AGENT_PROVIDER" >"$PROVIDER_FILE"
-printf '%s\n' "$WORKDIR" >"$WORKDIR_FILE"
-rm -f "$HOLD_RELEASED_MARKER" "$HOLD_ENDED_FILE"
-
-# Sprite TTY sessions are detachable; ignore a hangup so client loss cannot
-# become a reason to terminate the remote runner/Codex process tree.
+HOLD_STATE_FILE="$STATE_DIR/hold-state-${SESSION_TAG}"
+HOLD_ENDED_FILE="$STATE_DIR/hold-ended-${SESSION_TAG}.marker"
+printf 'starting\n' >"$HOLD_STATE_FILE"
+printf '%s\n' "$DEADLINE" >"$STATE_DIR/hold-deadline-${SESSION_TAG}"
+printf '%s\n' "$RUNNER_PID" >"$STATE_DIR/runner-pid-${SESSION_TAG}"
+printf '%s\n' "$AGENT_PROVIDER" >"$STATE_DIR/provider-${SESSION_TAG}"
+printf '%s\n' "$WORKDIR" >"$STATE_DIR/workdir-${SESSION_TAG}"
+rm -f -- "$STATE_DIR/hold-released-${SESSION_TAG}.marker" "$HOLD_ENDED_FILE"
 trap '' HUP
-
 cleanup_task() {
-  local ended_at
-  if [[ -n $HB_PID ]]; then kill "$HB_PID" 2>/dev/null || true; wait "$HB_PID" 2>/dev/null || true; fi
-  api -X DELETE "http://sprite/v1/tasks/$TASK_NAME" >/dev/null 2>&1 || true
-  if [[ ! -f $HOLD_RELEASED_MARKER ]]; then
-    ended_at=$(date +%s)
-    printf 'ended\n' >"$HOLD_STATE_FILE" 2>/dev/null || true
-    printf '%s\n' "$ended_at" >"$HOLD_ENDED_FILE" 2>/dev/null || true
-  fi
+  printf 'ended\n' >"$HOLD_STATE_FILE" 2>/dev/null || true
+  date +%s >"$HOLD_ENDED_FILE" 2>/dev/null || true
+  # The independent cloud worker releases its own task when this PID/birth ends.
+  # A local disconnect is not a cleanup signal; no remote agent is killed here.
 }
-trap cleanup_task EXIT INT TERM
+trap cleanup_task EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! env -i HOME="$HOME" PATH="/usr/local/bin:/usr/bin:/bin" \
+    python3 -c 'import sys; s=sys.stdin.read(); exec(compile(s,"<cloud-guard-v60>","exec"), {"__name__":"__main__","_SOURCE":s})' \
+    ensure "$SESSION_TAG" "$RUN_SECONDS" "$RUNNER_PID" <<'V60_RUNNER_GUARD'
+#!/usr/bin/env python3
+"""v60 cloud-side keep-awake guard; no agent credentials or terminal I/O.
 
-heartbeat() {
-  trap '' HUP
-  trap 'api -X DELETE "http://sprite/v1/tasks/'"$TASK_NAME"'" >/dev/null 2>&1 || true; exit 0' EXIT INT TERM
-  local now failures=0
-  while kill -0 "$RUNNER_PID" 2>/dev/null; do
-    now=$(date +%s)
-    if (( now >= DEADLINE )); then
-      printf 'released\n' >"$HOLD_STATE_FILE" 2>/dev/null || true
-      printf '%s\n' "$now" >"$HOLD_RELEASED_MARKER" 2>/dev/null || true
-      echo >&2
-      echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
-      echo "WARNING: TASKS API KEEP-AWAKE HOLD HAS REACHED ITS HARD CAP" >&2
-      echo "Task '$TASK_NAME' is being released while $AGENT_KIND remains alive." >&2
-      echo "The native Sprite TTY remains a running session/activity while it is live." >&2
-      echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
-      break
-    fi
-    if api -X PUT "http://sprite/v1/tasks/$TASK_NAME" -d '{"expire":"5m"}' >/dev/null; then
-      (( failures > 0 )) && echo "       Sprite task heartbeat recovered after $failures failed refresh(es)" >&2
-      failures=0
-    else
-      failures=$((failures+1))
-      echo "warning: failed to refresh Sprite task $TASK_NAME (consecutive failures=$failures); retrying in about 60 seconds" >&2
-    fi
-    for _ in $(seq 1 12); do
-      kill -0 "$RUNNER_PID" 2>/dev/null || break 2
-      [[ $(date +%s) -lt $DEADLINE ]] || break
-      sleep 5 & wait $!
-    done
-  done
-}
+Tasks API: https://docs.fly.io/sprites/keeping-sprites-running
+This guards an existing Linux process identity; it does not resurrect agents.
+Only this program's own task is created/refreshed/deleted. No agent is signalled.
+"""
+from __future__ import annotations
 
-REGISTERED=0
-for attempt in 1 2 3 4 5; do
-  if api -X PUT "http://sprite/v1/tasks/$TASK_NAME" -d '{"expire":"5m"}' >/dev/null; then REGISTERED=1; break; fi
-  sleep 2
-done
-[[ $REGISTERED == 1 ]] || { echo "could not register the Sprite keep-awake task after five attempts" >&2; exit 82; }
-TASK_JSON=$(api "http://sprite/v1/tasks/$TASK_NAME" 2>/dev/null || true)
-[[ -n $TASK_JSON ]] && echo "       task hold verified: $TASK_NAME" || echo "warning: task hold could not be verified; continuing without a confirmed Tasks API hold" >&2
-heartbeat &
-HB_PID=$!
+import datetime as dt
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
+import fcntl
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+SOCKET_PATH = '/.sprite/api.sock'
+PROC = Path('/proc')
+API_TIMEOUT = 8
+REFRESH_SECONDS = 60
+POLL_SECONDS = 2
+RETRY_SECONDS = 5
+STARTUP_TIMEOUT = 40
+LEASE_SECONDS = 300
+TAG_RE = r'sprite-(?:codex|kimi-code)-native-[A-Za-z0-9._-]{1,100}'
+MARKER = 'SPRITE_CLOUD_GUARD_V60='
+
+
+class GuardError(Exception):
+    pass
+
+
+class TaskError(GuardError):
+    pass
+
+
+def source_text():
+    return globals().get('_SOURCE') or Path(__file__).read_text(encoding='utf-8')
+
+
+def seconds_from_hours(value):
+    """None means preserve existing policy; zero means process lifetime."""
+    if value in (None, ''):
+        return None
+    if str(value).lower() == 'session':
+        return 0
+    try:
+        hours = Decimal(str(value))
+    except InvalidOperation:
+        raise GuardError('SPRITE_RUN_HOURS must be session or a positive number up to 168.') from None
+    if not hours.is_finite() or not 0 < hours <= 168:
+        raise GuardError('SPRITE_RUN_HOURS must be session or a positive number up to 168.')
+    return int((hours * 3600).to_integral_value(rounding=ROUND_CEILING))
+
+
+def timestamp(value):
+    if not isinstance(value, str):
+        raise TaskError('Tasks API expires_at is not an RFC3339 timestamp.')
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            raise ValueError()
+        result = parsed.timestamp()
+    except (ValueError, OverflowError, OSError):
+        raise TaskError('Tasks API expires_at is invalid or has no timezone.') from None
+    return result
+
+
+def utc(value):
+    return dt.datetime.fromtimestamp(value, dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC') if value else 'session lifetime'
+
+
+class UnixHTTP(http.client.HTTPConnection):
+    def __init__(self):
+        super().__init__('sprite', timeout=API_TIMEOUT)
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(SOCKET_PATH)
+
+
+class Tasks:
+    def call(self, method, path, body=None):
+        conn = UnixHTTP()
+        data = None if body is None else json.dumps(body).encode('utf-8')
+        try:
+            conn.request(method, path, body=data, headers={'Content-Type': 'application/json', 'Connection': 'close'})
+            response = conn.getresponse()
+            raw = response.read(65537)
+            code = response.status
+        except (OSError, http.client.HTTPException):
+            raise TaskError('Tasks API socket/HTTP request failed; no verified renewal.') from None
+        finally:
+            conn.close()
+        if method == 'DELETE' and code == 404:
+            return None
+        if not 200 <= code < 300:
+            # Never echo arbitrary bodies or redirect to another host.
+            raise TaskError(f'Tasks API {method} returned HTTP {code}; request was not accepted.')
+        if len(raw) > 65536:
+            raise TaskError('Tasks API response exceeded the bounded read limit.')
+        return raw
+
+    def verify(self, name, minimum_remaining=1):
+        raw = self.call('GET', '/v1/tasks/' + name)
+        try:
+            task = json.loads(raw)
+        except (ValueError, TypeError):
+            raise TaskError('Tasks API verification returned invalid JSON.') from None
+        if isinstance(task, dict) and isinstance(task.get('task'), dict):
+            task = task['task']
+        if not isinstance(task, dict) or task.get('error') or task.get('name') != name:
+            raise TaskError('Tasks API verification did not identify the expected task.')
+        expires = timestamp(task.get('expires_at'))
+        remaining = expires - time.time()
+        if remaining < minimum_remaining or remaining > 3660:
+            raise TaskError('Tasks API task expiration is past, too close, or outside the documented one-hour limit.')
+        return expires
+
+    def renew(self, name, seconds=LEASE_SECONDS):
+        if not isinstance(seconds, int) or not 1 <= seconds <= 3600:
+            raise TaskError('Invalid task lease duration.')
+        self.call('PUT', '/v1/tasks/' + name, {'expire': seconds})
+        # Require nearly the requested lease, not merely a future timestamp.
+        # A 45-second lease would be insufficient for a 60-second renewal loop.
+        return self.verify(name, max(0.1, seconds - 2 * API_TIMEOUT - 5))
+
+    def release(self, name):
+        self.call('DELETE', '/v1/tasks/' + name)
+
+
+def process_identity(pid):
+    """Use boot ID + PID + Linux start ticks, not kill(pid, 0) alone."""
+    try:
+        pid = int(pid)
+        if pid <= 1:
+            return None
+        directory = PROC / str(pid)
+        owner = directory.stat().st_uid
+        if owner != os.getuid():
+            return None
+        raw = (directory / 'stat').read_text()
+        fields = raw[raw.rindex(')') + 2:].split()
+        if len(fields) < 20 or fields[0] in ('Z', 'X', 'x'):
+            return None
+        return {'pid': pid, 'start_ticks': fields[19], 'boot_id': (PROC / 'sys/kernel/random/boot_id').read_text().strip(), 'uid': owner}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def same_process(identity):
+    return isinstance(identity, dict) and process_identity(identity.get('pid', 0)) == identity
+
+
+def runner_record(pid, tag, runner_path=''):
+    identity = process_identity(pid)
+    if identity is None:
+        return None
+    try:
+        with (PROC / str(pid) / 'cmdline').open('rb') as handle:
+            raw = handle.read(65537)
+        if len(raw) > 65536:
+            return None
+        args = [x.decode('utf-8', 'strict') for x in raw.rstrip(b'\0').split(b'\0')]
+        # Python helpers, arbitrary shell command text and unrelated agents do not match.
+        if not args or os.path.basename(args[0]) not in ('bash', 'sh'):
+            return None
+        for index, arg in enumerate(args[1:], 1):
+            if arg.startswith('-'):
+                continue
+            base = os.path.basename(arg)
+            if not (base == tag + '-runner' or base.startswith(tag + '-runner-')):
+                return None  # the script, not any later argument, must be the runner
+            if runner_path and arg != runner_path:
+                return None
+            if len(args) <= index + 7 or not args[index + 1].isdigit():
+                return None
+            if args[index + 3] != tag or not args[index + 4].startswith('/'):
+                return None
+            kind = 'kimi-code' if tag.startswith('sprite-kimi-code-') else 'codex'
+            if args[index + 6] != kind:
+                return None
+            # Recheck birth after reading argv (PID could have been reused).
+            if not same_process(identity):
+                return None
+            return {'identity': identity, 'runner': arg, 'tag': tag, 'workdir': args[index + 4]}
+    except (OSError, UnicodeError):
+        return None
+    return None
+
+
+def parent_pid(pid):
+    try:
+        raw = (PROC / str(pid) / 'stat').read_text()
+        return int(raw[raw.rindex(')') + 2:].split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def find_runner(tag, runner_path='', pid=0):
+    if not re.fullmatch(TAG_RE, tag):
+        raise GuardError('Cannot identify a managed Codex/Kimi runner tag.')
+    if pid:
+        record = runner_record(pid, tag, runner_path)
+        if record is None:
+            raise GuardError('The requested managed runner is not a live owned process.')
+        return record
+    records = {}
+    for entry in PROC.iterdir():
+        if entry.name.isdigit():
+            record = runner_record(int(entry.name), tag, runner_path)
+            if record:
+                records[int(entry.name)] = record
+    # Old Bash heartbeat subshells retain their parent's argv. They are not agents.
+    roots = []
+    for candidate, record in records.items():
+        ancestor, visited, child = parent_pid(candidate), set(), False
+        while ancestor > 1 and ancestor not in visited:
+            if ancestor in records:
+                child = True
+                break
+            visited.add(ancestor)
+            ancestor = parent_pid(ancestor)
+        if not child:
+            roots.append(record)
+    if len(roots) != 1:
+        raise GuardError('Managed runner discovery is absent or ambiguous; no process was started/replaced. Recheck the selected session.')
+    return roots[0]
+
+
+def private_dir(path):
+    path = Path(path)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise GuardError('Keep-awake state directory must be a private owned directory, not a symlink.')
+    return path
+
+
+def state_root():
+    home = Path.home()
+    # Verify each managed path component. Do not follow an injected .local/state link.
+    current = home
+    for part in ('.local', 'state', 'sprite-codex', 'keepawake-v60'):
+        current = current / part
+        if current.is_symlink():
+            raise GuardError('Refusing a symlink in the cloud guard state path.')
+        current.mkdir(mode=0o700, exist_ok=True)
+        info = current.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise GuardError('Cloud guard state path is not an owned, non-writable-by-others directory.')
+    return private_dir(current)
+
+
+def read_json(path):
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    try:
+        # Atomic replacement can unlink the already-open old inode (nlink=0).
+        # That is safe; multiple links, symlinks and wrong ownership are not.
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink > 1:
+            raise GuardError('Unsafe keep-awake state file; refusing to read it.')
+        with os.fdopen(fd, 'rb') as handle:
+            fd = -1
+            raw = handle.read(65537)
+        if len(raw) > 65536:
+            raise GuardError('Keep-awake state file is oversized.')
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError()
+        return data
+    except (ValueError, UnicodeError):
+        raise GuardError('Keep-awake state file is malformed.') from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def write_json(path, data):
+    fd, temporary = tempfile.mkstemp(prefix='.guard-', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, sort_keys=True)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def lock_file(path):
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+        os.close(fd)
+        raise GuardError('Unsafe keep-awake lock file.')
+    return fd
+
+
+def log_event(directory, message):
+    """Fixed messages only; no command lines, credentials, or HTTP bodies."""
+    path = directory / 'events.log'
+    if path.exists() and not path.is_symlink() and path.stat().st_size > 262144:
+        os.replace(path, directory / 'events.previous.log')
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+            raise GuardError('Unsafe guard log file.')
+        os.write(fd, (utc(time.time()) + ' ' + message + '\n').encode())
+    finally:
+        os.close(fd)
+
+
+def source_install(root):
+    source = source_text().encode('utf-8')
+    digest = hashlib.sha256(source).hexdigest()
+    path = root / ('guard-' + digest[:24] + '.py')
+    if path.exists() or path.is_symlink():
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+            raise GuardError('Unsafe installed cloud guard file.')
+        if path.read_bytes() != source:
+            raise GuardError('Installed cloud guard content mismatch.')
+        return path
+    fd, temporary = tempfile.mkstemp(prefix='.source-', dir=root)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(source)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.is_symlink() or path.read_bytes() != source:
+                raise GuardError('Cloud guard installation raced with another file.')
+    finally:
+        os.unlink(temporary)
+    return path
+
+
+def guard_directory(record):
+    key = hashlib.sha256(json.dumps(record['identity'], sort_keys=True).encode()).hexdigest()[:24]
+    return private_dir(state_root() / key), 'sprite-codex-guard-' + key
+
+
+def worker(directory):
+    directory = private_dir(directory)
+    fd = lock_file(directory / 'worker.lock')
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return 0
+    stopped = [False]
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, lambda *args: stopped.__setitem__(0, True))
+    signal.signal(signal.SIGTERM, lambda *args: stopped.__setitem__(0, True))
+    api = Tasks()
+    config = read_json(directory / 'config.json')
+    if not config:
+        os.close(fd)
+        return 1
+    identity = config['target']
+    task = config['task']
+    own = process_identity(os.getpid())
+    state = {'version': 60, 'worker': own, 'target': identity, 'task': task,
+             'status': 'starting', 'last_success': 0, 'expires_at': 0, 'failures': 0}
+    next_renew = 0.0
+    reason = 'stopped'
+    try:
+        log_event(directory, 'worker started; no controlling terminal')
+        while not stopped[0]:
+            config = read_json(directory / 'config.json')
+            if not config or config.get('target') != identity or config.get('task') != task:
+                reason = 'configuration-changed'
+                break
+            if config.get('disabled'):
+                reason = 'released-by-user'
+                break
+            if not same_process(identity):
+                reason = 'runner-ended'
+                break
+            deadline = config.get('deadline', 0)
+            if deadline and time.time() >= deadline:
+                reason = 'deadline-reached'
+                break
+            if state.get('generation') != config['generation']:
+                next_renew = 0.0
+            state['deadline'] = deadline
+            state['generation'] = config['generation']
+            if time.monotonic() >= next_renew:
+                lease = LEASE_SECONDS if not deadline else min(LEASE_SECONDS, max(1, int(deadline - time.time())))
+                try:
+                    expires = api.renew(task, lease)
+                    state.update(status='verified', last_success=time.time(), expires_at=expires, failures=0, error='')
+                    log_event(directory, 'task verified until ' + utc(expires))
+                    next_renew = time.monotonic() + min(REFRESH_SECONDS, max(0.2, lease / 3))
+                except TaskError as exc:
+                    state.update(status='unverified', failures=state['failures'] + 1, error=str(exc))
+                    log_event(directory, str(exc))
+                    next_renew = time.monotonic() + RETRY_SECONDS
+            state['checked_at'] = time.time()
+            write_json(directory / 'status.json', state)
+            time.sleep(POLL_SECONDS)
+    except (GuardError, OSError, KeyError, TypeError):
+        reason = 'worker-error'
+    finally:
+        try:
+            api.release(task)
+            state['release_verified'] = True
+        except TaskError:
+            state['release_verified'] = False  # short API lease expires by itself
+        state.update(status=reason, checked_at=time.time())
+        try:
+            write_json(directory / 'status.json', state)
+            log_event(directory, 'worker ended: ' + reason + '; agent was not signalled')
+        except (OSError, GuardError):
+            pass
+        os.close(fd)
+    return 0
+
+
+def ensure(tag, duration=None, runner_path='', pid=0):
+    record = find_runner(tag, runner_path, pid)
+    directory, task = guard_directory(record)
+    root = directory.parent
+    installed = source_install(root)
+    fd = lock_file(directory / 'control.lock')
+    cutoff = time.monotonic() + STARTUP_TIMEOUT
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= cutoff:
+                    raise GuardError('Another guard installation is busy; no agent was changed.')
+                time.sleep(0.1)
+        existing = read_json(directory / 'config.json')
+        if existing and existing.get('target') != record['identity']:
+            raise GuardError('Guard process identity changed; refusing to reuse it.')
+        if existing and duration is None:
+            deadline = existing.get('deadline', 0)
+            if existing.get('disabled'):
+                raise GuardError('Protection was explicitly released. Set SPRITE_RUN_HOURS=session or a duration to enable it again.')
+            if deadline and deadline <= time.time():
+                raise GuardError('The chosen keep-awake deadline has expired. Set SPRITE_RUN_HOURS=session or a duration to renew it.')
+        else:
+            deadline = time.time() + duration if duration else 0
+        generation = secrets.token_hex(12)
+        config = {'target': record['identity'], 'tag': tag, 'task': task, 'deadline': deadline,
+                  'generation': generation, 'disabled': False}
+        write_json(directory / 'config.json', config)
+        old = read_json(directory / 'status.json')
+        active = old and same_process(old.get('worker')) and old.get('status') not in (
+            'runner-ended', 'deadline-reached', 'worker-error', 'released-by-user', 'configuration-changed', 'stopped')
+        if not active:
+            # A previous worker may be finishing its final status write and lock release.
+            while old and same_process(old.get('worker')):
+                if time.monotonic() >= cutoff:
+                    raise GuardError('Previous guard is still shutting down; retry protection setup.')
+                time.sleep(0.05)
+            # The worker gets neither this terminal nor the agent's credentials.
+            env = {'HOME': str(Path.home()), 'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'PYTHONUNBUFFERED': '1'}
+            subprocess.Popen([sys.executable, str(installed), 'worker', str(directory)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, close_fds=True, cwd=str(root), env=env)
+        while time.monotonic() < cutoff:
+            if not same_process(record['identity']):
+                raise GuardError('The original runner ended during keep-awake verification; nothing was relaunched.')
+            state = read_json(directory / 'status.json')
+            if state and state.get('generation') == generation and state.get('status') == 'verified' and same_process(state.get('worker')):
+                if time.time() - state.get('last_success', 0) <= REFRESH_SECONDS + 10:
+                    expires = Tasks().verify(task, min(30, max(0.1, (deadline - time.time()) / 2)) if deadline else 30)
+                    # The API hold must be tied to the same live worker AND runner.
+                    if not same_process(state['worker']) or not same_process(record['identity']):
+                        raise GuardError('Guard or runner ended during final verification.')
+                    return {'ok': True, 'tag': tag, 'task': task, 'pid': record['identity']['pid'],
+                            'worker_pid': state['worker']['pid'], 'expires_at': expires, 'deadline': deadline,
+                            'status_file': str(directory / 'status.json'), 'log_file': str(directory / 'events.log')}
+            if state and state.get('generation') == generation and state.get('status') in ('worker-error', 'configuration-changed', 'deadline-reached', 'runner-ended'):
+                raise GuardError('Cloud guard stopped before verification; no protection was confirmed.')
+            time.sleep(0.15)
+        state = read_json(directory / 'status.json') or {}
+        detail = state.get('error', 'Cloud worker readiness timed out.')
+        raise GuardError(detail + ' Existing agent was not killed; do not assume unattended protection.')
+    finally:
+        os.close(fd)
+
+
+def status_all():
+    root = state_root()
+    rows = []
+    for path in sorted(root.iterdir()):
+        if not re.fullmatch(r'[0-9a-f]{24}', path.name):
+            continue
+        directory = private_dir(path)
+        config = read_json(directory / 'config.json')
+        state = read_json(directory / 'status.json') or {}
+        if not config:
+            continue
+        live = same_process(config.get('target'))
+        watcher = same_process(state.get('worker'))
+        verified = False
+        error = ''
+        if live and watcher and not config.get('disabled'):
+            try:
+                expires = Tasks().verify(config['task'])
+                verified = (state.get('status') == 'verified' and time.time() - state.get('last_success', 0) <= REFRESH_SECONDS + 10)
+            except TaskError as exc:
+                expires, error = 0, str(exc)
+        else:
+            expires = 0
+        rows.append({'tag': config.get('tag'), 'pid': (config.get('target') or {}).get('pid'),
+                     'runner_alive': live, 'worker_alive': bool(watcher), 'verified': verified,
+                     'last_success': state.get('last_success', 0), 'expires_at': expires,
+                     'deadline': config.get('deadline', 0), 'status': state.get('status', 'unknown'),
+                     'error': error or state.get('error', ''), 'status_file': str(directory / 'status.json')})
+    return {'ok': True, 'guards': rows}
+
+
+def release_tag(tag):
+    if not re.fullmatch(TAG_RE, tag):
+        raise GuardError('Invalid managed tag for keep-awake release.')
+    changed = 0
+    for path in state_root().iterdir():
+        if not re.fullmatch(r'[0-9a-f]{24}', path.name):
+            continue
+        fd = lock_file(private_dir(path) / 'control.lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            config = read_json(path / 'config.json')
+            if config and config.get('tag') == tag:
+                config['disabled'] = True
+                write_json(path / 'config.json', config)
+                changed += 1
+        except BlockingIOError:
+            raise GuardError('Cloud guard is being updated; retry release.') from None
+        finally:
+            os.close(fd)
+    return {'ok': True, 'released': changed, 'note': 'Stops only v60 holds within a few seconds; does not kill Codex or stop legacy holds.'}
+
+
+def remote_request(request):
+    if request.get('operation') == 'status':
+        return status_all()
+    if request.get('operation') == 'release':
+        return release_tag(request.get('tag', ''))
+    if request.get('operation') != 'ensure':
+        raise GuardError('Unrecognized cloud guard operation.')
+    duration = request.get('seconds')
+    if duration is not None and (type(duration) is not int or not 0 <= duration <= 604800):
+        raise GuardError('Invalid keep-awake duration.')
+    return ensure(request.get('tag', ''), duration, request.get('runner', ''), request.get('pid', 0))
+
+
+def client(cli, context, org, sprite, request):
+    """No mutation retry on timeout. Source and non-secret request go via stdin."""
+    nonce = secrets.token_hex(16)
+    payload = json.dumps({'source': source_text(), 'request': request, 'nonce': nonce}).encode()
+    # Use an explicit namespace; only our fixed entrypoint handles the request.
+    receiver = ("import json,sys; p=json.load(sys.stdin); n={'__name__':'cloud_guard_received','_SOURCE':p['source']}; "
+                "exec(compile(p['source'],'<cloud-guard-v60>','exec'),n); n['received'](p)")
+    try:
+        help_result = subprocess.run([cli, 'exec', '--help'], cwd=context, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    except (subprocess.TimeoutExpired, OSError):
+        raise GuardError('Cannot check the local Sprite CLI transport capabilities; no cloud protection was confirmed.') from None
+    args = [cli, 'exec', *org, '-s', sprite]
+    if b'--http-post' in help_result.stdout + help_result.stderr:
+        args.append('--http-post')
+    args += ['--no-port-forward', '--', 'python3', '-c', receiver]
+    try:
+        result = subprocess.run(args, cwd=context, input=payload, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=STARTUP_TIMEOUT + 30)
+    except subprocess.TimeoutExpired:
+        raise GuardError('Cloud protection setup timed out (outcome unknown). It was not automatically replayed; rerun to check the same runner.') from None
+    except OSError:
+        raise GuardError('Cannot start the local Sprite CLI for protection verification.') from None
+    receipt = None
+    if len(result.stdout) <= 131072:
+        for line in result.stdout.decode('utf-8', 'replace').splitlines():
+            if line.startswith(MARKER):
+                try:
+                    candidate = json.loads(line[len(MARKER):])
+                    if candidate.get('nonce') == nonce:
+                        receipt = candidate
+                except (ValueError, AttributeError):
+                    pass
+    if not receipt:
+        raise GuardError(f'No verified cloud-protection receipt (Sprite CLI exit {result.returncode}). No agent was killed or relaunched.')
+    if not receipt.get('ok'):
+        # Only fixed error strings from this module are returned, not CLI output.
+        raise GuardError(str(receipt.get('error', 'Cloud protection not confirmed.'))[:700])
+    return receipt
+
+
+def report(receipt):
+    print('\n       CLOUD KEEP-AWAKE VERIFIED', flush=True)
+    print('       Renewal runs on the Sprite, independently of your laptop/terminal.')
+    print('       API lease verified until: ' + utc(receipt['expires_at']))
+    print('       Protection duration: ' + (('until ' + utc(receipt['deadline'])) if receipt.get('deadline') else 'while this managed runner remains alive (including idle prompts)'))
+    print('       Compute billing can continue while your laptop sleeps.')
+    print('       Status: ' + receipt['status_file'])
+    print('       No Codex restart or credential replacement was performed.', flush=True)
+
+
+def received(payload):
+    # A Sprite exec may inherit tokens. Do not pass them to the cloud guard.
+    home = str(Path.home())
+    os.environ.clear()
+    os.environ.update(HOME=home, PATH='/usr/local/bin:/usr/bin:/bin', LANG='C.UTF-8')
+    nonce = payload.get('nonce', '')
+    try:
+        reply = remote_request(payload.get('request', {}))
+    except GuardError as exc:
+        reply = {'ok': False, 'error': str(exc)}
+    except (OSError, ValueError, KeyError, TypeError):
+        reply = {'ok': False, 'error': 'Cloud guard operation failed (permissions, disk, process metadata, or configuration); no protection confirmed.'}
+    reply['nonce'] = nonce
+    print(MARKER + json.dumps(reply, separators=(',', ':')), flush=True)
+
+
+def main():
+    if len(sys.argv) < 2:
+        raise GuardError('Cloud guard action required.')
+    if sys.argv[1] == 'worker':
+        return worker(sys.argv[2])
+    if sys.argv[1] == 'ensure':
+        duration = int(sys.argv[3])
+        receipt = ensure(sys.argv[2], duration, pid=int(sys.argv[4]))
+        report(receipt)
+        return 0
+    if sys.argv[1] == 'status':
+        print(json.dumps(status_all(), indent=2))
+        return 0
+    if sys.argv[1] == 'release':
+        print(json.dumps(release_tag(sys.argv[2]), indent=2))
+        return 0
+    raise GuardError('Unknown cloud guard action.')
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except GuardError as exc:
+        print('error: ' + str(exc), file=sys.stderr)
+        raise SystemExit(1)
+V60_RUNNER_GUARD
+then
+  echo "error: cloud keep-awake could not be verified; no coding agent was launched" >&2
+  exit 82
+fi
+printf 'active\n' >"$HOLD_STATE_FILE"
 
 echo "       native Sprite TTY tag: $SESSION_TAG"
 echo "       workspace: $WORKDIR"
-echo "       Tasks heartbeat deadline (UTC): $(date -u -d "@$DEADLINE" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || date -u -r "$DEADLINE" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || echo "$DEADLINE")"
-echo "       Tasks heartbeat deadline (Sprite local): $(date -d "@$DEADLINE" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date -r "$DEADLINE" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "$DEADLINE")"
 echo "       agent: $AGENT_KIND"
 echo "       detach without stopping the agent: Ctrl+\\"
 echo "       reattach later with: sprite sessions attach <session-id>"
@@ -8845,14 +10253,19 @@ confirm_live_session_with_retry() {
   return 1
 }
 surface_native_hold_state() {
-  local tag=$1 out=""
-  out=$(control_exec_limited 10 -- bash -lc 'base="$HOME/.local/state/sprite-codex"; tag=$1; state=$(cat "$base/hold-state-$tag" 2>/dev/null || true); deadline=$(cat "$base/hold-deadline-$tag" 2>/dev/null || true); released=$(cat "$base/hold-released-$tag.marker" 2>/dev/null || true); printf "state=%s deadline=%s released=%s\n" "$state" "$deadline" "$released"' _ "$tag" 2>/dev/null || true)
-  case "$out" in *state=released*) warn "the Tasks API heartbeat for '$tag' reached its configured hard cap"; note "$out"; note "the native TTY may still be keeping the Sprite active while the session is live" ;; *state=active*) note "remote hold state: $out" ;; esac
+  note "v60 cloud keep-awake status: rerun this script with --keep-awake-status"
+  note "old hold-state files are history hints, not evidence of a current API lease"
 }
 
 attach_native_session_resilient() {
   local sid=$1 tag=${2:-} rc=0 failures=0 started elapsed
   [[ -z $tag ]] || surface_native_hold_state "$tag"
+  # Reuse the early picker's exact-session protection path; never launch another agent.
+  if ! SPRITE_NAME="$SPRITE_NAME" SPRITE_ORG="${SPRITE_ORG:-}" \
+      ATTACH_SESSION_ID="$sid" RUN_MODE=protect run_attach_only; then
+    warn "cloud keep-awake is unverified; existing agent was not stopped"
+    return 1
+  fi
   while :; do
     started=$(date +%s)
     if attach_session "$sid"; then
@@ -8967,31 +10380,21 @@ start_native_agent_session() {
 }
 
 prompt_run_limit() {
-  local entered=${SPRITE_RUN_HOURS:-}
-  if [[ -z $entered ]]; then
-    if [[ -t 0 ]]; then
-      printf '  Sprite keep-awake limit in hours [%s]: ' "$DEFAULT_RUN_HOURS"
-      IFS= read -r entered || true
-    fi
-    entered=${entered:-$DEFAULT_RUN_HOURS}
-  else
-    note "SPRITE_RUN_HOURS supplied: $entered"
-  fi
-  RUN_SECONDS=$(python3 - "$entered" <<'PY'
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
-import sys
-try: h=Decimal(sys.argv[1])
-except InvalidOperation: raise SystemExit(2)
-if h <= 0 or h > 168: raise SystemExit(2)
-print(int((h*Decimal(3600)).to_integral_value(rounding=ROUND_CEILING)))
-PY
-) || die "run limit must be a positive number of hours, no more than 168"
+  local entered=${SPRITE_RUN_HOURS:-$DEFAULT_RUN_HOURS}
+  RUN_SECONDS=$(python3 -c "$(cloud_guard_python | sed '/^if __name__ == /,$d')
+try:
+    print(seconds_from_hours(__import__('sys').argv[1]) or 0)
+except GuardError as exc:
+    raise SystemExit(str(exc))
+" "$entered") || die "keep-awake duration must be session or a positive number of hours, at most 168"
   SPRITE_RUN_HOURS=$entered
-  _run_deadline_preview=$(( $(date +%s) + RUN_SECONDS ))
-  note "the Tasks API heartbeat follows the $AGENT_LABEL runner for at most ${SPRITE_RUN_HOURS} hour(s)"
-  note "native Sprite TTY sessions are themselves activity, so this bounds the Tasks hold—not total Sprite awake time"
-  note "approx Tasks-hold deadline (local): $(date -d "@$_run_deadline_preview" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date -r "$_run_deadline_preview" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "$_run_deadline_preview")"
-  note "approx Tasks-hold deadline (UTC):   $(date -u -d "@$_run_deadline_preview" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || date -u -r "$_run_deadline_preview" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || echo "$_run_deadline_preview")"
+  export SPRITE_RUN_HOURS
+  if (( RUN_SECONDS == 0 )); then
+    note "cloud keep-awake: session lifetime (no default eight-hour cutoff)"
+    warn "the Sprite can keep billing while Codex is idle and your laptop sleeps; exit Codex when finished"
+  else
+    note "cloud keep-awake: ${SPRITE_RUN_HOURS} hour(s); expiry releases the hold but does not kill Codex"
+  fi
 }
 
 make_model_test_helper() {
@@ -10587,7 +11990,8 @@ else
 fi
 if [[ ! -t 0 || ! -t 1 ]]; then warn "no interactive terminal is attached, so $AGENT_LABEL cannot open its TUI"; note "rerun from a terminal or set NO_AGENT_LAUNCH=1"; exit 0; fi
 
-SESSION_DEADLINE=$(( $(date +%s) + RUN_SECONDS ))
+SESSION_DEADLINE=0
+(( RUN_SECONDS == 0 )) || SESSION_DEADLINE=$(( $(date +%s) + RUN_SECONDS ))
 runner=$(make_session_runner)
 cleanup_files+=("$runner")
 NATIVE_ENTRY=$(mktemp)
@@ -10623,8 +12027,8 @@ note "non-secret resume state saved at $STATE_FILE"
 note "only one Sprite is used: $SPRITE_NAME"
 note "$AGENT_LABEL will run directly in a native detachable Sprite TTY session"
 note "managed tag: $SESSION_TAG"
-note "the Tasks API uses a 5-minute hold refreshed every minute until the configured Tasks-hold deadline"
-note "the native TTY session itself is also Sprite activity while it remains live"
+note "the cloud worker verifies a five-minute Tasks API lease, renewed every minute without the Mac"
+note "wait for CLOUD KEEP-AWAKE VERIFIED before relying on unattended operation"
 note "detach cleanly with Ctrl+\\; there is no tmux prefix, mouse mode, or copy mode"
 note "on a non-zero transport failure, the script reattaches to the same native session ID"
 
