@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
+#
+# v62: restore bracketed paste for Codex reattachment and new Codex launches.
+# Mouse cleanup remains; ordinary handoffs no longer flush queued stdin.
+# Explicit --repair-terminal and rejected contaminated LOCAL menu answers can
+# still clear queued input. No stdin proxy, clipboard logging, or automatic
+# replay is introduced. Cloud guard, credentials, models, Git and files unchanged.
+# Apply this LOCAL change by detaching and reattaching with v62; do not restart
+# cloud Codex. Wait for its input box before pasting; a broken transport can still
+# interrupt a paste already in flight. Real macOS/Sprite verification is required.
+#
+# v61 repairs local terminal mode leakage on detach/reconnect boundaries.
+# It restores mouse/focus/paste/display modes as well as POSIX tty attributes,
+# rejects terminal-control bytes in local Python menus, and provides the local-
+# only --repair-terminal command. It never sends reset commands to Codex stdin,
+# never restarts the cloud agent, and preserves v60 cloud guard behavior.
+# v61 discarded pending input at client exit; v62 removes that ordinary flush.
+# Active TUI input is not filtered; a stalled connection still needs reattachment.
+#
 # v60: verified cloud-side keep-awake, independent of laptop sleep/disconnection.
 # New managed runs and managed-session attachments install/verify a private worker
 # on the Sprite. It owns a separate Unix session, closes all terminal descriptors,
@@ -91,7 +109,7 @@
 # reject a stale session. No restart, kill, key recovery or new launch is automatic.
 # API/SDK reference: https://sprites.dev/api/sprites/exec
 # https://github.com/superfly/sprites-go/blob/main/session.go
-# sprite-codex-v60.sh — updated 2026-09-28
+# sprite-codex-v62.sh — paste-handoff revision based on v61
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -213,17 +231,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v60.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v60.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v60.sh --attach-only --session-id 1847
-#   bash sprite-codex-v60.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v60.sh --download-output
-#   bash sprite-codex-v60.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v60.sh --show-models          # no API calls
-#   bash sprite-codex-v60.sh --test-models          # host API tests only
-#   bash sprite-codex-v60.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v60.sh --test-models-before-run
-#   bash sprite-codex-v60.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v62.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v62.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v62.sh --attach-only --session-id 1847
+#   bash sprite-codex-v62.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v62.sh --download-output
+#   bash sprite-codex-v62.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v62.sh --show-models          # no API calls
+#   bash sprite-codex-v62.sh --test-models          # host API tests only
+#   bash sprite-codex-v62.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v62.sh --test-models-before-run
+#   bash sprite-codex-v62.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -300,11 +318,237 @@ set -Eeuo pipefail
 set +x +v
 umask 077
 
+# v62: phase-specific local terminal handoff. No Sprite commands in these helpers.
+local_terminal_python() {
+  cat <<'LOCAL_TERMINAL_PY'
+"""Local-only terminal cleanup. No Sprite/API calls; no remote keystrokes.
+
+POSIX terminal attributes and terminal-emulator private modes are separate.
+Reset emulator modes for LOCAL menus, but prepare Codex reattachments with
+bracketed paste ON. Normal handoffs do not flush unread input. Nothing monitors,
+parses, logs, or resends the active client's keystrokes or clipboard contents.
+"""
+import copy as _tty_copy
+import os as _tty_os
+import re as _tty_re
+import signal as _tty_signal
+import subprocess as _tty_subprocess
+import sys as _tty_sys
+import termios as _tty_termios
+
+# Deliberately not RIS (ESC c), ED 3 (erase scrollback), a clipboard operation,
+# a terminal query, or a keystroke sent to the remote program. These are OUTPUT.
+# Paste framing and mouse reporting are independent terminal protocols.
+_LOCAL_MOUSE_RESET = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+                             (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016))
+_LOCAL_CODEX_PREPARE = b'\x1b[?2026l' + _LOCAL_MOUSE_RESET + b'\x1b[?2004h'
+_LOCAL_TERMINAL_RESET = (
+    b'\x1b[?2026l'  # finish a stranded synchronized-output update
+    + _LOCAL_MOUSE_RESET + b'\x1b[?2004l'  # plain LOCAL menus do not parse pastes
+    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'  # return from alternate screen
+    + b'\x1b[>4;0m\x1b[=0u'  # default extended-key reporting where supported
+    + b'\x1b[?1l\x1b>\x1b(B\x0f\x1b[0m\x1b[?25h'
+)
+
+
+def _local_terminal_handles():
+    """Only operate on this foreground caller's terminal, never a pipe/file."""
+    try:
+        fd = _tty_sys.stdin.fileno()
+        if not _tty_os.isatty(fd):
+            return None
+        try:
+            if _tty_os.tcgetpgrp(fd) != _tty_os.getpgrp():
+                return None
+        except OSError:
+            # A PTY can be supplied without becoming a controlling terminal.
+            # Do not reach for some unrelated /dev/tty in that case.
+            pass
+        source = _tty_os.fstat(fd)
+        for stream in (_tty_sys.stdout, _tty_sys.stderr):
+            out = stream.fileno()
+            if _tty_os.isatty(out):
+                target = _tty_os.fstat(out)
+                if (source.st_dev, source.st_ino) == (target.st_dev, target.st_ino):
+                    return fd, out
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def local_terminal_reset(saved=None, *, flush=False, sane=False):
+    """Restore this local terminal after a TUI boundary. Best effort, no input log.
+
+    `flush=True` is reserved for explicit --repair-terminal or a rejected,
+    contaminated LOCAL menu answer. It discards queued input, including text;
+    normal attach/exit/retry handoffs MUST NOT use it. Nothing here can repair
+    an interrupted paste that a transport or remote process already consumed.
+    `sane` is reserved for explicit recovery and contaminated local menus.
+    """
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    fd, out = handles
+    try:
+        _tty_sys.stdout.flush()
+        _tty_sys.stderr.flush()
+        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
+            pending = memoryview(_LOCAL_TERMINAL_RESET)
+            while pending:
+                pending = pending[_tty_os.write(out, pending):]
+        if saved is not None:
+            # NOW avoids waiting indefinitely on a flow-controlled terminal.
+            _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
+        elif sane:
+            _tty_subprocess.run(['stty', 'sane'], stdin=fd,
+                                stdout=_tty_subprocess.DEVNULL,
+                                stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
+        if flush:
+            _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
+        return True
+    except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
+        return False
+
+
+def local_terminal_prepare(*, bracketed_paste=False):
+    """Prepare a local client without consuming input or querying the terminal.
+
+    An existing Codex process will not rerun its startup just because we attach.
+    Establish paste framing locally, while still disabling stray mouse reports.
+    Do not apply a whole-screen/key reset to that app's incoming handoff.
+    Generic shells, tmux clients, and login programs keep ownership of their modes.
+    """
+    if not bracketed_paste:
+        return local_terminal_reset()
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    try:
+        _tty_sys.stdout.flush()
+        _tty_sys.stderr.flush()
+        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
+            pending = memoryview(_LOCAL_CODEX_PREPARE)
+            while pending:
+                pending = pending[_tty_os.write(handles[1], pending):]
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+class _LocalTerminalSignal(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
+    """Run exactly one local interactive client, preserving args/exit status.
+
+    Stdin/stdout are the original TTY: this is NOT a PTY relay or text filter.
+    On local signal interruption only the child client is stopped, never an
+    explicit remote session-kill, Codex command, or keep-awake cancellation.
+    """
+    handles = _local_terminal_handles()
+    saved = None
+    if handles is not None:
+        try:
+            saved = _tty_copy.deepcopy(_tty_termios.tcgetattr(handles[0]))
+        except (OSError, _tty_termios.error):
+            pass
+        local_terminal_prepare(bracketed_paste=bracketed_paste)
+    old_handlers = {}
+    child = None
+    caught = 0
+
+    def interrupted(signum, _frame):
+        raise _LocalTerminalSignal(signum)
+
+    try:
+        # No SIGCONT or idle timer: don't reset a live app's legitimate modes
+        # merely because the laptop woke or the remote app stopped printing.
+        for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
+            old_handlers[signum] = _tty_signal.signal(signum, interrupted)
+        child = _tty_subprocess.Popen(argv, cwd=cwd)
+        return child.wait()
+    except _LocalTerminalSignal as exc:
+        caught = exc.signum
+        return 128 + caught
+    except KeyboardInterrupt:
+        caught = _tty_signal.SIGINT
+        return 128 + caught
+    finally:
+        # Ignore a repeat close/terminate while performing bounded local cleanup.
+        for signum in old_handlers:
+            _tty_signal.signal(signum, _tty_signal.SIG_IGN)
+        try:
+            if child is not None and caught and child.poll() is None:
+                try:
+                    child.send_signal(caught)
+                    child.wait(timeout=1)
+                except _tty_subprocess.TimeoutExpired:
+                    child.kill()  # this Popen object is only the LOCAL client
+                    try:
+                        child.wait(timeout=1)
+                    except _tty_subprocess.TimeoutExpired:
+                        pass
+                except (OSError, _tty_subprocess.TimeoutExpired):
+                    pass
+        finally:
+            # Preserve unread input across retries. This is not a promise to replay
+            # partially transmitted pastes; the Sprite client still owns input.
+            local_terminal_reset(saved)
+            for signum, handler in old_handlers.items():
+                _tty_signal.signal(signum, handler)
+
+
+def local_menu_input(prompt):
+    """Reject a contaminated local answer; never strip garbage into approval."""
+    while True:
+        answer = input(prompt)
+        # ECHOCTL displays ESC as ^[. Also recognize pasted visible mouse reports.
+        tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
+        tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
+        if not tainted:
+            return answer
+        if not _tty_sys.stdin.isatty():
+            raise ValueError('Terminal-control input is not an accepted menu answer.')
+        print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
+        print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
+        local_terminal_reset(flush=True, sane=True)
+LOCAL_TERMINAL_PY
+}
+
+run_local_tty() {
+  local codex_paste=0
+  if [[ ${1:-} == --codex-paste ]]; then codex_paste=1; shift; fi
+  python3 -c "$(local_terminal_python)
+try:
+    rc = local_terminal_call(_tty_sys.argv[2:], bracketed_paste=(_tty_sys.argv[1] == '1'))
+    raise SystemExit(128 - rc if rc < 0 else rc)
+except FileNotFoundError:
+    print('error: local interactive executable not found', file=_tty_sys.stderr)
+    raise SystemExit(127)
+except OSError:
+    print('error: local interactive client failed to start', file=_tty_sys.stderr)
+    raise SystemExit(1)
+" "$codex_paste" "$@"
+}
+
+repair_local_terminal() {
+  command -v python3 >/dev/null 2>&1 || { echo 'error: local python3 is required' >&2; return 127; }
+  python3 -c "$(local_terminal_python)
+if not local_terminal_reset(flush=True, sane=True):
+    print('error: repair needs this foreground local terminal (not a pipe or remote Codex prompt)', file=_tty_sys.stderr)
+    raise SystemExit(2)
+print('Local terminal input/display modes reset. No Sprite command was run.')
+"
+}
+
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v60.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v62.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
   (no option)               Attach / Setup / Quit / Download / Files / Retrieve menu.
+  --repair-terminal        Repair this LOCAL terminal only; no Sprite/login required.
   --attach-only             Select a Sprite and attach to an existing live TTY.
   --session-id ID           With --attach-only or --files + SPRITE_NAME: exact TTY.
   --files, --shell          Independent shell/file menu alongside live Codex.
@@ -334,7 +578,13 @@ The picker offers refresh, another Sprite, or quit; it does not discover detache
 tmux servers without a native TTY. Use normal setup for legacy tmux recovery.
 SPRITE_ATTACH_TIMEOUT=25 (1..300) bounds inventory/context/help requests only.
 TTY_AUTO_REATTACH and TTY_REATTACH_* control retries to the same live session.
-Ctrl+\ detaches. No provider keys are copied out of or injected into the process.
+Ctrl+\ detaches. v62 prepares known Codex terminals with bracketed paste ON
+before each launch/attachment; mouse cleanup remains on return to LOCAL menus.
+Normal client handoffs restore tty attributes WITHOUT flushing unread input.
+Wait for the Codex input box before pasting; never paste across a disconnect.
+Explicit --repair-terminal and rejected contaminated LOCAL menu answers can
+clear queued input. Repair runs locally only; never type it into a Codex prompt.
+No provider keys are copied out of or injected into the process.
 Bare non-interactive runs retain the previous bootstrap behavior. Explicit test
 modes and --bootstrap do not show the opening menu. --json-output is not allowed
 with --attach-only. SPRITE_RUN_HOURS controls guard policy on managed attachment;
@@ -545,10 +795,11 @@ _FILE_WORKDIR_SELECTED=0
 while (($#)); do
   case "$1" in
     --help|-h) show_usage; exit 0 ;;
-    --attach-only|--files|--shell|--retrieve|--recover|--check-fly|--keep-awake-status|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
+    --repair-terminal|--attach-only|--files|--shell|--retrieve|--recover|--check-fly|--keep-awake-status|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
       (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
       _MODE_SELECTED=1
       case "$1" in
+        --repair-terminal) RUN_MODE=terminal-repair ;;
         --attach-only) RUN_MODE=attach ;;
         --files|--shell) RUN_MODE=files ;;
         --retrieve|--recover) RUN_MODE=retrieve ;;
@@ -583,6 +834,22 @@ while (($#)); do
     *) printf 'error: unknown argument: %s\n' "$1" >&2; show_usage >&2; exit 2 ;;
   esac
 done
+
+# This route deliberately precedes all cloud/credential/config validation.
+if [[ $RUN_MODE == terminal-repair ]]; then
+  if [[ -n $ATTACH_SESSION_ID ]] || (( _JSON_OUTPUT_SELECTED || _OUTPUT_DIR_SELECTED || _FILE_WORKDIR_SELECTED )); then
+    echo 'error: --repair-terminal does not accept Sprite/path/report selectors' >&2; exit 2
+  fi
+  repair_local_terminal
+  exit $?
+fi
+# At startup repair stale emulator flags, without reading/discarding typed-ahead
+# menu choices or changing user stty preferences. Noninteractive output is untouched.
+if [[ -t 0 && -t 1 ]] && command -v python3 >/dev/null 2>&1; then
+  python3 -c "$(local_terminal_python)
+local_terminal_reset()
+" || true
+fi
 
 if [[ $RUN_MODE == check-fly ]] && (( _JSON_OUTPUT_SELECTED || _OUTPUT_DIR_SELECTED || _FILE_WORKDIR_SELECTED )); then
   echo "error: --check-fly does not accept --json-output, --output-dir or --workdir" >&2; exit 2
@@ -625,6 +892,196 @@ output_download_python() {
   cat <<'OUTPUT_DOWNLOAD_PY'
 """Optional host-side ZIP download; no provider credentials or remote ZIP file."""
 from __future__ import annotations
+
+# BEGIN V62 LOCAL TERMINAL HELPERS
+import copy as _tty_copy
+import os as _tty_os
+import re as _tty_re
+import signal as _tty_signal
+import subprocess as _tty_subprocess
+import sys as _tty_sys
+import termios as _tty_termios
+
+# Deliberately not RIS (ESC c), ED 3 (erase scrollback), a clipboard operation,
+# a terminal query, or a keystroke sent to the remote program. These are OUTPUT.
+# Paste framing and mouse reporting are independent terminal protocols.
+_LOCAL_MOUSE_RESET = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+                             (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016))
+_LOCAL_CODEX_PREPARE = b'\x1b[?2026l' + _LOCAL_MOUSE_RESET + b'\x1b[?2004h'
+_LOCAL_TERMINAL_RESET = (
+    b'\x1b[?2026l'  # finish a stranded synchronized-output update
+    + _LOCAL_MOUSE_RESET + b'\x1b[?2004l'  # plain LOCAL menus do not parse pastes
+    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'  # return from alternate screen
+    + b'\x1b[>4;0m\x1b[=0u'  # default extended-key reporting where supported
+    + b'\x1b[?1l\x1b>\x1b(B\x0f\x1b[0m\x1b[?25h'
+)
+
+
+def _local_terminal_handles():
+    """Only operate on this foreground caller's terminal, never a pipe/file."""
+    try:
+        fd = _tty_sys.stdin.fileno()
+        if not _tty_os.isatty(fd):
+            return None
+        try:
+            if _tty_os.tcgetpgrp(fd) != _tty_os.getpgrp():
+                return None
+        except OSError:
+            # A PTY can be supplied without becoming a controlling terminal.
+            # Do not reach for some unrelated /dev/tty in that case.
+            pass
+        source = _tty_os.fstat(fd)
+        for stream in (_tty_sys.stdout, _tty_sys.stderr):
+            out = stream.fileno()
+            if _tty_os.isatty(out):
+                target = _tty_os.fstat(out)
+                if (source.st_dev, source.st_ino) == (target.st_dev, target.st_ino):
+                    return fd, out
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def local_terminal_reset(saved=None, *, flush=False, sane=False):
+    """Restore this local terminal after a TUI boundary. Best effort, no input log.
+
+    `flush=True` is reserved for explicit --repair-terminal or a rejected,
+    contaminated LOCAL menu answer. It discards queued input, including text;
+    normal attach/exit/retry handoffs MUST NOT use it. Nothing here can repair
+    an interrupted paste that a transport or remote process already consumed.
+    `sane` is reserved for explicit recovery and contaminated local menus.
+    """
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    fd, out = handles
+    try:
+        _tty_sys.stdout.flush()
+        _tty_sys.stderr.flush()
+        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
+            pending = memoryview(_LOCAL_TERMINAL_RESET)
+            while pending:
+                pending = pending[_tty_os.write(out, pending):]
+        if saved is not None:
+            # NOW avoids waiting indefinitely on a flow-controlled terminal.
+            _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
+        elif sane:
+            _tty_subprocess.run(['stty', 'sane'], stdin=fd,
+                                stdout=_tty_subprocess.DEVNULL,
+                                stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
+        if flush:
+            _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
+        return True
+    except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
+        return False
+
+
+def local_terminal_prepare(*, bracketed_paste=False):
+    """Prepare a local client without consuming input or querying the terminal.
+
+    An existing Codex process will not rerun its startup just because we attach.
+    Establish paste framing locally, while still disabling stray mouse reports.
+    Do not apply a whole-screen/key reset to that app's incoming handoff.
+    Generic shells, tmux clients, and login programs keep ownership of their modes.
+    """
+    if not bracketed_paste:
+        return local_terminal_reset()
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    try:
+        _tty_sys.stdout.flush()
+        _tty_sys.stderr.flush()
+        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
+            pending = memoryview(_LOCAL_CODEX_PREPARE)
+            while pending:
+                pending = pending[_tty_os.write(handles[1], pending):]
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+class _LocalTerminalSignal(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
+    """Run exactly one local interactive client, preserving args/exit status.
+
+    Stdin/stdout are the original TTY: this is NOT a PTY relay or text filter.
+    On local signal interruption only the child client is stopped, never an
+    explicit remote session-kill, Codex command, or keep-awake cancellation.
+    """
+    handles = _local_terminal_handles()
+    saved = None
+    if handles is not None:
+        try:
+            saved = _tty_copy.deepcopy(_tty_termios.tcgetattr(handles[0]))
+        except (OSError, _tty_termios.error):
+            pass
+        local_terminal_prepare(bracketed_paste=bracketed_paste)
+    old_handlers = {}
+    child = None
+    caught = 0
+
+    def interrupted(signum, _frame):
+        raise _LocalTerminalSignal(signum)
+
+    try:
+        # No SIGCONT or idle timer: don't reset a live app's legitimate modes
+        # merely because the laptop woke or the remote app stopped printing.
+        for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
+            old_handlers[signum] = _tty_signal.signal(signum, interrupted)
+        child = _tty_subprocess.Popen(argv, cwd=cwd)
+        return child.wait()
+    except _LocalTerminalSignal as exc:
+        caught = exc.signum
+        return 128 + caught
+    except KeyboardInterrupt:
+        caught = _tty_signal.SIGINT
+        return 128 + caught
+    finally:
+        # Ignore a repeat close/terminate while performing bounded local cleanup.
+        for signum in old_handlers:
+            _tty_signal.signal(signum, _tty_signal.SIG_IGN)
+        try:
+            if child is not None and caught and child.poll() is None:
+                try:
+                    child.send_signal(caught)
+                    child.wait(timeout=1)
+                except _tty_subprocess.TimeoutExpired:
+                    child.kill()  # this Popen object is only the LOCAL client
+                    try:
+                        child.wait(timeout=1)
+                    except _tty_subprocess.TimeoutExpired:
+                        pass
+                except (OSError, _tty_subprocess.TimeoutExpired):
+                    pass
+        finally:
+            # Preserve unread input across retries. This is not a promise to replay
+            # partially transmitted pastes; the Sprite client still owns input.
+            local_terminal_reset(saved)
+            for signum, handler in old_handlers.items():
+                _tty_signal.signal(signum, handler)
+
+
+def local_menu_input(prompt):
+    """Reject a contaminated local answer; never strip garbage into approval."""
+    while True:
+        answer = input(prompt)
+        # ECHOCTL displays ESC as ^[. Also recognize pasted visible mouse reports.
+        tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
+        tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
+        if not tainted:
+            return answer
+        if not _tty_sys.stdin.isatty():
+            raise ValueError('Terminal-control input is not an accepted menu answer.')
+        print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
+        print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
+        local_terminal_reset(flush=True, sane=True)
+# END V62 LOCAL TERMINAL HELPERS
+
 import datetime as dt
 import hashlib
 import json
@@ -1406,7 +1863,7 @@ class FolderPicker:
     @staticmethod
     def ask(prompt):
         try:
-            return input(prompt).strip()
+            return local_menu_input(prompt).strip()
         except EOFError:
             raise FolderCancelled() from None
 
@@ -1541,7 +1998,7 @@ def main():
     print(f"       Sprite: {safe(sprite)}\n       Local ZIP directory: {safe(local_dir)}")
     if mode == "ask":
         try:
-            answer = input("  Browse Sprite folders and download one as a ZIP now? [y/N]: ").strip().lower()
+            answer = local_menu_input("  Browse Sprite folders and download one as a ZIP now? [y/N]: ").strip().lower()
         except EOFError:
             answer = "n"
         if answer not in ("y", "yes"):
@@ -2294,6 +2751,196 @@ https://docs.sprites.dev/cli/commands/
 """
 from __future__ import annotations
 
+# BEGIN V62 LOCAL TERMINAL HELPERS
+import copy as _tty_copy
+import os as _tty_os
+import re as _tty_re
+import signal as _tty_signal
+import subprocess as _tty_subprocess
+import sys as _tty_sys
+import termios as _tty_termios
+
+# Deliberately not RIS (ESC c), ED 3 (erase scrollback), a clipboard operation,
+# a terminal query, or a keystroke sent to the remote program. These are OUTPUT.
+# Paste framing and mouse reporting are independent terminal protocols.
+_LOCAL_MOUSE_RESET = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+                             (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016))
+_LOCAL_CODEX_PREPARE = b'\x1b[?2026l' + _LOCAL_MOUSE_RESET + b'\x1b[?2004h'
+_LOCAL_TERMINAL_RESET = (
+    b'\x1b[?2026l'  # finish a stranded synchronized-output update
+    + _LOCAL_MOUSE_RESET + b'\x1b[?2004l'  # plain LOCAL menus do not parse pastes
+    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'  # return from alternate screen
+    + b'\x1b[>4;0m\x1b[=0u'  # default extended-key reporting where supported
+    + b'\x1b[?1l\x1b>\x1b(B\x0f\x1b[0m\x1b[?25h'
+)
+
+
+def _local_terminal_handles():
+    """Only operate on this foreground caller's terminal, never a pipe/file."""
+    try:
+        fd = _tty_sys.stdin.fileno()
+        if not _tty_os.isatty(fd):
+            return None
+        try:
+            if _tty_os.tcgetpgrp(fd) != _tty_os.getpgrp():
+                return None
+        except OSError:
+            # A PTY can be supplied without becoming a controlling terminal.
+            # Do not reach for some unrelated /dev/tty in that case.
+            pass
+        source = _tty_os.fstat(fd)
+        for stream in (_tty_sys.stdout, _tty_sys.stderr):
+            out = stream.fileno()
+            if _tty_os.isatty(out):
+                target = _tty_os.fstat(out)
+                if (source.st_dev, source.st_ino) == (target.st_dev, target.st_ino):
+                    return fd, out
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def local_terminal_reset(saved=None, *, flush=False, sane=False):
+    """Restore this local terminal after a TUI boundary. Best effort, no input log.
+
+    `flush=True` is reserved for explicit --repair-terminal or a rejected,
+    contaminated LOCAL menu answer. It discards queued input, including text;
+    normal attach/exit/retry handoffs MUST NOT use it. Nothing here can repair
+    an interrupted paste that a transport or remote process already consumed.
+    `sane` is reserved for explicit recovery and contaminated local menus.
+    """
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    fd, out = handles
+    try:
+        _tty_sys.stdout.flush()
+        _tty_sys.stderr.flush()
+        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
+            pending = memoryview(_LOCAL_TERMINAL_RESET)
+            while pending:
+                pending = pending[_tty_os.write(out, pending):]
+        if saved is not None:
+            # NOW avoids waiting indefinitely on a flow-controlled terminal.
+            _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
+        elif sane:
+            _tty_subprocess.run(['stty', 'sane'], stdin=fd,
+                                stdout=_tty_subprocess.DEVNULL,
+                                stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
+        if flush:
+            _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
+        return True
+    except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
+        return False
+
+
+def local_terminal_prepare(*, bracketed_paste=False):
+    """Prepare a local client without consuming input or querying the terminal.
+
+    An existing Codex process will not rerun its startup just because we attach.
+    Establish paste framing locally, while still disabling stray mouse reports.
+    Do not apply a whole-screen/key reset to that app's incoming handoff.
+    Generic shells, tmux clients, and login programs keep ownership of their modes.
+    """
+    if not bracketed_paste:
+        return local_terminal_reset()
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    try:
+        _tty_sys.stdout.flush()
+        _tty_sys.stderr.flush()
+        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
+            pending = memoryview(_LOCAL_CODEX_PREPARE)
+            while pending:
+                pending = pending[_tty_os.write(handles[1], pending):]
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+class _LocalTerminalSignal(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
+    """Run exactly one local interactive client, preserving args/exit status.
+
+    Stdin/stdout are the original TTY: this is NOT a PTY relay or text filter.
+    On local signal interruption only the child client is stopped, never an
+    explicit remote session-kill, Codex command, or keep-awake cancellation.
+    """
+    handles = _local_terminal_handles()
+    saved = None
+    if handles is not None:
+        try:
+            saved = _tty_copy.deepcopy(_tty_termios.tcgetattr(handles[0]))
+        except (OSError, _tty_termios.error):
+            pass
+        local_terminal_prepare(bracketed_paste=bracketed_paste)
+    old_handlers = {}
+    child = None
+    caught = 0
+
+    def interrupted(signum, _frame):
+        raise _LocalTerminalSignal(signum)
+
+    try:
+        # No SIGCONT or idle timer: don't reset a live app's legitimate modes
+        # merely because the laptop woke or the remote app stopped printing.
+        for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
+            old_handlers[signum] = _tty_signal.signal(signum, interrupted)
+        child = _tty_subprocess.Popen(argv, cwd=cwd)
+        return child.wait()
+    except _LocalTerminalSignal as exc:
+        caught = exc.signum
+        return 128 + caught
+    except KeyboardInterrupt:
+        caught = _tty_signal.SIGINT
+        return 128 + caught
+    finally:
+        # Ignore a repeat close/terminate while performing bounded local cleanup.
+        for signum in old_handlers:
+            _tty_signal.signal(signum, _tty_signal.SIG_IGN)
+        try:
+            if child is not None and caught and child.poll() is None:
+                try:
+                    child.send_signal(caught)
+                    child.wait(timeout=1)
+                except _tty_subprocess.TimeoutExpired:
+                    child.kill()  # this Popen object is only the LOCAL client
+                    try:
+                        child.wait(timeout=1)
+                    except _tty_subprocess.TimeoutExpired:
+                        pass
+                except (OSError, _tty_subprocess.TimeoutExpired):
+                    pass
+        finally:
+            # Preserve unread input across retries. This is not a promise to replay
+            # partially transmitted pastes; the Sprite client still owns input.
+            local_terminal_reset(saved)
+            for signum, handler in old_handlers.items():
+                _tty_signal.signal(signum, handler)
+
+
+def local_menu_input(prompt):
+    """Reject a contaminated local answer; never strip garbage into approval."""
+    while True:
+        answer = input(prompt)
+        # ECHOCTL displays ESC as ^[. Also recognize pasted visible mouse reports.
+        tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
+        tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
+        if not tainted:
+            return answer
+        if not _tty_sys.stdin.isatty():
+            raise ValueError('Terminal-control input is not an accepted menu answer.')
+        print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
+        print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
+        local_terminal_reset(flush=True, sane=True)
+# END V62 LOCAL TERMINAL HELPERS
+
+
 import datetime as dt
 import hashlib
 import json
@@ -2510,7 +3157,7 @@ def parse_sessions(root: object):
 
 def ask(prompt: str) -> str:
     try:
-        return input(prompt).strip()
+        return local_menu_input(prompt).strip()
     except EOFError:
         raise Cancelled()
 
@@ -2736,16 +3383,11 @@ class Picker:
         failures = 0
         while True:
             started = time.monotonic()
-            terminal_state = termios.tcgetattr(sys.stdin.fileno())
-            try:
-                # No timeout on interactive use. The CLI receives the real TTY
-                # and handles raw mode, resizing and its own detach shortcut.
-                rc = subprocess.call([self.cli, *command, row["id"]], cwd=self.context)
-            finally:
-                try:
-                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, terminal_state)
-                except termios.error:
-                    pass
+            # Reassert paste framing for known Codex terminals on EVERY attach,
+            # including a retry to an already-running process. Other programs own
+            # their own modes. No stdin relay, automatic flush, or paste replay.
+            rc = local_terminal_call([self.cli, *command, row["id"]], cwd=self.context,
+                                     bracketed_paste=row.get('label') in ('Codex runner', 'Codex command'))
             rc = 128 - rc if rc < 0 else rc
             if rc == 0:
                 print("\n       Attachment ended cleanly; no replacement session was launched.")
@@ -2873,9 +3515,199 @@ run_attach_only() (
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v60.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v62.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
+
+# BEGIN V62 LOCAL TERMINAL HELPERS
+import copy as _tty_copy
+import os as _tty_os
+import re as _tty_re
+import signal as _tty_signal
+import subprocess as _tty_subprocess
+import sys as _tty_sys
+import termios as _tty_termios
+
+# Deliberately not RIS (ESC c), ED 3 (erase scrollback), a clipboard operation,
+# a terminal query, or a keystroke sent to the remote program. These are OUTPUT.
+# Paste framing and mouse reporting are independent terminal protocols.
+_LOCAL_MOUSE_RESET = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+                             (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016))
+_LOCAL_CODEX_PREPARE = b'\x1b[?2026l' + _LOCAL_MOUSE_RESET + b'\x1b[?2004h'
+_LOCAL_TERMINAL_RESET = (
+    b'\x1b[?2026l'  # finish a stranded synchronized-output update
+    + _LOCAL_MOUSE_RESET + b'\x1b[?2004l'  # plain LOCAL menus do not parse pastes
+    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'  # return from alternate screen
+    + b'\x1b[>4;0m\x1b[=0u'  # default extended-key reporting where supported
+    + b'\x1b[?1l\x1b>\x1b(B\x0f\x1b[0m\x1b[?25h'
+)
+
+
+def _local_terminal_handles():
+    """Only operate on this foreground caller's terminal, never a pipe/file."""
+    try:
+        fd = _tty_sys.stdin.fileno()
+        if not _tty_os.isatty(fd):
+            return None
+        try:
+            if _tty_os.tcgetpgrp(fd) != _tty_os.getpgrp():
+                return None
+        except OSError:
+            # A PTY can be supplied without becoming a controlling terminal.
+            # Do not reach for some unrelated /dev/tty in that case.
+            pass
+        source = _tty_os.fstat(fd)
+        for stream in (_tty_sys.stdout, _tty_sys.stderr):
+            out = stream.fileno()
+            if _tty_os.isatty(out):
+                target = _tty_os.fstat(out)
+                if (source.st_dev, source.st_ino) == (target.st_dev, target.st_ino):
+                    return fd, out
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def local_terminal_reset(saved=None, *, flush=False, sane=False):
+    """Restore this local terminal after a TUI boundary. Best effort, no input log.
+
+    `flush=True` is reserved for explicit --repair-terminal or a rejected,
+    contaminated LOCAL menu answer. It discards queued input, including text;
+    normal attach/exit/retry handoffs MUST NOT use it. Nothing here can repair
+    an interrupted paste that a transport or remote process already consumed.
+    `sane` is reserved for explicit recovery and contaminated local menus.
+    """
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    fd, out = handles
+    try:
+        _tty_sys.stdout.flush()
+        _tty_sys.stderr.flush()
+        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
+            pending = memoryview(_LOCAL_TERMINAL_RESET)
+            while pending:
+                pending = pending[_tty_os.write(out, pending):]
+        if saved is not None:
+            # NOW avoids waiting indefinitely on a flow-controlled terminal.
+            _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
+        elif sane:
+            _tty_subprocess.run(['stty', 'sane'], stdin=fd,
+                                stdout=_tty_subprocess.DEVNULL,
+                                stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
+        if flush:
+            _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
+        return True
+    except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
+        return False
+
+
+def local_terminal_prepare(*, bracketed_paste=False):
+    """Prepare a local client without consuming input or querying the terminal.
+
+    An existing Codex process will not rerun its startup just because we attach.
+    Establish paste framing locally, while still disabling stray mouse reports.
+    Do not apply a whole-screen/key reset to that app's incoming handoff.
+    Generic shells, tmux clients, and login programs keep ownership of their modes.
+    """
+    if not bracketed_paste:
+        return local_terminal_reset()
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    try:
+        _tty_sys.stdout.flush()
+        _tty_sys.stderr.flush()
+        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
+            pending = memoryview(_LOCAL_CODEX_PREPARE)
+            while pending:
+                pending = pending[_tty_os.write(handles[1], pending):]
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+class _LocalTerminalSignal(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
+    """Run exactly one local interactive client, preserving args/exit status.
+
+    Stdin/stdout are the original TTY: this is NOT a PTY relay or text filter.
+    On local signal interruption only the child client is stopped, never an
+    explicit remote session-kill, Codex command, or keep-awake cancellation.
+    """
+    handles = _local_terminal_handles()
+    saved = None
+    if handles is not None:
+        try:
+            saved = _tty_copy.deepcopy(_tty_termios.tcgetattr(handles[0]))
+        except (OSError, _tty_termios.error):
+            pass
+        local_terminal_prepare(bracketed_paste=bracketed_paste)
+    old_handlers = {}
+    child = None
+    caught = 0
+
+    def interrupted(signum, _frame):
+        raise _LocalTerminalSignal(signum)
+
+    try:
+        # No SIGCONT or idle timer: don't reset a live app's legitimate modes
+        # merely because the laptop woke or the remote app stopped printing.
+        for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
+            old_handlers[signum] = _tty_signal.signal(signum, interrupted)
+        child = _tty_subprocess.Popen(argv, cwd=cwd)
+        return child.wait()
+    except _LocalTerminalSignal as exc:
+        caught = exc.signum
+        return 128 + caught
+    except KeyboardInterrupt:
+        caught = _tty_signal.SIGINT
+        return 128 + caught
+    finally:
+        # Ignore a repeat close/terminate while performing bounded local cleanup.
+        for signum in old_handlers:
+            _tty_signal.signal(signum, _tty_signal.SIG_IGN)
+        try:
+            if child is not None and caught and child.poll() is None:
+                try:
+                    child.send_signal(caught)
+                    child.wait(timeout=1)
+                except _tty_subprocess.TimeoutExpired:
+                    child.kill()  # this Popen object is only the LOCAL client
+                    try:
+                        child.wait(timeout=1)
+                    except _tty_subprocess.TimeoutExpired:
+                        pass
+                except (OSError, _tty_subprocess.TimeoutExpired):
+                    pass
+        finally:
+            # Preserve unread input across retries. This is not a promise to replay
+            # partially transmitted pastes; the Sprite client still owns input.
+            local_terminal_reset(saved)
+            for signum, handler in old_handlers.items():
+                _tty_signal.signal(signum, handler)
+
+
+def local_menu_input(prompt):
+    """Reject a contaminated local answer; never strip garbage into approval."""
+    while True:
+        answer = input(prompt)
+        # ECHOCTL displays ESC as ^[. Also recognize pasted visible mouse reports.
+        tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
+        tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
+        if not tainted:
+            return answer
+        if not _tty_sys.stdin.isatty():
+            raise ValueError('Terminal-control input is not an accepted menu answer.')
+        print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
+        print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
+        local_terminal_reset(flush=True, sane=True)
+# END V62 LOCAL TERMINAL HELPERS
+
 import base64
 import hashlib
 import json
@@ -3330,7 +4162,7 @@ def safe(value):
 
 def ask(prompt):
     try:
-        return input(prompt).strip()
+        return local_menu_input(prompt).strip()
     except EOFError:
         raise Cancelled()
 
@@ -3724,11 +4556,7 @@ class Browser:
         print("       This shell does not inherit the running agent's GitHub/Fly/model tokens.")
         print("       Type exit to return to this LOCAL file menu for uploads/downloads.")
         print("       Shell cd does not change the selected workspace or the input/output picker roots.", flush=True)
-        state = termios.tcgetattr(sys.stdin.fileno())
-        try:
-            rc = subprocess.call(self.args(req, tty=True), cwd=self.picker.context)
-        finally:
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, state)
+        rc = local_terminal_call(self.args(req, tty=True), cwd=self.picker.context)
         print(f"\n       Shell viewer returned (exit {rc}); existing Codex session was not changed.")
         print("       Ctrl+\\ detaches rather than exits a shell; a detached shell may remain on the Sprite.")
     def upload(self):
@@ -4578,7 +5406,7 @@ run_file_access() (
 
 retrieve_python() {
   cat <<'RETRIEVE_PY'
-"""Local interactive retrieve mode. Embedded into sprite-codex-v60.sh."""
+"""Local interactive retrieve mode. Embedded into sprite-codex-v62.sh."""
 import contextlib
 import getpass
 import hashlib
@@ -7420,7 +8248,7 @@ run_mobbin_mcp_login() {
   # Do not use --no-port-forward here: the local browser must reach the Sprite's
   # loopback OAuth listener. No public Sprite URL or external callback is enabled.
   # Empty decoded environment removes inherited API secrets but preserves HOME.
-  if sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty \
+  if run_local_tty sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty \
       --env "SPRITE_CODEX_ENV_HEX=7b7d" -- \
       python3 -c "$ENV_EXEC_PY" python3 -c "$(<"$MOBBIN_MCP_HELPER")" \
       login "$request" "$MOBBIN_MCP_LOGIN_TIMEOUT"; then rc=0; else rc=$?; fi
@@ -8793,7 +9621,7 @@ run_openai_device_login() {
   fi
 
   note "starting: codex login --device-auth"
-  if ! sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward -- \
+  if ! run_local_tty sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward -- \
     bash -lc 'export PATH="$HOME/.local/bin:$PATH"; exec "$HOME/.local/bin/sprite-codex-cli" login --device-auth'; then
     warn "OpenAI Codex device-code login did not complete successfully"
     return 1
@@ -10204,9 +11032,12 @@ ensure_session_context() {
   ( cd "$SESSION_CONTEXT_DIR"; run_limited 20 sprite use "${ORG[@]}" "$SPRITE_NAME" >/dev/null 2>&1 ) || return 1
 }
 attach_session() {
-  local sid=$1; ensure_session_context || { warn "could not create temporary Sprite CLI context for session attach"; return 1; }
-  if ( cd "$SESSION_CONTEXT_DIR"; sprite sessions attach --help >/dev/null 2>&1 ); then ( cd "$SESSION_CONTEXT_DIR"; sprite sessions attach "$sid" );
-  elif ( cd "$SESSION_CONTEXT_DIR"; sprite attach --help >/dev/null 2>&1 ); then ( cd "$SESSION_CONTEXT_DIR"; sprite attach "$sid" );
+  local sid=$1
+  local -a terminal_flags=()
+  [[ ${AGENT_KIND:-} != codex ]] || terminal_flags+=(--codex-paste)
+  ensure_session_context || { warn "could not create temporary Sprite CLI context for session attach"; return 1; }
+  if ( cd "$SESSION_CONTEXT_DIR"; sprite sessions attach --help >/dev/null 2>&1 ); then ( cd "$SESSION_CONTEXT_DIR"; run_local_tty "${terminal_flags[@]}" sprite sessions attach "$sid" );
+  elif ( cd "$SESSION_CONTEXT_DIR"; sprite attach --help >/dev/null 2>&1 ); then ( cd "$SESSION_CONTEXT_DIR"; run_local_tty "${terminal_flags[@]}" sprite attach "$sid" );
   else warn "this Sprite CLI does not expose a recognized session-attach command"; return 127; fi
 }
 kill_native_session() {
@@ -10318,7 +11149,7 @@ legacy_tmux_attach() {
   local session=$1 rc=0
   warn "attaching to a legacy tmux-managed Codex session from v31 or earlier"
   note "this one legacy attachment still has tmux input/copy-mode behavior"
-  if sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward -- tmux attach-session -d -t "$session"; then rc=0; else rc=$?; fi
+  if run_local_tty sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward -- tmux attach-session -d -t "$session"; then rc=0; else rc=$?; fi
   maybe_download_output "$SPRITE_NAME" "$rc"
   return "$rc"
 }
@@ -10353,7 +11184,9 @@ start_native_agent_session() {
     for _ in $(seq 1 30); do sleep 1; row=$(find_native_session_row "$SESSION_TAG" "" "$REMOTE_WORKDIR" || true); if [[ -n $row ]]; then IFS=$'\t' read -r _ sid _ _ _ <<<"$row"; [[ -n $sid ]] && update_state_session_id "$sid" >/dev/null 2>&1 || true; exit 0; fi; done
   ) >/dev/null 2>&1 & watcher=$!
   note "starting $AGENT_LABEL directly in a native detachable Sprite TTY"; note "detach with Ctrl+\\; no tmux key prefix or mouse mode is involved"
-  if sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward \
+  local -a terminal_flags=()
+  [[ $AGENT_KIND != codex ]] || terminal_flags+=(--codex-paste)
+  if run_local_tty "${terminal_flags[@]}" sprite exec "${ORG[@]}" -s "$SPRITE_NAME" --tty --no-port-forward \
     --env "SPRITE_CODEX_ENV_HEX=$ALL_CREDENTIAL_ENV" -- \
     "$remote_entry" bash "$remote_runner" "$RUN_SECONDS" "$TASK_NAME" "$SESSION_TAG" \
       "$REMOTE_WORKDIR" "$AGENT_START_MODE" "$AGENT_KIND" "$AGENT_PROVIDER" "$KIMI_CODE_APPROVAL_MODE"; then
