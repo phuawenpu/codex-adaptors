@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 #
+# v63: local blank-screen/startup diagnostics. Resume paused LOCAL tty output
+# before mode writes; write escape sequences with a bounded nonblocking helper.
+# Startup is isolated from Python customization, bounded by an 8-second watchdog,
+# and announces readiness before the opening menu. --diagnose-local never calls
+# Sprite or any API. SPRITE_TERMINAL_MODE=plain disables wrapper escape sequences
+# for diagnosis (Codex/Sprite may still output their own). Large-paste framing in
+# auto mode and all cloud keep-awake / credential / Git behavior are retained.
+# No actual Mac / live Sprite reproduction is claimed.
+#
 # v62: restore bracketed paste for Codex reattachment and new Codex launches.
 # Mouse cleanup remains; ordinary handoffs no longer flush queued stdin.
 # Explicit --repair-terminal and rejected contaminated LOCAL menu answers can
@@ -109,7 +118,7 @@
 # reject a stale session. No restart, kill, key recovery or new launch is automatic.
 # API/SDK reference: https://sprites.dev/api/sprites/exec
 # https://github.com/superfly/sprites-go/blob/main/session.go
-# sprite-codex-v62.sh — paste-handoff revision based on v61
+# sprite-codex-v63.sh — paste-handoff revision based on v61
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -231,17 +240,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v62.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v62.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v62.sh --attach-only --session-id 1847
-#   bash sprite-codex-v62.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v62.sh --download-output
-#   bash sprite-codex-v62.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v62.sh --show-models          # no API calls
-#   bash sprite-codex-v62.sh --test-models          # host API tests only
-#   bash sprite-codex-v62.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v62.sh --test-models-before-run
-#   bash sprite-codex-v62.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v63.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v63.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v63.sh --attach-only --session-id 1847
+#   bash sprite-codex-v63.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v63.sh --download-output
+#   bash sprite-codex-v63.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v63.sh --show-models          # no API calls
+#   bash sprite-codex-v63.sh --test-models          # host API tests only
+#   bash sprite-codex-v63.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v63.sh --test-models-before-run
+#   bash sprite-codex-v63.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -328,6 +337,9 @@ Reset emulator modes for LOCAL menus, but prepare Codex reattachments with
 bracketed paste ON. Normal handoffs do not flush unread input. Nothing monitors,
 parses, logs, or resends the active client's keystrokes or clipboard contents.
 """
+import fcntl as _tty_fcntl
+import select as _tty_select
+import time as _tty_time
 import copy as _tty_copy
 import os as _tty_os
 import re as _tty_re
@@ -376,6 +388,93 @@ def _local_terminal_handles():
     return None
 
 
+
+def _local_terminal_emit(data, handles=None):
+    """Bounded LOCAL tty write; never change the active client's IO flags.
+
+    Called only before/after a client or at local startup. Resume stopped output
+    FIRST, then temporarily use nonblocking writes. Restore descriptor flags even
+    on timeout. No stdin read, terminal query, output erase, or input flush.
+    """
+    handles = handles or _local_terminal_handles()
+    if handles is None:
+        return False
+    fd, out = handles
+    flags = None
+    try:
+        # TCOON resumes this tty's OUTPUT. TCION would send an input-flow byte:
+        # do NOT use TCION or inject an XON keystroke into a remote application.
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
+        flags = _tty_fcntl.fcntl(out, _tty_fcntl.F_GETFL)
+        _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags | _tty_os.O_NONBLOCK)
+        deadline = _tty_time.monotonic() + 0.5
+        pending = memoryview(data)
+        while pending:
+            remaining = deadline - _tty_time.monotonic()
+            if remaining <= 0 or not _tty_select.select([], [out], [], remaining)[1]:
+                return False
+            try:
+                count = _tty_os.write(out, pending)
+            except (BlockingIOError, InterruptedError):
+                continue
+            if count <= 0:
+                return False
+            pending = pending[count:]
+        return True
+    except (OSError, ValueError, _tty_termios.error):
+        return False
+    finally:
+        if flags is not None:
+            try:
+                _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags)
+            except OSError:
+                pass
+
+
+def local_startup(diagnostics=False):
+    """No cloud calls, runtime installs, token prompts, or environment dumps."""
+    import shutil
+    handles = _local_terminal_handles()
+    state = 'not a foreground paired terminal'
+    if handles is not None:
+        # A terminated client can leave raw/no-echo input behind. Restore just
+        # the normal line-input essentials for our LOCAL startup menu, without
+        # stty's flushing action and without replacing custom key bindings.
+        fd, _ = handles
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
+        attrs = _tty_termios.tcgetattr(fd)
+        repaired = not bool(attrs[3] & _tty_termios.ICANON) or not bool(attrs[3] & _tty_termios.ECHO)
+        if repaired:
+            attrs = _tty_copy.deepcopy(attrs)
+            attrs[0] = (attrs[0] | _tty_termios.ICRNL) & ~(_tty_termios.INLCR | _tty_termios.IGNCR)
+            attrs[1] |= _tty_termios.OPOST | _tty_termios.ONLCR
+            attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
+            _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
+        if not local_terminal_reset():
+            raise RuntimeError('Local terminal output could not be restored within its write deadline. Use a fresh Terminal window.')
+        state = 'ready; repaired leftover raw/no-echo input' if repaired else 'ready'
+    mode = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
+    if mode not in ('auto', 'plain'):
+        raise RuntimeError('SPRITE_TERMINAL_MODE must be auto or plain.')
+    print('Sprite Codex v63: local startup ready.', flush=True)
+    if _tty_sys.version_info < (3, 9):
+        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
+    if diagnostics:
+        # repr escapes control sequences in executable paths / terminal names.
+        def safe(value):
+            return ascii(str(value))[:360]
+        print('Local-only diagnostics (no Sprite/API command was run):', flush=True)
+        print('  Python: ' + safe(_tty_sys.executable) + ' (' + _tty_sys.version.split()[0] + ')', flush=True)
+        print('  Sprite CLI path: ' + safe(shutil.which('sprite') or 'not found'), flush=True)
+        print('  TERM: ' + safe(_tty_os.environ.get('TERM', '')), flush=True)
+        print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
+        print('  Local terminal: ' + state, flush=True)
+        print('  Terminal mode: ' + mode, flush=True)
+        print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
+        print('  No authentication, cloud health, or running session was tested.', flush=True)
+    return 0
+
+
 def local_terminal_reset(saved=None, *, flush=False, sane=False):
     """Restore this local terminal after a TUI boundary. Best effort, no input log.
 
@@ -390,12 +489,9 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
         return False
     fd, out = handles
     try:
-        _tty_sys.stdout.flush()
-        _tty_sys.stderr.flush()
-        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
-            pending = memoryview(_LOCAL_TERMINAL_RESET)
-            while pending:
-                pending = pending[_tty_os.write(out, pending):]
+        # Resume flow BEFORE any output or restoration. Neither flush Python's
+        # buffered streams nor make an unbounded blocking write during cleanup.
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
         if saved is not None:
             # NOW avoids waiting indefinitely on a flow-controlled terminal.
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
@@ -405,6 +501,9 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
                                 stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
         if flush:
             _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
+        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
+                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+            return _local_terminal_emit(_LOCAL_TERMINAL_RESET, handles)
         return True
     except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
         return False
@@ -424,12 +523,10 @@ def local_terminal_prepare(*, bracketed_paste=False):
     if handles is None:
         return False
     try:
-        _tty_sys.stdout.flush()
-        _tty_sys.stderr.flush()
-        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
-            pending = memoryview(_LOCAL_CODEX_PREPARE)
-            while pending:
-                pending = pending[_tty_os.write(handles[1], pending):]
+        _tty_termios.tcflow(handles[0], _tty_termios.TCOON)
+        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
+                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+            return _local_terminal_emit(_LOCAL_CODEX_PREPARE, handles)
         return True
     except (OSError, ValueError):
         return False
@@ -520,7 +617,7 @@ LOCAL_TERMINAL_PY
 run_local_tty() {
   local codex_paste=0
   if [[ ${1:-} == --codex-paste ]]; then codex_paste=1; shift; fi
-  python3 -c "$(local_terminal_python)
+  python3 -I -S -u -c "$(local_terminal_python)
 try:
     rc = local_terminal_call(_tty_sys.argv[2:], bracketed_paste=(_tty_sys.argv[1] == '1'))
     raise SystemExit(128 - rc if rc < 0 else rc)
@@ -533,9 +630,60 @@ except OSError:
 " "$codex_paste" "$@"
 }
 
+run_local_startup() (
+  local mode=${1:-normal} limit=${SPRITE_LOCAL_STARTUP_TIMEOUT:-8} child_pid="" watch_pid="" rc=0
+  [[ $limit =~ ^[1-9][0-9]?$ ]] && (( limit <= 30 )) || {
+    echo 'error: SPRITE_LOCAL_STARTUP_TIMEOUT must be 1..30 seconds' >&2; exit 2;
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    echo 'error: local python3 is missing; no Sprite command was run' >&2; exit 127;
+  }
+  stop_local_startup() {
+    [[ -z $watch_pid ]] || { kill "$watch_pid" 2>/dev/null || true; wait "$watch_pid" 2>/dev/null || true; }
+    if [[ -n $child_pid ]]; then
+      kill -KILL "$child_pid" 2>/dev/null || true
+      wait "$child_pid" 2>/dev/null || true
+    fi
+  }
+  trap stop_local_startup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  # Explicit fd duplication keeps the terminal attached even for a background
+  # child of noninteractive Bash. The child is only this local startup helper.
+  exec 9<&0
+  python3 -I -S -u -c "$(local_terminal_python)
+try:
+    raise SystemExit(local_startup(diagnostics=(_tty_sys.argv[1] == 'diagnose')))
+except (OSError, RuntimeError, ValueError) as exc:
+    print('error: ' + str(exc), file=_tty_sys.stderr, flush=True)
+    raise SystemExit(2)
+" "$mode" <&9 &
+  child_pid=$!
+  (
+    timer=""
+    trap '[[ -z $timer ]] || kill "$timer" 2>/dev/null; exit 0' TERM INT HUP
+    sleep "$limit" & timer=$!; wait "$timer" || exit 0
+    kill -TERM "$child_pid" 2>/dev/null || exit 0
+    sleep 1 & timer=$!; wait "$timer" || exit 0
+    kill -KILL "$child_pid" 2>/dev/null || true
+  ) </dev/null >/dev/null 2>&1 &
+  watch_pid=$!
+  if wait "$child_pid"; then rc=0; else rc=$?; fi
+  child_pid=""
+  kill "$watch_pid" 2>/dev/null || true; wait "$watch_pid" 2>/dev/null || true; watch_pid=""
+  if (( rc != 0 )); then
+    printf 'error: local startup failed (exit %s; timeout budget %ss). No Sprite command was run.
+' "$rc" "$limit" >&2
+    printf 'Open a fresh local Terminal; run --diagnose-local. Do not use bash -x or paste credentials into diagnostics.
+' >&2
+  fi
+  exit "$rc"
+)
+
 repair_local_terminal() {
   command -v python3 >/dev/null 2>&1 || { echo 'error: local python3 is required' >&2; return 127; }
-  python3 -c "$(local_terminal_python)
+  python3 -I -S -u -c "$(local_terminal_python)
 if not local_terminal_reset(flush=True, sane=True):
     print('error: repair needs this foreground local terminal (not a pipe or remote Codex prompt)', file=_tty_sys.stderr)
     raise SystemExit(2)
@@ -545,9 +693,10 @@ print('Local terminal input/display modes reset. No Sprite command was run.')
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v62.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v63.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
   (no option)               Attach / Setup / Quit / Download / Files / Retrieve menu.
+  --diagnose-local         Check local runtime/terminal only; no Sprite/API calls.
   --repair-terminal        Repair this LOCAL terminal only; no Sprite/login required.
   --attach-only             Select a Sprite and attach to an existing live TTY.
   --session-id ID           With --attach-only or --files + SPRITE_NAME: exact TTY.
@@ -760,6 +909,20 @@ configuration requires Python 3.11+ on the Sprite, or Python with tomli installe
 Tests make billable API calls; no agent, GitHub or Fly credentials are needed.
 All three must pass for exit 0. Failures/missing keys exit 1; bad arguments exit 2.
 
+Local startup/terminal diagnostics (v63):
+  --diagnose-local           Local Python/terminal/path checks; no network/API calls.
+  SPRITE_LOCAL_STARTUP_TIMEOUT=8 bounds the local startup helper (1..30 seconds,
+                             with a one-second termination grace if necessary).
+  SPRITE_TERMINAL_MODE=plain Suppress wrapper terminal escape sequences for diagnosis.
+                             This sacrifices wrapper paste/mouse mode preparation;
+                             Sprite/Codex can still emit their own terminal codes.
+  Default auto mode preserves bracketed paste on recognized Codex connections.
+  Startup resumes paused local output before writing and repairs leftover raw/
+  no-echo input for the local menu without clearing queued input. Explicit repair
+  and rejection of contaminated local menu answers can still clear queued input.
+  No total timeout is imposed on an active Codex attachment. Blankness AFTER
+  attachment needs separate remote/connection diagnosis; this is not a restart.
+
 Cloud keep-awake (v60):
   Managed new runs and attachments verify a detached cloud worker before use.
   --keep-awake-status        Select a Sprite and check current protection; no agent attach.
@@ -795,10 +958,11 @@ _FILE_WORKDIR_SELECTED=0
 while (($#)); do
   case "$1" in
     --help|-h) show_usage; exit 0 ;;
-    --repair-terminal|--attach-only|--files|--shell|--retrieve|--recover|--check-fly|--keep-awake-status|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
+    --diagnose-local|--repair-terminal|--attach-only|--files|--shell|--retrieve|--recover|--check-fly|--keep-awake-status|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
       (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
       _MODE_SELECTED=1
       case "$1" in
+        --diagnose-local) RUN_MODE=local-diagnostics ;;
         --repair-terminal) RUN_MODE=terminal-repair ;;
         --attach-only) RUN_MODE=attach ;;
         --files|--shell) RUN_MODE=files ;;
@@ -843,12 +1007,17 @@ if [[ $RUN_MODE == terminal-repair ]]; then
   repair_local_terminal
   exit $?
 fi
-# At startup repair stale emulator flags, without reading/discarding typed-ahead
-# menu choices or changing user stty preferences. Noninteractive output is untouched.
-if [[ -t 0 && -t 1 ]] && command -v python3 >/dev/null 2>&1; then
-  python3 -c "$(local_terminal_python)
-local_terminal_reset()
-" || true
+# v63: bounded local-only startup. A broken python shim/site import or stopped
+# tty output must not leave the screen silently blank before the opening menu.
+if [[ $RUN_MODE == local-diagnostics ]]; then
+  if [[ -n $ATTACH_SESSION_ID ]] || (( _JSON_OUTPUT_SELECTED || _OUTPUT_DIR_SELECTED || _FILE_WORKDIR_SELECTED )); then
+    echo 'error: --diagnose-local does not accept Sprite/path/report selectors' >&2; exit 2
+  fi
+  run_local_startup diagnose
+  exit $?
+fi
+if [[ -t 0 && -t 1 ]]; then
+  run_local_startup normal || exit $?
 fi
 
 if [[ $RUN_MODE == check-fly ]] && (( _JSON_OUTPUT_SELECTED || _OUTPUT_DIR_SELECTED || _FILE_WORKDIR_SELECTED )); then
@@ -893,7 +1062,10 @@ output_download_python() {
 """Optional host-side ZIP download; no provider credentials or remote ZIP file."""
 from __future__ import annotations
 
-# BEGIN V62 LOCAL TERMINAL HELPERS
+# BEGIN V63 LOCAL TERMINAL HELPERS
+import fcntl as _tty_fcntl
+import select as _tty_select
+import time as _tty_time
 import copy as _tty_copy
 import os as _tty_os
 import re as _tty_re
@@ -942,6 +1114,93 @@ def _local_terminal_handles():
     return None
 
 
+
+def _local_terminal_emit(data, handles=None):
+    """Bounded LOCAL tty write; never change the active client's IO flags.
+
+    Called only before/after a client or at local startup. Resume stopped output
+    FIRST, then temporarily use nonblocking writes. Restore descriptor flags even
+    on timeout. No stdin read, terminal query, output erase, or input flush.
+    """
+    handles = handles or _local_terminal_handles()
+    if handles is None:
+        return False
+    fd, out = handles
+    flags = None
+    try:
+        # TCOON resumes this tty's OUTPUT. TCION would send an input-flow byte:
+        # do NOT use TCION or inject an XON keystroke into a remote application.
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
+        flags = _tty_fcntl.fcntl(out, _tty_fcntl.F_GETFL)
+        _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags | _tty_os.O_NONBLOCK)
+        deadline = _tty_time.monotonic() + 0.5
+        pending = memoryview(data)
+        while pending:
+            remaining = deadline - _tty_time.monotonic()
+            if remaining <= 0 or not _tty_select.select([], [out], [], remaining)[1]:
+                return False
+            try:
+                count = _tty_os.write(out, pending)
+            except (BlockingIOError, InterruptedError):
+                continue
+            if count <= 0:
+                return False
+            pending = pending[count:]
+        return True
+    except (OSError, ValueError, _tty_termios.error):
+        return False
+    finally:
+        if flags is not None:
+            try:
+                _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags)
+            except OSError:
+                pass
+
+
+def local_startup(diagnostics=False):
+    """No cloud calls, runtime installs, token prompts, or environment dumps."""
+    import shutil
+    handles = _local_terminal_handles()
+    state = 'not a foreground paired terminal'
+    if handles is not None:
+        # A terminated client can leave raw/no-echo input behind. Restore just
+        # the normal line-input essentials for our LOCAL startup menu, without
+        # stty's flushing action and without replacing custom key bindings.
+        fd, _ = handles
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
+        attrs = _tty_termios.tcgetattr(fd)
+        repaired = not bool(attrs[3] & _tty_termios.ICANON) or not bool(attrs[3] & _tty_termios.ECHO)
+        if repaired:
+            attrs = _tty_copy.deepcopy(attrs)
+            attrs[0] = (attrs[0] | _tty_termios.ICRNL) & ~(_tty_termios.INLCR | _tty_termios.IGNCR)
+            attrs[1] |= _tty_termios.OPOST | _tty_termios.ONLCR
+            attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
+            _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
+        if not local_terminal_reset():
+            raise RuntimeError('Local terminal output could not be restored within its write deadline. Use a fresh Terminal window.')
+        state = 'ready; repaired leftover raw/no-echo input' if repaired else 'ready'
+    mode = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
+    if mode not in ('auto', 'plain'):
+        raise RuntimeError('SPRITE_TERMINAL_MODE must be auto or plain.')
+    print('Sprite Codex v63: local startup ready.', flush=True)
+    if _tty_sys.version_info < (3, 9):
+        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
+    if diagnostics:
+        # repr escapes control sequences in executable paths / terminal names.
+        def safe(value):
+            return ascii(str(value))[:360]
+        print('Local-only diagnostics (no Sprite/API command was run):', flush=True)
+        print('  Python: ' + safe(_tty_sys.executable) + ' (' + _tty_sys.version.split()[0] + ')', flush=True)
+        print('  Sprite CLI path: ' + safe(shutil.which('sprite') or 'not found'), flush=True)
+        print('  TERM: ' + safe(_tty_os.environ.get('TERM', '')), flush=True)
+        print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
+        print('  Local terminal: ' + state, flush=True)
+        print('  Terminal mode: ' + mode, flush=True)
+        print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
+        print('  No authentication, cloud health, or running session was tested.', flush=True)
+    return 0
+
+
 def local_terminal_reset(saved=None, *, flush=False, sane=False):
     """Restore this local terminal after a TUI boundary. Best effort, no input log.
 
@@ -956,12 +1215,9 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
         return False
     fd, out = handles
     try:
-        _tty_sys.stdout.flush()
-        _tty_sys.stderr.flush()
-        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
-            pending = memoryview(_LOCAL_TERMINAL_RESET)
-            while pending:
-                pending = pending[_tty_os.write(out, pending):]
+        # Resume flow BEFORE any output or restoration. Neither flush Python's
+        # buffered streams nor make an unbounded blocking write during cleanup.
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
         if saved is not None:
             # NOW avoids waiting indefinitely on a flow-controlled terminal.
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
@@ -971,6 +1227,9 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
                                 stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
         if flush:
             _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
+        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
+                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+            return _local_terminal_emit(_LOCAL_TERMINAL_RESET, handles)
         return True
     except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
         return False
@@ -990,12 +1249,10 @@ def local_terminal_prepare(*, bracketed_paste=False):
     if handles is None:
         return False
     try:
-        _tty_sys.stdout.flush()
-        _tty_sys.stderr.flush()
-        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
-            pending = memoryview(_LOCAL_CODEX_PREPARE)
-            while pending:
-                pending = pending[_tty_os.write(handles[1], pending):]
+        _tty_termios.tcflow(handles[0], _tty_termios.TCOON)
+        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
+                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+            return _local_terminal_emit(_LOCAL_CODEX_PREPARE, handles)
         return True
     except (OSError, ValueError):
         return False
@@ -1080,7 +1337,7 @@ def local_menu_input(prompt):
         print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
         print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
         local_terminal_reset(flush=True, sane=True)
-# END V62 LOCAL TERMINAL HELPERS
+# END V63 LOCAL TERMINAL HELPERS
 
 import datetime as dt
 import hashlib
@@ -2049,7 +2306,7 @@ run_output_download() {
   local selected_sprite=$1 mode=${2:-$SPRITE_OUTPUT_DOWNLOAD} context_file=${3:-${OUTPUT_PINNED_CONTEXT:-}}
   [[ $mode != never ]] || return 0
   command -v python3 >/dev/null 2>&1 || { echo "warning: output download requires local python3" >&2; return 127; }
-  python3 -c "$(output_download_python)" "$selected_sprite" "$mode" "$OUTPUT_HOST_DIR" "$SPRITE_OUTPUT_DIR" "${SPRITE_ORG:-}" "$context_file" "${OUTPUT_PATH_EXPLICIT:-1}"
+  python3 -I -S -u -c "$(output_download_python)" "$selected_sprite" "$mode" "$OUTPUT_HOST_DIR" "$SPRITE_OUTPUT_DIR" "${SPRITE_ORG:-}" "$context_file" "${OUTPUT_PATH_EXPLICIT:-1}"
 }
 
 maybe_download_output() {
@@ -2751,7 +3008,10 @@ https://docs.sprites.dev/cli/commands/
 """
 from __future__ import annotations
 
-# BEGIN V62 LOCAL TERMINAL HELPERS
+# BEGIN V63 LOCAL TERMINAL HELPERS
+import fcntl as _tty_fcntl
+import select as _tty_select
+import time as _tty_time
 import copy as _tty_copy
 import os as _tty_os
 import re as _tty_re
@@ -2800,6 +3060,93 @@ def _local_terminal_handles():
     return None
 
 
+
+def _local_terminal_emit(data, handles=None):
+    """Bounded LOCAL tty write; never change the active client's IO flags.
+
+    Called only before/after a client or at local startup. Resume stopped output
+    FIRST, then temporarily use nonblocking writes. Restore descriptor flags even
+    on timeout. No stdin read, terminal query, output erase, or input flush.
+    """
+    handles = handles or _local_terminal_handles()
+    if handles is None:
+        return False
+    fd, out = handles
+    flags = None
+    try:
+        # TCOON resumes this tty's OUTPUT. TCION would send an input-flow byte:
+        # do NOT use TCION or inject an XON keystroke into a remote application.
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
+        flags = _tty_fcntl.fcntl(out, _tty_fcntl.F_GETFL)
+        _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags | _tty_os.O_NONBLOCK)
+        deadline = _tty_time.monotonic() + 0.5
+        pending = memoryview(data)
+        while pending:
+            remaining = deadline - _tty_time.monotonic()
+            if remaining <= 0 or not _tty_select.select([], [out], [], remaining)[1]:
+                return False
+            try:
+                count = _tty_os.write(out, pending)
+            except (BlockingIOError, InterruptedError):
+                continue
+            if count <= 0:
+                return False
+            pending = pending[count:]
+        return True
+    except (OSError, ValueError, _tty_termios.error):
+        return False
+    finally:
+        if flags is not None:
+            try:
+                _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags)
+            except OSError:
+                pass
+
+
+def local_startup(diagnostics=False):
+    """No cloud calls, runtime installs, token prompts, or environment dumps."""
+    import shutil
+    handles = _local_terminal_handles()
+    state = 'not a foreground paired terminal'
+    if handles is not None:
+        # A terminated client can leave raw/no-echo input behind. Restore just
+        # the normal line-input essentials for our LOCAL startup menu, without
+        # stty's flushing action and without replacing custom key bindings.
+        fd, _ = handles
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
+        attrs = _tty_termios.tcgetattr(fd)
+        repaired = not bool(attrs[3] & _tty_termios.ICANON) or not bool(attrs[3] & _tty_termios.ECHO)
+        if repaired:
+            attrs = _tty_copy.deepcopy(attrs)
+            attrs[0] = (attrs[0] | _tty_termios.ICRNL) & ~(_tty_termios.INLCR | _tty_termios.IGNCR)
+            attrs[1] |= _tty_termios.OPOST | _tty_termios.ONLCR
+            attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
+            _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
+        if not local_terminal_reset():
+            raise RuntimeError('Local terminal output could not be restored within its write deadline. Use a fresh Terminal window.')
+        state = 'ready; repaired leftover raw/no-echo input' if repaired else 'ready'
+    mode = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
+    if mode not in ('auto', 'plain'):
+        raise RuntimeError('SPRITE_TERMINAL_MODE must be auto or plain.')
+    print('Sprite Codex v63: local startup ready.', flush=True)
+    if _tty_sys.version_info < (3, 9):
+        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
+    if diagnostics:
+        # repr escapes control sequences in executable paths / terminal names.
+        def safe(value):
+            return ascii(str(value))[:360]
+        print('Local-only diagnostics (no Sprite/API command was run):', flush=True)
+        print('  Python: ' + safe(_tty_sys.executable) + ' (' + _tty_sys.version.split()[0] + ')', flush=True)
+        print('  Sprite CLI path: ' + safe(shutil.which('sprite') or 'not found'), flush=True)
+        print('  TERM: ' + safe(_tty_os.environ.get('TERM', '')), flush=True)
+        print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
+        print('  Local terminal: ' + state, flush=True)
+        print('  Terminal mode: ' + mode, flush=True)
+        print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
+        print('  No authentication, cloud health, or running session was tested.', flush=True)
+    return 0
+
+
 def local_terminal_reset(saved=None, *, flush=False, sane=False):
     """Restore this local terminal after a TUI boundary. Best effort, no input log.
 
@@ -2814,12 +3161,9 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
         return False
     fd, out = handles
     try:
-        _tty_sys.stdout.flush()
-        _tty_sys.stderr.flush()
-        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
-            pending = memoryview(_LOCAL_TERMINAL_RESET)
-            while pending:
-                pending = pending[_tty_os.write(out, pending):]
+        # Resume flow BEFORE any output or restoration. Neither flush Python's
+        # buffered streams nor make an unbounded blocking write during cleanup.
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
         if saved is not None:
             # NOW avoids waiting indefinitely on a flow-controlled terminal.
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
@@ -2829,6 +3173,9 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
                                 stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
         if flush:
             _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
+        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
+                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+            return _local_terminal_emit(_LOCAL_TERMINAL_RESET, handles)
         return True
     except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
         return False
@@ -2848,12 +3195,10 @@ def local_terminal_prepare(*, bracketed_paste=False):
     if handles is None:
         return False
     try:
-        _tty_sys.stdout.flush()
-        _tty_sys.stderr.flush()
-        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
-            pending = memoryview(_LOCAL_CODEX_PREPARE)
-            while pending:
-                pending = pending[_tty_os.write(handles[1], pending):]
+        _tty_termios.tcflow(handles[0], _tty_termios.TCOON)
+        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
+                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+            return _local_terminal_emit(_LOCAL_CODEX_PREPARE, handles)
         return True
     except (OSError, ValueError):
         return False
@@ -2938,7 +3283,7 @@ def local_menu_input(prompt):
         print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
         print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
         local_terminal_reset(flush=True, sane=True)
-# END V62 LOCAL TERMINAL HELPERS
+# END V63 LOCAL TERMINAL HELPERS
 
 
 import datetime as dt
@@ -3507,7 +3852,7 @@ run_attach_only() (
   cloud_guard_python >"$local_guard_dir/guard.py"
   # Only managed attachments upload a secret-free guard. Files/ZIP selection does not.
   SPRITE_CLOUD_GUARD_HELPER="$local_guard_dir/guard.py" \
-    python3 -c "$(attach_only_python)" "$ATTACH_SESSION_ID" "${1:-}" "$RUN_MODE"
+    python3 -I -S -u -c "$(attach_only_python)" "$ATTACH_SESSION_ID" "${1:-}" "$RUN_MODE"
 )
 
 
@@ -3515,11 +3860,14 @@ run_attach_only() (
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v62.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v63.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
 
-# BEGIN V62 LOCAL TERMINAL HELPERS
+# BEGIN V63 LOCAL TERMINAL HELPERS
+import fcntl as _tty_fcntl
+import select as _tty_select
+import time as _tty_time
 import copy as _tty_copy
 import os as _tty_os
 import re as _tty_re
@@ -3568,6 +3916,93 @@ def _local_terminal_handles():
     return None
 
 
+
+def _local_terminal_emit(data, handles=None):
+    """Bounded LOCAL tty write; never change the active client's IO flags.
+
+    Called only before/after a client or at local startup. Resume stopped output
+    FIRST, then temporarily use nonblocking writes. Restore descriptor flags even
+    on timeout. No stdin read, terminal query, output erase, or input flush.
+    """
+    handles = handles or _local_terminal_handles()
+    if handles is None:
+        return False
+    fd, out = handles
+    flags = None
+    try:
+        # TCOON resumes this tty's OUTPUT. TCION would send an input-flow byte:
+        # do NOT use TCION or inject an XON keystroke into a remote application.
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
+        flags = _tty_fcntl.fcntl(out, _tty_fcntl.F_GETFL)
+        _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags | _tty_os.O_NONBLOCK)
+        deadline = _tty_time.monotonic() + 0.5
+        pending = memoryview(data)
+        while pending:
+            remaining = deadline - _tty_time.monotonic()
+            if remaining <= 0 or not _tty_select.select([], [out], [], remaining)[1]:
+                return False
+            try:
+                count = _tty_os.write(out, pending)
+            except (BlockingIOError, InterruptedError):
+                continue
+            if count <= 0:
+                return False
+            pending = pending[count:]
+        return True
+    except (OSError, ValueError, _tty_termios.error):
+        return False
+    finally:
+        if flags is not None:
+            try:
+                _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags)
+            except OSError:
+                pass
+
+
+def local_startup(diagnostics=False):
+    """No cloud calls, runtime installs, token prompts, or environment dumps."""
+    import shutil
+    handles = _local_terminal_handles()
+    state = 'not a foreground paired terminal'
+    if handles is not None:
+        # A terminated client can leave raw/no-echo input behind. Restore just
+        # the normal line-input essentials for our LOCAL startup menu, without
+        # stty's flushing action and without replacing custom key bindings.
+        fd, _ = handles
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
+        attrs = _tty_termios.tcgetattr(fd)
+        repaired = not bool(attrs[3] & _tty_termios.ICANON) or not bool(attrs[3] & _tty_termios.ECHO)
+        if repaired:
+            attrs = _tty_copy.deepcopy(attrs)
+            attrs[0] = (attrs[0] | _tty_termios.ICRNL) & ~(_tty_termios.INLCR | _tty_termios.IGNCR)
+            attrs[1] |= _tty_termios.OPOST | _tty_termios.ONLCR
+            attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
+            _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
+        if not local_terminal_reset():
+            raise RuntimeError('Local terminal output could not be restored within its write deadline. Use a fresh Terminal window.')
+        state = 'ready; repaired leftover raw/no-echo input' if repaired else 'ready'
+    mode = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
+    if mode not in ('auto', 'plain'):
+        raise RuntimeError('SPRITE_TERMINAL_MODE must be auto or plain.')
+    print('Sprite Codex v63: local startup ready.', flush=True)
+    if _tty_sys.version_info < (3, 9):
+        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
+    if diagnostics:
+        # repr escapes control sequences in executable paths / terminal names.
+        def safe(value):
+            return ascii(str(value))[:360]
+        print('Local-only diagnostics (no Sprite/API command was run):', flush=True)
+        print('  Python: ' + safe(_tty_sys.executable) + ' (' + _tty_sys.version.split()[0] + ')', flush=True)
+        print('  Sprite CLI path: ' + safe(shutil.which('sprite') or 'not found'), flush=True)
+        print('  TERM: ' + safe(_tty_os.environ.get('TERM', '')), flush=True)
+        print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
+        print('  Local terminal: ' + state, flush=True)
+        print('  Terminal mode: ' + mode, flush=True)
+        print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
+        print('  No authentication, cloud health, or running session was tested.', flush=True)
+    return 0
+
+
 def local_terminal_reset(saved=None, *, flush=False, sane=False):
     """Restore this local terminal after a TUI boundary. Best effort, no input log.
 
@@ -3582,12 +4017,9 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
         return False
     fd, out = handles
     try:
-        _tty_sys.stdout.flush()
-        _tty_sys.stderr.flush()
-        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
-            pending = memoryview(_LOCAL_TERMINAL_RESET)
-            while pending:
-                pending = pending[_tty_os.write(out, pending):]
+        # Resume flow BEFORE any output or restoration. Neither flush Python's
+        # buffered streams nor make an unbounded blocking write during cleanup.
+        _tty_termios.tcflow(fd, _tty_termios.TCOON)
         if saved is not None:
             # NOW avoids waiting indefinitely on a flow-controlled terminal.
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
@@ -3597,6 +4029,9 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
                                 stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
         if flush:
             _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
+        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
+                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+            return _local_terminal_emit(_LOCAL_TERMINAL_RESET, handles)
         return True
     except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
         return False
@@ -3616,12 +4051,10 @@ def local_terminal_prepare(*, bracketed_paste=False):
     if handles is None:
         return False
     try:
-        _tty_sys.stdout.flush()
-        _tty_sys.stderr.flush()
-        if _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
-            pending = memoryview(_LOCAL_CODEX_PREPARE)
-            while pending:
-                pending = pending[_tty_os.write(handles[1], pending):]
+        _tty_termios.tcflow(handles[0], _tty_termios.TCOON)
+        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
+                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+            return _local_terminal_emit(_LOCAL_CODEX_PREPARE, handles)
         return True
     except (OSError, ValueError):
         return False
@@ -3706,7 +4139,7 @@ def local_menu_input(prompt):
         print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
         print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
         local_terminal_reset(flush=True, sane=True)
-# END V62 LOCAL TERMINAL HELPERS
+# END V63 LOCAL TERMINAL HELPERS
 
 import base64
 import hashlib
@@ -5406,7 +5839,7 @@ run_file_access() (
 
 retrieve_python() {
   cat <<'RETRIEVE_PY'
-"""Local interactive retrieve mode. Embedded into sprite-codex-v62.sh."""
+"""Local interactive retrieve mode. Embedded into sprite-codex-v63.sh."""
 import contextlib
 import getpass
 import hashlib
