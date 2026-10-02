@@ -1,4 +1,40 @@
 #!/usr/bin/env bash
+# v67: distinguish live typing from delayed work AFTER Enter. The direct v66
+# terminal and clipboard implementation is retained; no new terminal relay,
+# input filter, automatic agent restart, Git operation, or model-setting change.
+# Opening option 9 / --diagnose-response samples the selected live Codex process
+# and descendants from a SECOND local terminal. No app/provider credential entry.
+# Records repeated D/T states, interval CPU/I/O and thread waits, and PSI/memory
+# counters in a private LOCAL report. Never assumes a session ID is a Linux PID.
+# No Git/status/rg probe, repository walk, raw logs, environment or cmdline reads.
+# Historical D/0%CPU/futex observations alone do not establish a live deadlock.
+# --response-pid PID is optional with SPRITE_NAME; actual identity is rechecked.
+# Samples default 6 x 3s (15s span). Transport/read time is bounded separately.
+# A read-only snapshot can reveal a stall; it cannot repair kernel I/O or guarantee
+# model latency. Cloud keep-awake is NOT application progress verification.
+# v66: restore direct v58-style interactive terminal ownership.
+# Sprite CLI inherits the original stdin/stdout/stderr. The output-only PTY,
+# synchronized-output filter, broad keyboard/screen resets and wrapper-imposed
+# raw input are removed. Clipboard paste remains: only mode 2004 is enabled before
+# recognized Codex clients. Mouse cleanup runs only after returning to LOCAL menus.
+# No keyboard/paste read/log/replay/ordinary input flush. No 20k paste limit.
+# Startup still checks local prerequisites and can restore line input for menus.
+# --repair-terminal is an EXPLICIT local-only repair, never an attach/retry hook.
+# Legacy SPRITE_TTY_MODE=responsive now maps to native with a startup notice;
+# SPRITE_BRACKETED_PASTE=auto (default) enables paste framing; value never leaves
+# all paste-mode control to the native client.
+# SPRITE_TERMINAL_MODE=plain skips local mouse cleanup, not clipboard support.
+# Keep-awake, Git, credentials, providers, files and independent probes retained.
+# This removes identified compatibility risks, not a proven cure for every
+# existing remote input-parser, network or resource stall. No live Mac test.
+# v61-v65 terminal notes below describe HISTORY; v66 policy above supersedes them.
+#
+# v64: one local script for Codex and independent keep-awake management.
+# --keepalive / opening menu 7 works from a second terminal without Codex attach.
+# Whole-Sprite timers can outlive Codex; start/extend/stop and legacy retirement
+# require confirmation. No keepalive action uploads workspace files or runs Git.
+# --keepalive-inventory avoids deliberately waking warm/cold/unknown Sprites.
+# Existing v60 session guards and v63 terminal/paste handling are unchanged.
 #
 # v63: local blank-screen/startup diagnostics. Resume paused LOCAL tty output
 # before mode writes; write escape sequences with a bounded nonblocking helper.
@@ -118,7 +154,7 @@
 # reject a stale session. No restart, kill, key recovery or new launch is automatic.
 # API/SDK reference: https://sprites.dev/api/sprites/exec
 # https://github.com/superfly/sprites-go/blob/main/session.go
-# sprite-codex-v63.sh — paste-handoff revision based on v61
+# sprite-codex-v67.sh — paste-handoff revision based on v61
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -240,17 +276,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v63.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v63.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v63.sh --attach-only --session-id 1847
-#   bash sprite-codex-v63.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v63.sh --download-output
-#   bash sprite-codex-v63.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v63.sh --show-models          # no API calls
-#   bash sprite-codex-v63.sh --test-models          # host API tests only
-#   bash sprite-codex-v63.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v63.sh --test-models-before-run
-#   bash sprite-codex-v63.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v67.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v67.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v67.sh --attach-only --session-id 1847
+#   bash sprite-codex-v67.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v67.sh --download-output
+#   bash sprite-codex-v67.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v67.sh --show-models          # no API calls
+#   bash sprite-codex-v67.sh --test-models          # host API tests only
+#   bash sprite-codex-v67.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v67.sh --test-models-before-run
+#   bash sprite-codex-v67.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -327,44 +363,46 @@ set -Eeuo pipefail
 set +x +v
 umask 077
 
-# v62: phase-specific local terminal handoff. No Sprite commands in these helpers.
+# v66: direct local terminal handoff; no cloud commands in these helpers.
 local_terminal_python() {
   cat <<'LOCAL_TERMINAL_PY'
-"""Local-only terminal cleanup. No Sprite/API calls; no remote keystrokes.
+"""v66 local terminal handoff: direct inherited stdin/stdout/stderr.
 
-POSIX terminal attributes and terminal-emulator private modes are separate.
-Reset emulator modes for LOCAL menus, but prepare Codex reattachments with
-bracketed paste ON. Normal handoffs do not flush unread input. Nothing monitors,
-parses, logs, or resends the active client's keystrokes or clipboard contents.
+No output relay, extra attachment PTY, or keyboard/paste reader. Sprite/Codex
+own raw input, resize, screen, and keyboard protocols. The only automatic
+application preparation is bracketed paste for recognized Codex clients. Mouse
+cleanup is limited to returning to LOCAL menus; full repair is explicit.
 """
-import fcntl as _tty_fcntl
-import select as _tty_select
-import time as _tty_time
 import copy as _tty_copy
 import os as _tty_os
 import re as _tty_re
+import select as _tty_select
 import signal as _tty_signal
 import subprocess as _tty_subprocess
 import sys as _tty_sys
 import termios as _tty_termios
+import time as _tty_time
 
-# Deliberately not RIS (ESC c), ED 3 (erase scrollback), a clipboard operation,
-# a terminal query, or a keystroke sent to the remote program. These are OUTPUT.
-# Paste framing and mouse reporting are independent terminal protocols.
-_LOCAL_MOUSE_RESET = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
-                             (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016))
-_LOCAL_CODEX_PREPARE = b'\x1b[?2026l' + _LOCAL_MOUSE_RESET + b'\x1b[?2004h'
+# Small, separate protocol operations: enabling paste does NOT reset keyboards,
+# focus, alternate screens, or synchronized rendering. No terminal query is sent.
+_LOCAL_PASTE_ON = b'\x1b[?2004h'
+_LOCAL_PASTE_OFF = b'\x1b[?2004l'
+_LOCAL_MENU_MOUSE_OFF = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+                               (9, 1000, 1001, 1002, 1003, 1005, 1006, 1007, 1015, 1016))
+
+# ONLY --repair-terminal uses this full sequence. Never use it as an attach hook.
 _LOCAL_TERMINAL_RESET = (
-    b'\x1b[?2026l'  # finish a stranded synchronized-output update
-    + _LOCAL_MOUSE_RESET + b'\x1b[?2004l'  # plain LOCAL menus do not parse pastes
-    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'  # return from alternate screen
-    + b'\x1b[>4;0m\x1b[=0u'  # default extended-key reporting where supported
+    b'\x1b[?2026l'
+    + b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+               (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 2004))
+    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'
+    + b'\x1b[>4;0m\x1b[=0u'
     + b'\x1b[?1l\x1b>\x1b(B\x0f\x1b[0m\x1b[?25h'
 )
 
 
 def _local_terminal_handles():
-    """Only operate on this foreground caller's terminal, never a pipe/file."""
+    """This foreground caller's paired terminal, never an unrelated /dev/tty."""
     try:
         fd = _tty_sys.stdin.fileno()
         if not _tty_os.isatty(fd):
@@ -373,8 +411,6 @@ def _local_terminal_handles():
             if _tty_os.tcgetpgrp(fd) != _tty_os.getpgrp():
                 return None
         except OSError:
-            # A PTY can be supplied without becoming a controlling terminal.
-            # Do not reach for some unrelated /dev/tty in that case.
             pass
         source = _tty_os.fstat(fd)
         for stream in (_tty_sys.stdout, _tty_sys.stderr):
@@ -388,33 +424,28 @@ def _local_terminal_handles():
     return None
 
 
-
 def _local_terminal_emit(data, handles=None):
-    """Bounded LOCAL tty write; never change the active client's IO flags.
-
-    Called only before/after a client or at local startup. Resume stopped output
-    FIRST, then temporarily use nonblocking writes. Restore descriptor flags even
-    on timeout. No stdin read, terminal query, output erase, or input flush.
-    """
+    """Bounded LOCAL protocol output, never a read/relay of keyboard input."""
     handles = handles or _local_terminal_handles()
     if handles is None:
         return False
-    fd, out = handles
-    flags = None
+    private = None
     try:
-        # TCOON resumes this tty's OUTPUT. TCION would send an input-flow byte:
-        # do NOT use TCION or inject an XON keystroke into a remote application.
-        _tty_termios.tcflow(fd, _tty_termios.TCOON)
-        flags = _tty_fcntl.fcntl(out, _tty_fcntl.F_GETFL)
-        _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags | _tty_os.O_NONBLOCK)
+        fd, out = handles
+        flags = _tty_os.O_WRONLY | _tty_os.O_NOCTTY | _tty_os.O_NONBLOCK
+        flags |= getattr(_tty_os, 'O_CLOEXEC', 0)
+        private = _tty_os.open(_tty_os.ttyname(out), flags)
+        a, b = _tty_os.fstat(out), _tty_os.fstat(private)
+        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+            return False
         deadline = _tty_time.monotonic() + 0.5
         pending = memoryview(data)
         while pending:
             remaining = deadline - _tty_time.monotonic()
-            if remaining <= 0 or not _tty_select.select([], [out], [], remaining)[1]:
+            if remaining <= 0 or not _tty_select.select([], [private], [], remaining)[1]:
                 return False
             try:
-                count = _tty_os.write(out, pending)
+                count = _tty_os.write(private, pending)
             except (BlockingIOError, InterruptedError):
                 continue
             if count <= 0:
@@ -424,22 +455,32 @@ def _local_terminal_emit(data, handles=None):
     except (OSError, ValueError, _tty_termios.error):
         return False
     finally:
-        if flags is not None:
-            try:
-                _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags)
-            except OSError:
-                pass
+        if private is not None:
+            _tty_os.close(private)
+
+
+def _terminal_settings():
+    """Accept old exported settings, but never bring back the removed bridge."""
+    path = _tty_os.environ.get('SPRITE_TTY_MODE', 'native')
+    menu = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
+    if path not in ('native', 'direct', 'responsive'):
+        raise ValueError('SPRITE_TTY_MODE must be native or direct (legacy responsive maps to native).')
+    if menu not in ('plain', 'auto'):
+        raise ValueError('SPRITE_TERMINAL_MODE must be plain or auto.')
+    if _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') not in ('auto', 'never'):
+        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never.')
+    return path, menu
 
 
 def local_startup(diagnostics=False):
-    """No cloud calls, runtime installs, token prompts, or environment dumps."""
+    """Bounded by the caller; local line-input recovery, never emulator resets."""
     import shutil
+    path, _ = _terminal_settings()
+    if _tty_sys.version_info < (3, 9):
+        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
     handles = _local_terminal_handles()
     state = 'not a foreground paired terminal'
     if handles is not None:
-        # A terminated client can leave raw/no-echo input behind. Restore just
-        # the normal line-input essentials for our LOCAL startup menu, without
-        # stty's flushing action and without replacing custom key bindings.
         fd, _ = handles
         _tty_termios.tcflow(fd, _tty_termios.TCOON)
         attrs = _tty_termios.tcgetattr(fd)
@@ -450,17 +491,11 @@ def local_startup(diagnostics=False):
             attrs[1] |= _tty_termios.OPOST | _tty_termios.ONLCR
             attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
-        if not local_terminal_reset():
-            raise RuntimeError('Local terminal output could not be restored within its write deadline. Use a fresh Terminal window.')
-        state = 'ready; repaired leftover raw/no-echo input' if repaired else 'ready'
-    mode = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
-    if mode not in ('auto', 'plain'):
-        raise RuntimeError('SPRITE_TERMINAL_MODE must be auto or plain.')
-    print('Sprite Codex v63: local startup ready.', flush=True)
-    if _tty_sys.version_info < (3, 9):
-        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
+        state = 'ready; repaired leftover raw/no-echo input for local menus' if repaired else 'ready'
+    print('Sprite Codex v67: local startup ready.', flush=True)
+    if path == 'responsive':
+        print('       Legacy responsive setting ignored: v66 uses the direct terminal path.', flush=True)
     if diagnostics:
-        # repr escapes control sequences in executable paths / terminal names.
         def safe(value):
             return ascii(str(value))[:360]
         print('Local-only diagnostics (no Sprite/API command was run):', flush=True)
@@ -469,31 +504,28 @@ def local_startup(diagnostics=False):
         print('  TERM: ' + safe(_tty_os.environ.get('TERM', '')), flush=True)
         print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
         print('  Local terminal: ' + state, flush=True)
-        print('  Terminal mode: ' + mode, flush=True)
+        print('  Interactive path: direct inherited stdin/stdout/stderr; no display relay.', flush=True)
+        print('  Paste framing: ' + _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') + ' (auto enables it for recognized Codex terminals).', flush=True)
+        print('  Screen/keyboard protocols: owned by Sprite/Codex; no broad automatic reset.', flush=True)
         print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
         print('  No authentication, cloud health, or running session was tested.', flush=True)
     return 0
 
 
-def local_terminal_reset(saved=None, *, flush=False, sane=False):
-    """Restore this local terminal after a TUI boundary. Best effort, no input log.
+def local_terminal_reset(saved=None, *, flush=False, sane=False, emulator=False):
+    """Explicit LOCAL repair only; ordinary clients restore attrs directly.
 
-    `flush=True` is reserved for explicit --repair-terminal or a rejected,
-    contaminated LOCAL menu answer. It discards queued input, including text;
-    normal attach/exit/retry handoffs MUST NOT use it. Nothing here can repair
-    an interrupted paste that a transport or remote process already consumed.
-    `sane` is reserved for explicit recovery and contaminated local menus.
+    --repair-terminal intentionally flushes queued input and resets emulator modes.
+    Never run that operation inside a Codex conversation or on another terminal.
+    It cannot repair an unfinished paste in the remote application's parser.
     """
     handles = _local_terminal_handles()
     if handles is None:
         return False
-    fd, out = handles
+    fd, _ = handles
     try:
-        # Resume flow BEFORE any output or restoration. Neither flush Python's
-        # buffered streams nor make an unbounded blocking write during cleanup.
         _tty_termios.tcflow(fd, _tty_termios.TCOON)
         if saved is not None:
-            # NOW avoids waiting indefinitely on a flow-controlled terminal.
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
         elif sane:
             _tty_subprocess.run(['stty', 'sane'], stdin=fd,
@@ -501,34 +533,10 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
                                 stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
         if flush:
             _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
-        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
-                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+        if emulator and _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
             return _local_terminal_emit(_LOCAL_TERMINAL_RESET, handles)
         return True
     except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
-        return False
-
-
-def local_terminal_prepare(*, bracketed_paste=False):
-    """Prepare a local client without consuming input or querying the terminal.
-
-    An existing Codex process will not rerun its startup just because we attach.
-    Establish paste framing locally, while still disabling stray mouse reports.
-    Do not apply a whole-screen/key reset to that app's incoming handoff.
-    Generic shells, tmux clients, and login programs keep ownership of their modes.
-    """
-    if not bracketed_paste:
-        return local_terminal_reset()
-    handles = _local_terminal_handles()
-    if handles is None:
-        return False
-    try:
-        _tty_termios.tcflow(handles[0], _tty_termios.TCOON)
-        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
-                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
-            return _local_terminal_emit(_LOCAL_CODEX_PREPARE, handles)
-        return True
-    except (OSError, ValueError):
         return False
 
 
@@ -538,12 +546,15 @@ class _LocalTerminalSignal(BaseException):
 
 
 def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
-    """Run exactly one local interactive client, preserving args/exit status.
+    """Direct inherited terminal with paste support, never a PTY/output bridge.
 
-    Stdin/stdout are the original TTY: this is NOT a PTY relay or text filter.
-    On local signal interruption only the child client is stopped, never an
-    explicit remote session-kill, Codex command, or keep-awake cancellation.
+    bracketed_paste marks a recognized Codex client. Enable only mode 2004 just
+    before its local client starts; input and all display bytes remain inherited.
+    No paste reader, size limit, clipboard access, input flush or replay. The
+    client owns raw input, resize and key protocols. Cleanup occurs AFTER exit.
     """
+    _, menu_mode = _terminal_settings()
+    paste_enabled = False
     handles = _local_terminal_handles()
     saved = None
     if handles is not None:
@@ -551,7 +562,8 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
             saved = _tty_copy.deepcopy(_tty_termios.tcgetattr(handles[0]))
         except (OSError, _tty_termios.error):
             pass
-        local_terminal_prepare(bracketed_paste=bracketed_paste)
+    if bracketed_paste:
+        print('       Direct terminal: original keyboard and display; no relay or screen filter.', flush=True)
     old_handlers = {}
     child = None
     caught = 0
@@ -560,10 +572,19 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         raise _LocalTerminalSignal(signum)
 
     try:
-        # No SIGCONT or idle timer: don't reset a live app's legitimate modes
-        # merely because the laptop woke or the remote app stopped printing.
         for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
             old_handlers[signum] = _tty_signal.signal(signum, interrupted)
+        if (bracketed_paste and handles is not None and
+                _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') == 'auto' and
+                _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
+            paste_enabled = _local_terminal_emit(_LOCAL_PASTE_ON, handles)
+            if paste_enabled:
+                print('       Clipboard: bracketed paste enabled; wait for the Codex input box before pasting.', flush=True)
+            else:
+                print('warning: local paste-mode write was not confirmed; attachment still uses the native terminal.',
+                      file=_tty_sys.stderr, flush=True)
+        # Keep all THREE descriptors unchanged and on the original terminal.
+        # No shell=True, new session, extra PTY, stdout capture, or input monitor.
         child = _tty_subprocess.Popen(argv, cwd=cwd)
         return child.wait()
     except _LocalTerminalSignal as exc:
@@ -573,7 +594,6 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         caught = _tty_signal.SIGINT
         return 128 + caught
     finally:
-        # Ignore a repeat close/terminate while performing bounded local cleanup.
         for signum in old_handlers:
             _tty_signal.signal(signum, _tty_signal.SIG_IGN)
         try:
@@ -582,26 +602,36 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
                     child.send_signal(caught)
                     child.wait(timeout=1)
                 except _tty_subprocess.TimeoutExpired:
-                    child.kill()  # this Popen object is only the LOCAL client
+                    child.kill()  # ONLY the local client, never a cloud process
                     try:
                         child.wait(timeout=1)
                     except _tty_subprocess.TimeoutExpired:
                         pass
-                except (OSError, _tty_subprocess.TimeoutExpired):
+                except OSError:
                     pass
         finally:
-            # Preserve unread input across retries. This is not a promise to replay
-            # partially transmitted pastes; the Sprite client still owns input.
-            local_terminal_reset(saved)
+            # Restore pre-client POSIX attributes without draining/reading or
+            # discarding pending keys. Do not reset screen, focus or key protocols.
+            if handles is not None and saved is not None:
+                try:
+                    _tty_termios.tcsetattr(handles[0], _tty_termios.TCSANOW, saved)
+                except (OSError, _tty_termios.error):
+                    pass
+            if handles is not None:
+                cleanup = _LOCAL_PASTE_OFF if paste_enabled else b''
+                if (bracketed_paste and menu_mode == 'auto' and
+                        _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
+                    cleanup += _LOCAL_MENU_MOUSE_OFF
+                if cleanup:
+                    _local_terminal_emit(cleanup, handles)
             for signum, handler in old_handlers.items():
                 _tty_signal.signal(signum, handler)
 
 
 def local_menu_input(prompt):
-    """Reject a contaminated local answer; never strip garbage into approval."""
+    """Reject a control-contaminated answer, not the caller's unread queue."""
     while True:
         answer = input(prompt)
-        # ECHOCTL displays ESC as ^[. Also recognize pasted visible mouse reports.
         tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
         tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
         if not tainted:
@@ -609,8 +639,7 @@ def local_menu_input(prompt):
         if not _tty_sys.stdin.isatty():
             raise ValueError('Terminal-control input is not an accepted menu answer.')
         print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
-        print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
-        local_terminal_reset(flush=True, sane=True)
+        print('       No queued input was flushed. For persistent mouse text, quit to the LOCAL shell and run --repair-terminal.', flush=True)
 LOCAL_TERMINAL_PY
 }
 
@@ -684,7 +713,7 @@ except (OSError, RuntimeError, ValueError) as exc:
 repair_local_terminal() {
   command -v python3 >/dev/null 2>&1 || { echo 'error: local python3 is required' >&2; return 127; }
   python3 -I -S -u -c "$(local_terminal_python)
-if not local_terminal_reset(flush=True, sane=True):
+if not local_terminal_reset(flush=True, sane=True, emulator=True):
     print('error: repair needs this foreground local terminal (not a pipe or remote Codex prompt)', file=_tty_sys.stderr)
     raise SystemExit(2)
 print('Local terminal input/display modes reset. No Sprite command was run.')
@@ -693,10 +722,14 @@ print('Local terminal input/display modes reset. No Sprite command was run.')
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v63.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v67.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
+  --diagnose-response      Sample live Codex/child waits from a second terminal; no keys.
+  --response-pid PID       Optional exact Linux Codex PID; requires --diagnose-response
+                           and SPRITE_NAME (not a Sprite terminal-session ID).
   (no option)               Attach / Setup / Quit / Download / Files / Retrieve menu.
   --diagnose-local         Check local runtime/terminal only; no Sprite/API calls.
+  --diagnose-session       Fixed non-TTY/TTY latency + resource probes; no Codex attach.
   --repair-terminal        Repair this LOCAL terminal only; no Sprite/login required.
   --attach-only             Select a Sprite and attach to an existing live TTY.
   --session-id ID           With --attach-only or --files + SPRITE_NAME: exact TTY.
@@ -727,17 +760,16 @@ The picker offers refresh, another Sprite, or quit; it does not discover detache
 tmux servers without a native TTY. Use normal setup for legacy tmux recovery.
 SPRITE_ATTACH_TIMEOUT=25 (1..300) bounds inventory/context/help requests only.
 TTY_AUTO_REATTACH and TTY_REATTACH_* control retries to the same live session.
-Ctrl+\ detaches. v62 prepares known Codex terminals with bracketed paste ON
-before each launch/attachment; mouse cleanup remains on return to LOCAL menus.
-Normal client handoffs restore tty attributes WITHOUT flushing unread input.
-Wait for the Codex input box before pasting; never paste across a disconnect.
-Explicit --repair-terminal and rejected contaminated LOCAL menu answers can
-clear queued input. Repair runs locally only; never type it into a Codex prompt.
-No provider keys are copied out of or injected into the process.
-Bare non-interactive runs retain the previous bootstrap behavior. Explicit test
-modes and --bootstrap do not show the opening menu. --json-output is not allowed
-with --attach-only. SPRITE_RUN_HOURS controls guard policy on managed attachment;
-other bootstrap-only environment settings remain ignored.
+v66: interactive clients use the original stdin/stdout/stderr, as in v58.
+No extra local attachment PTY, output filter, imposed raw mode, broad screen/key
+reset, input flush or paste replay. The native client owns input/output directly.
+SPRITE_TTY_MODE=native|direct are accepted; legacy responsive maps to native.
+SPRITE_BRACKETED_PASTE=auto (default) enables framing for recognized Codex clients.
+SPRITE_BRACKETED_PASTE=never leaves mode control to the client for comparison.
+SPRITE_TERMINAL_MODE=auto (default) disables leftover mouse reports ONLY on return
+to local menus. plain skips that mouse cleanup, but does not disable paste support.
+Use a fresh local Terminal when migrating. Full --repair-terminal is EXPLICIT
+and local-only; it clears pending input and must never be typed into Codex.
 
 Repository-first retrieve mode (--retrieve / --recover, opening menu 6):
 1. Enter GitHub OWNER/REPO (or repository URL), then a hidden PAT; authenticate
@@ -909,23 +941,50 @@ configuration requires Python 3.11+ on the Sprite, or Python with tomli installe
 Tests make billable API calls; no agent, GitHub or Fly credentials are needed.
 All three must pass for exit 0. Failures/missing keys exit 1; bad arguments exit 2.
 
+After-Enter response diagnostics (v67):
+  --diagnose-response / opening option 9 uses only existing local Sprite login.
+  Select Sprite, then a live Codex PROCESS. It does not attach to the old screen,
+  launch a model, run Git, read conversation/config/log contents, or signal agents.
+  Six samples, 3 seconds apart, track the same PID/start-time/boot identity.
+  SPRITE_RESPONSE_SAMPLES=6 (2..20); SPRITE_RESPONSE_INTERVAL=3 (1..10 seconds).
+  Sampling span must be <=120 seconds. Reports are report.txt/report.json in a
+  new private sprite-response-<UTC>-<suffix>/ under your local starting directory.
+  SPRITE_RESPONSE_TRANSPORT=auto|websocket|http-post (auto tries WS inventory first).
+  After discovery, a sample stream is never automatically replayed on failure.
+  --response-pid PID supports explicit noninteractive sampling with SPRITE_NAME.
+  No provider/GitHub/Fly deploy token is needed or accepted by this mode.
+  D samples are not proof of continuous waiting; zero CPU/S/futex can be normal.
+  Reports identify I/O leads, not a guaranteed cause or a cure for slow model replies.
+  --diagnose-session / option 8 retains separate new-terminal/transport probes.
+
 Local startup/terminal diagnostics (v63):
   --diagnose-local           Local Python/terminal/path checks; no network/API calls.
   SPRITE_LOCAL_STARTUP_TIMEOUT=8 bounds the local startup helper (1..30 seconds,
                              with a one-second termination grace if necessary).
-  SPRITE_TERMINAL_MODE=plain Suppress wrapper terminal escape sequences for diagnosis.
-                             This sacrifices wrapper paste/mouse mode preparation;
-                             Sprite/Codex can still emit their own terminal codes.
-  Default auto mode preserves bracketed paste on recognized Codex connections.
-  Startup resumes paused local output before writing and repairs leftover raw/
-  no-echo input for the local menu without clearing queued input. Explicit repair
-  and rejection of contaminated local menu answers can still clear queued input.
+  Direct inherited terminal is the only interactive path (no extra settings needed).
+  Clipboard framing is enabled for recognized Codex clients by default.
+  Sprite/Codex own raw input, resize and screen/keyboard protocols.
+  Startup resumes paused LOCAL output and can restore leftover raw/no-echo input
+  for the menu without clearing queued input or resetting emulator modes.
+  Only explicit --repair-terminal clears the input queue. Contaminated menu
+  answers are rejected, not stripped into an approval; the queue is preserved.
   No total timeout is imposed on an active Codex attachment. Blankness AFTER
   attachment needs separate remote/connection diagnosis; this is not a restart.
 
 Cloud keep-awake (v60):
   Managed new runs and attachments verify a detached cloud worker before use.
-  --keep-awake-status        Select a Sprite and check current protection; no agent attach.
+  --keep-awake-status        Select a Sprite and check current session protection; no attach.
+  --keepalive                Second-terminal keep-awake manager (opening menu 7).
+  --keepalive-start HOURS    Start/extend a whole-Sprite timer, with confirmation.
+  --keepalive-stop           Release only the selected v64 whole-Sprite timer.
+  --keepalive-status         All holds on one Sprite (may wake it); no changes.
+  --keepalive-inventory      Summarize holds; do not exec-probe warm/cold/unknown.
+  --manage-session          Change a managed runner's budget without attaching.
+  SPRITE_KEEPALIVE_USE_SERVICE=1 (default): prefer Service, verified detached fallback.
+  SPRITE_KEEPALIVE_HOURS=8   Optional initial manual duration (minutes..168 hours).
+  SPRITE_TASK_NAME=manual-keepalive identifies a named timer, separate from agent guards.
+  All timer writes require an interactive confirmation. No automatic file overlays.
+  Stop/expiry releases only that hold, not Codex, its own guard, or other services.
   SPRITE_RUN_HOURS=session   Keep renewing while the managed runner exists (default).
   SPRITE_RUN_HOURS=8         Explicitly bound protection to eight hours.
   Attach without SPRITE_RUN_HOURS preserves an existing v60 deadline; an old
@@ -940,11 +999,14 @@ HELP
 }
 
 RUN_MODE=bootstrap
+KEEPALIVE_ACTION=menu
+KEEPALIVE_HOURS=""
 MODEL_TEST_MODE="${MODEL_TEST_MODE:-ask}"
 MODEL_TEST_JSON="${MODEL_TEST_JSON:-}"
 _MODE_SELECTED=0
 _JSON_OUTPUT_SELECTED=0
 ATTACH_SESSION_ID=""
+RESPONSE_PID=""
 OUTPUT_HOST_DIR="$PWD"
 SPRITE_OUTPUT_DIR="${SPRITE_OUTPUT_DIR:-}"
 OUTPUT_PATH_EXPLICIT=0
@@ -958,10 +1020,25 @@ _FILE_WORKDIR_SELECTED=0
 while (($#)); do
   case "$1" in
     --help|-h) show_usage; exit 0 ;;
-    --diagnose-local|--repair-terminal|--attach-only|--files|--shell|--retrieve|--recover|--check-fly|--keep-awake-status|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
+    --keepalive|--keepalive-start|--keepalive-stop|--keepalive-status|--keepalive-inventory|--manage-session)
+      (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
+      _MODE_SELECTED=1; RUN_MODE=keepalive
+      case "$1" in
+        --keepalive) KEEPALIVE_ACTION=menu; shift ;;
+        --keepalive-start)
+          [[ $# -ge 2 && $2 != --* ]] || { echo "error: --keepalive-start requires hours" >&2; exit 2; }
+          KEEPALIVE_ACTION=start; KEEPALIVE_HOURS=$2; shift 2 ;;
+        --keepalive-stop) KEEPALIVE_ACTION=stop; shift ;;
+        --keepalive-status) KEEPALIVE_ACTION=status; shift ;;
+        --keepalive-inventory) KEEPALIVE_ACTION=inventory; shift ;;
+        --manage-session) KEEPALIVE_ACTION=session; shift ;;
+      esac ;;
+    --diagnose-response|--diagnose-session|--diagnose-local|--repair-terminal|--attach-only|--files|--shell|--retrieve|--recover|--check-fly|--keep-awake-status|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
       (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
       _MODE_SELECTED=1
       case "$1" in
+        --diagnose-response) RUN_MODE=response-diagnostics ;;
+        --diagnose-session) RUN_MODE=session-diagnostics ;;
         --diagnose-local) RUN_MODE=local-diagnostics ;;
         --repair-terminal) RUN_MODE=terminal-repair ;;
         --attach-only) RUN_MODE=attach ;;
@@ -990,6 +1067,12 @@ while (($#)); do
         echo "error: --workdir requires one existing Sprite directory" >&2; exit 2;
       }
       FILE_WORKDIR=$2; _FILE_WORKDIR_SELECTED=1; shift 2 ;;
+    --response-pid)
+      [[ $# -ge 2 && $2 =~ ^[1-9][0-9]{0,9}$ && -z $RESPONSE_PID ]] || {
+        echo 'error: --response-pid requires one positive Linux PID' >&2; exit 2;
+      }
+      (( 10#$2 <= 2147483647 )) || { echo 'error: --response-pid is out of range' >&2; exit 2; }
+      RESPONSE_PID=$2; shift 2 ;;
     --session-id)
       [[ $# -ge 2 && $2 =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ && -z $ATTACH_SESSION_ID ]] || {
         echo "error: --session-id requires one valid Sprite terminal ID" >&2; exit 2;
@@ -998,6 +1081,10 @@ while (($#)); do
     *) printf 'error: unknown argument: %s\n' "$1" >&2; show_usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -n $RESPONSE_PID && $RUN_MODE != response-diagnostics ]]; then
+  echo 'error: --response-pid requires --diagnose-response' >&2; exit 2
+fi
 
 # This route deliberately precedes all cloud/credential/config validation.
 if [[ $RUN_MODE == terminal-repair ]]; then
@@ -1024,6 +1111,12 @@ if [[ $RUN_MODE == check-fly ]] && (( _JSON_OUTPUT_SELECTED || _OUTPUT_DIR_SELEC
   echo "error: --check-fly does not accept --json-output, --output-dir or --workdir" >&2; exit 2
 fi
 
+# Clear the current LOCAL menu line only, not the app's screen/modes or scrollback.
+startup_menu_line() {
+  if [[ -t 1 && ${TERM:-dumb} != dumb ]]; then printf '\r\033[K%s\n' "$1";
+  else printf '%s\n' "$1"; fi
+}
+
 # v50: the first interactive choice is deliberately before all bootstrap-only
 # settings and side effects. The attach branch exits unconditionally afterwards.
 if [[ -n $ATTACH_SESSION_ID && $RUN_MODE != attach && $RUN_MODE != files ]]; then
@@ -1034,14 +1127,20 @@ if [[ ( $RUN_MODE == attach || $RUN_MODE == download || $RUN_MODE == files || $R
 fi
 if [[ $RUN_MODE == bootstrap && $_MODE_SELECTED == 0 && $_JSON_OUTPUT_SELECTED == 0 && -t 0 && -t 1 ]]; then
   while :; do
-    printf '\n=== Sprite Codex: what would you like to do?\n'
-    printf '    1) Attach to an existing Sprite terminal session [default]\n'
-    printf '    2) Normal setup / launch or resume a saved conversation\n'
-    printf '    3) Quit\n'
-    printf '    4) Choose a Sprite folder and download it as a ZIP (no agent launch)\n'
-    printf '    5) File picker alongside Codex (output downloads / input uploads)\n'
-    printf '    6) Retrieve / sync repository to GitHub (no Codex attachment required)\n'
-    printf '  Select [1-6]: '
+    printf '\n'
+    startup_menu_line '=== Sprite Codex: what would you like to do? [v67]'
+    startup_menu_line '    1) Attach to an existing Sprite terminal session [default]'
+    startup_menu_line '    2) Normal setup / launch or resume a saved conversation'
+    startup_menu_line '    3) Quit'
+    startup_menu_line '    4) Choose a Sprite folder and download it as a ZIP (no agent launch)'
+    startup_menu_line '    5) File picker alongside Codex (output downloads / input uploads)'
+    startup_menu_line '    6) Retrieve / sync repository to GitHub (no Codex attachment required)'
+    startup_menu_line '    7) Keep-awake manager (timers / session budgets; no Codex attach)'
+    startup_menu_line '    8) Diagnose slow terminal / transport (no Codex attach)'
+    if [[ -t 1 && ${TERM:-dumb} != dumb ]]; then printf '\r\033[K'; fi
+    startup_menu_line '    9) Diagnose Codex response delay (process / I/O; no keys or attach)'
+    if [[ -t 1 && ${TERM:-dumb} != dumb ]]; then printf '\r\033[K'; fi
+    printf '  Select [1-9]: '
     if ! IFS= read -r _startup_choice; then printf '\n'; exit 0; fi
     case "${_startup_choice,,}" in
       ''|1|a|attach) RUN_MODE=attach; break ;;
@@ -1050,7 +1149,10 @@ if [[ $RUN_MODE == bootstrap && $_MODE_SELECTED == 0 && $_JSON_OUTPUT_SELECTED =
       4|d|download) RUN_MODE=download; break ;;
       5|f|files|shell) RUN_MODE=files; break ;;
       6|r|retrieve|recover) RUN_MODE=retrieve; break ;;
-      *) printf '  Invalid selection. Choose 1, 2, 3, 4, 5, or 6.\n' ;;
+      7|k|keepalive) RUN_MODE=keepalive; break ;;
+      8|dgn|diagnose) RUN_MODE=session-diagnostics; break ;;
+      9|response) RUN_MODE=response-diagnostics; break ;;
+      *) printf '  Invalid selection. Choose 1, 2, 3, 4, 5, 6, 7, 8, or 9.\n' ;;
     esac
   done
 fi
@@ -1062,35 +1164,37 @@ output_download_python() {
 """Optional host-side ZIP download; no provider credentials or remote ZIP file."""
 from __future__ import annotations
 
-# BEGIN V63 LOCAL TERMINAL HELPERS
-import fcntl as _tty_fcntl
-import select as _tty_select
-import time as _tty_time
+# BEGIN V66 DIRECT TERMINAL HELPERS
 import copy as _tty_copy
 import os as _tty_os
 import re as _tty_re
+import select as _tty_select
 import signal as _tty_signal
 import subprocess as _tty_subprocess
 import sys as _tty_sys
 import termios as _tty_termios
+import time as _tty_time
 
-# Deliberately not RIS (ESC c), ED 3 (erase scrollback), a clipboard operation,
-# a terminal query, or a keystroke sent to the remote program. These are OUTPUT.
-# Paste framing and mouse reporting are independent terminal protocols.
-_LOCAL_MOUSE_RESET = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
-                             (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016))
-_LOCAL_CODEX_PREPARE = b'\x1b[?2026l' + _LOCAL_MOUSE_RESET + b'\x1b[?2004h'
+# Small, separate protocol operations: enabling paste does NOT reset keyboards,
+# focus, alternate screens, or synchronized rendering. No terminal query is sent.
+_LOCAL_PASTE_ON = b'\x1b[?2004h'
+_LOCAL_PASTE_OFF = b'\x1b[?2004l'
+_LOCAL_MENU_MOUSE_OFF = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+                               (9, 1000, 1001, 1002, 1003, 1005, 1006, 1007, 1015, 1016))
+
+# ONLY --repair-terminal uses this full sequence. Never use it as an attach hook.
 _LOCAL_TERMINAL_RESET = (
-    b'\x1b[?2026l'  # finish a stranded synchronized-output update
-    + _LOCAL_MOUSE_RESET + b'\x1b[?2004l'  # plain LOCAL menus do not parse pastes
-    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'  # return from alternate screen
-    + b'\x1b[>4;0m\x1b[=0u'  # default extended-key reporting where supported
+    b'\x1b[?2026l'
+    + b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+               (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 2004))
+    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'
+    + b'\x1b[>4;0m\x1b[=0u'
     + b'\x1b[?1l\x1b>\x1b(B\x0f\x1b[0m\x1b[?25h'
 )
 
 
 def _local_terminal_handles():
-    """Only operate on this foreground caller's terminal, never a pipe/file."""
+    """This foreground caller's paired terminal, never an unrelated /dev/tty."""
     try:
         fd = _tty_sys.stdin.fileno()
         if not _tty_os.isatty(fd):
@@ -1099,8 +1203,6 @@ def _local_terminal_handles():
             if _tty_os.tcgetpgrp(fd) != _tty_os.getpgrp():
                 return None
         except OSError:
-            # A PTY can be supplied without becoming a controlling terminal.
-            # Do not reach for some unrelated /dev/tty in that case.
             pass
         source = _tty_os.fstat(fd)
         for stream in (_tty_sys.stdout, _tty_sys.stderr):
@@ -1114,33 +1216,28 @@ def _local_terminal_handles():
     return None
 
 
-
 def _local_terminal_emit(data, handles=None):
-    """Bounded LOCAL tty write; never change the active client's IO flags.
-
-    Called only before/after a client or at local startup. Resume stopped output
-    FIRST, then temporarily use nonblocking writes. Restore descriptor flags even
-    on timeout. No stdin read, terminal query, output erase, or input flush.
-    """
+    """Bounded LOCAL protocol output, never a read/relay of keyboard input."""
     handles = handles or _local_terminal_handles()
     if handles is None:
         return False
-    fd, out = handles
-    flags = None
+    private = None
     try:
-        # TCOON resumes this tty's OUTPUT. TCION would send an input-flow byte:
-        # do NOT use TCION or inject an XON keystroke into a remote application.
-        _tty_termios.tcflow(fd, _tty_termios.TCOON)
-        flags = _tty_fcntl.fcntl(out, _tty_fcntl.F_GETFL)
-        _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags | _tty_os.O_NONBLOCK)
+        fd, out = handles
+        flags = _tty_os.O_WRONLY | _tty_os.O_NOCTTY | _tty_os.O_NONBLOCK
+        flags |= getattr(_tty_os, 'O_CLOEXEC', 0)
+        private = _tty_os.open(_tty_os.ttyname(out), flags)
+        a, b = _tty_os.fstat(out), _tty_os.fstat(private)
+        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+            return False
         deadline = _tty_time.monotonic() + 0.5
         pending = memoryview(data)
         while pending:
             remaining = deadline - _tty_time.monotonic()
-            if remaining <= 0 or not _tty_select.select([], [out], [], remaining)[1]:
+            if remaining <= 0 or not _tty_select.select([], [private], [], remaining)[1]:
                 return False
             try:
-                count = _tty_os.write(out, pending)
+                count = _tty_os.write(private, pending)
             except (BlockingIOError, InterruptedError):
                 continue
             if count <= 0:
@@ -1150,22 +1247,32 @@ def _local_terminal_emit(data, handles=None):
     except (OSError, ValueError, _tty_termios.error):
         return False
     finally:
-        if flags is not None:
-            try:
-                _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags)
-            except OSError:
-                pass
+        if private is not None:
+            _tty_os.close(private)
+
+
+def _terminal_settings():
+    """Accept old exported settings, but never bring back the removed bridge."""
+    path = _tty_os.environ.get('SPRITE_TTY_MODE', 'native')
+    menu = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
+    if path not in ('native', 'direct', 'responsive'):
+        raise ValueError('SPRITE_TTY_MODE must be native or direct (legacy responsive maps to native).')
+    if menu not in ('plain', 'auto'):
+        raise ValueError('SPRITE_TERMINAL_MODE must be plain or auto.')
+    if _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') not in ('auto', 'never'):
+        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never.')
+    return path, menu
 
 
 def local_startup(diagnostics=False):
-    """No cloud calls, runtime installs, token prompts, or environment dumps."""
+    """Bounded by the caller; local line-input recovery, never emulator resets."""
     import shutil
+    path, _ = _terminal_settings()
+    if _tty_sys.version_info < (3, 9):
+        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
     handles = _local_terminal_handles()
     state = 'not a foreground paired terminal'
     if handles is not None:
-        # A terminated client can leave raw/no-echo input behind. Restore just
-        # the normal line-input essentials for our LOCAL startup menu, without
-        # stty's flushing action and without replacing custom key bindings.
         fd, _ = handles
         _tty_termios.tcflow(fd, _tty_termios.TCOON)
         attrs = _tty_termios.tcgetattr(fd)
@@ -1176,17 +1283,11 @@ def local_startup(diagnostics=False):
             attrs[1] |= _tty_termios.OPOST | _tty_termios.ONLCR
             attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
-        if not local_terminal_reset():
-            raise RuntimeError('Local terminal output could not be restored within its write deadline. Use a fresh Terminal window.')
-        state = 'ready; repaired leftover raw/no-echo input' if repaired else 'ready'
-    mode = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
-    if mode not in ('auto', 'plain'):
-        raise RuntimeError('SPRITE_TERMINAL_MODE must be auto or plain.')
-    print('Sprite Codex v63: local startup ready.', flush=True)
-    if _tty_sys.version_info < (3, 9):
-        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
+        state = 'ready; repaired leftover raw/no-echo input for local menus' if repaired else 'ready'
+    print('Sprite Codex v67: local startup ready.', flush=True)
+    if path == 'responsive':
+        print('       Legacy responsive setting ignored: v66 uses the direct terminal path.', flush=True)
     if diagnostics:
-        # repr escapes control sequences in executable paths / terminal names.
         def safe(value):
             return ascii(str(value))[:360]
         print('Local-only diagnostics (no Sprite/API command was run):', flush=True)
@@ -1195,31 +1296,28 @@ def local_startup(diagnostics=False):
         print('  TERM: ' + safe(_tty_os.environ.get('TERM', '')), flush=True)
         print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
         print('  Local terminal: ' + state, flush=True)
-        print('  Terminal mode: ' + mode, flush=True)
+        print('  Interactive path: direct inherited stdin/stdout/stderr; no display relay.', flush=True)
+        print('  Paste framing: ' + _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') + ' (auto enables it for recognized Codex terminals).', flush=True)
+        print('  Screen/keyboard protocols: owned by Sprite/Codex; no broad automatic reset.', flush=True)
         print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
         print('  No authentication, cloud health, or running session was tested.', flush=True)
     return 0
 
 
-def local_terminal_reset(saved=None, *, flush=False, sane=False):
-    """Restore this local terminal after a TUI boundary. Best effort, no input log.
+def local_terminal_reset(saved=None, *, flush=False, sane=False, emulator=False):
+    """Explicit LOCAL repair only; ordinary clients restore attrs directly.
 
-    `flush=True` is reserved for explicit --repair-terminal or a rejected,
-    contaminated LOCAL menu answer. It discards queued input, including text;
-    normal attach/exit/retry handoffs MUST NOT use it. Nothing here can repair
-    an interrupted paste that a transport or remote process already consumed.
-    `sane` is reserved for explicit recovery and contaminated local menus.
+    --repair-terminal intentionally flushes queued input and resets emulator modes.
+    Never run that operation inside a Codex conversation or on another terminal.
+    It cannot repair an unfinished paste in the remote application's parser.
     """
     handles = _local_terminal_handles()
     if handles is None:
         return False
-    fd, out = handles
+    fd, _ = handles
     try:
-        # Resume flow BEFORE any output or restoration. Neither flush Python's
-        # buffered streams nor make an unbounded blocking write during cleanup.
         _tty_termios.tcflow(fd, _tty_termios.TCOON)
         if saved is not None:
-            # NOW avoids waiting indefinitely on a flow-controlled terminal.
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
         elif sane:
             _tty_subprocess.run(['stty', 'sane'], stdin=fd,
@@ -1227,34 +1325,10 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
                                 stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
         if flush:
             _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
-        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
-                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+        if emulator and _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
             return _local_terminal_emit(_LOCAL_TERMINAL_RESET, handles)
         return True
     except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
-        return False
-
-
-def local_terminal_prepare(*, bracketed_paste=False):
-    """Prepare a local client without consuming input or querying the terminal.
-
-    An existing Codex process will not rerun its startup just because we attach.
-    Establish paste framing locally, while still disabling stray mouse reports.
-    Do not apply a whole-screen/key reset to that app's incoming handoff.
-    Generic shells, tmux clients, and login programs keep ownership of their modes.
-    """
-    if not bracketed_paste:
-        return local_terminal_reset()
-    handles = _local_terminal_handles()
-    if handles is None:
-        return False
-    try:
-        _tty_termios.tcflow(handles[0], _tty_termios.TCOON)
-        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
-                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
-            return _local_terminal_emit(_LOCAL_CODEX_PREPARE, handles)
-        return True
-    except (OSError, ValueError):
         return False
 
 
@@ -1264,12 +1338,15 @@ class _LocalTerminalSignal(BaseException):
 
 
 def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
-    """Run exactly one local interactive client, preserving args/exit status.
+    """Direct inherited terminal with paste support, never a PTY/output bridge.
 
-    Stdin/stdout are the original TTY: this is NOT a PTY relay or text filter.
-    On local signal interruption only the child client is stopped, never an
-    explicit remote session-kill, Codex command, or keep-awake cancellation.
+    bracketed_paste marks a recognized Codex client. Enable only mode 2004 just
+    before its local client starts; input and all display bytes remain inherited.
+    No paste reader, size limit, clipboard access, input flush or replay. The
+    client owns raw input, resize and key protocols. Cleanup occurs AFTER exit.
     """
+    _, menu_mode = _terminal_settings()
+    paste_enabled = False
     handles = _local_terminal_handles()
     saved = None
     if handles is not None:
@@ -1277,7 +1354,8 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
             saved = _tty_copy.deepcopy(_tty_termios.tcgetattr(handles[0]))
         except (OSError, _tty_termios.error):
             pass
-        local_terminal_prepare(bracketed_paste=bracketed_paste)
+    if bracketed_paste:
+        print('       Direct terminal: original keyboard and display; no relay or screen filter.', flush=True)
     old_handlers = {}
     child = None
     caught = 0
@@ -1286,10 +1364,19 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         raise _LocalTerminalSignal(signum)
 
     try:
-        # No SIGCONT or idle timer: don't reset a live app's legitimate modes
-        # merely because the laptop woke or the remote app stopped printing.
         for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
             old_handlers[signum] = _tty_signal.signal(signum, interrupted)
+        if (bracketed_paste and handles is not None and
+                _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') == 'auto' and
+                _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
+            paste_enabled = _local_terminal_emit(_LOCAL_PASTE_ON, handles)
+            if paste_enabled:
+                print('       Clipboard: bracketed paste enabled; wait for the Codex input box before pasting.', flush=True)
+            else:
+                print('warning: local paste-mode write was not confirmed; attachment still uses the native terminal.',
+                      file=_tty_sys.stderr, flush=True)
+        # Keep all THREE descriptors unchanged and on the original terminal.
+        # No shell=True, new session, extra PTY, stdout capture, or input monitor.
         child = _tty_subprocess.Popen(argv, cwd=cwd)
         return child.wait()
     except _LocalTerminalSignal as exc:
@@ -1299,7 +1386,6 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         caught = _tty_signal.SIGINT
         return 128 + caught
     finally:
-        # Ignore a repeat close/terminate while performing bounded local cleanup.
         for signum in old_handlers:
             _tty_signal.signal(signum, _tty_signal.SIG_IGN)
         try:
@@ -1308,26 +1394,36 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
                     child.send_signal(caught)
                     child.wait(timeout=1)
                 except _tty_subprocess.TimeoutExpired:
-                    child.kill()  # this Popen object is only the LOCAL client
+                    child.kill()  # ONLY the local client, never a cloud process
                     try:
                         child.wait(timeout=1)
                     except _tty_subprocess.TimeoutExpired:
                         pass
-                except (OSError, _tty_subprocess.TimeoutExpired):
+                except OSError:
                     pass
         finally:
-            # Preserve unread input across retries. This is not a promise to replay
-            # partially transmitted pastes; the Sprite client still owns input.
-            local_terminal_reset(saved)
+            # Restore pre-client POSIX attributes without draining/reading or
+            # discarding pending keys. Do not reset screen, focus or key protocols.
+            if handles is not None and saved is not None:
+                try:
+                    _tty_termios.tcsetattr(handles[0], _tty_termios.TCSANOW, saved)
+                except (OSError, _tty_termios.error):
+                    pass
+            if handles is not None:
+                cleanup = _LOCAL_PASTE_OFF if paste_enabled else b''
+                if (bracketed_paste and menu_mode == 'auto' and
+                        _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
+                    cleanup += _LOCAL_MENU_MOUSE_OFF
+                if cleanup:
+                    _local_terminal_emit(cleanup, handles)
             for signum, handler in old_handlers.items():
                 _tty_signal.signal(signum, handler)
 
 
 def local_menu_input(prompt):
-    """Reject a contaminated local answer; never strip garbage into approval."""
+    """Reject a control-contaminated answer, not the caller's unread queue."""
     while True:
         answer = input(prompt)
-        # ECHOCTL displays ESC as ^[. Also recognize pasted visible mouse reports.
         tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
         tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
         if not tainted:
@@ -1335,9 +1431,8 @@ def local_menu_input(prompt):
         if not _tty_sys.stdin.isatty():
             raise ValueError('Terminal-control input is not an accepted menu answer.')
         print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
-        print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
-        local_terminal_reset(flush=True, sane=True)
-# END V63 LOCAL TERMINAL HELPERS
+        print('       No queued input was flushed. For persistent mouse text, quit to the LOCAL shell and run --repair-terminal.', flush=True)
+# END V66 DIRECT TERMINAL HELPERS
 
 import datetime as dt
 import hashlib
@@ -3008,35 +3103,37 @@ https://docs.sprites.dev/cli/commands/
 """
 from __future__ import annotations
 
-# BEGIN V63 LOCAL TERMINAL HELPERS
-import fcntl as _tty_fcntl
-import select as _tty_select
-import time as _tty_time
+# BEGIN V66 DIRECT TERMINAL HELPERS
 import copy as _tty_copy
 import os as _tty_os
 import re as _tty_re
+import select as _tty_select
 import signal as _tty_signal
 import subprocess as _tty_subprocess
 import sys as _tty_sys
 import termios as _tty_termios
+import time as _tty_time
 
-# Deliberately not RIS (ESC c), ED 3 (erase scrollback), a clipboard operation,
-# a terminal query, or a keystroke sent to the remote program. These are OUTPUT.
-# Paste framing and mouse reporting are independent terminal protocols.
-_LOCAL_MOUSE_RESET = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
-                             (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016))
-_LOCAL_CODEX_PREPARE = b'\x1b[?2026l' + _LOCAL_MOUSE_RESET + b'\x1b[?2004h'
+# Small, separate protocol operations: enabling paste does NOT reset keyboards,
+# focus, alternate screens, or synchronized rendering. No terminal query is sent.
+_LOCAL_PASTE_ON = b'\x1b[?2004h'
+_LOCAL_PASTE_OFF = b'\x1b[?2004l'
+_LOCAL_MENU_MOUSE_OFF = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+                               (9, 1000, 1001, 1002, 1003, 1005, 1006, 1007, 1015, 1016))
+
+# ONLY --repair-terminal uses this full sequence. Never use it as an attach hook.
 _LOCAL_TERMINAL_RESET = (
-    b'\x1b[?2026l'  # finish a stranded synchronized-output update
-    + _LOCAL_MOUSE_RESET + b'\x1b[?2004l'  # plain LOCAL menus do not parse pastes
-    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'  # return from alternate screen
-    + b'\x1b[>4;0m\x1b[=0u'  # default extended-key reporting where supported
+    b'\x1b[?2026l'
+    + b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+               (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 2004))
+    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'
+    + b'\x1b[>4;0m\x1b[=0u'
     + b'\x1b[?1l\x1b>\x1b(B\x0f\x1b[0m\x1b[?25h'
 )
 
 
 def _local_terminal_handles():
-    """Only operate on this foreground caller's terminal, never a pipe/file."""
+    """This foreground caller's paired terminal, never an unrelated /dev/tty."""
     try:
         fd = _tty_sys.stdin.fileno()
         if not _tty_os.isatty(fd):
@@ -3045,8 +3142,6 @@ def _local_terminal_handles():
             if _tty_os.tcgetpgrp(fd) != _tty_os.getpgrp():
                 return None
         except OSError:
-            # A PTY can be supplied without becoming a controlling terminal.
-            # Do not reach for some unrelated /dev/tty in that case.
             pass
         source = _tty_os.fstat(fd)
         for stream in (_tty_sys.stdout, _tty_sys.stderr):
@@ -3060,33 +3155,28 @@ def _local_terminal_handles():
     return None
 
 
-
 def _local_terminal_emit(data, handles=None):
-    """Bounded LOCAL tty write; never change the active client's IO flags.
-
-    Called only before/after a client or at local startup. Resume stopped output
-    FIRST, then temporarily use nonblocking writes. Restore descriptor flags even
-    on timeout. No stdin read, terminal query, output erase, or input flush.
-    """
+    """Bounded LOCAL protocol output, never a read/relay of keyboard input."""
     handles = handles or _local_terminal_handles()
     if handles is None:
         return False
-    fd, out = handles
-    flags = None
+    private = None
     try:
-        # TCOON resumes this tty's OUTPUT. TCION would send an input-flow byte:
-        # do NOT use TCION or inject an XON keystroke into a remote application.
-        _tty_termios.tcflow(fd, _tty_termios.TCOON)
-        flags = _tty_fcntl.fcntl(out, _tty_fcntl.F_GETFL)
-        _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags | _tty_os.O_NONBLOCK)
+        fd, out = handles
+        flags = _tty_os.O_WRONLY | _tty_os.O_NOCTTY | _tty_os.O_NONBLOCK
+        flags |= getattr(_tty_os, 'O_CLOEXEC', 0)
+        private = _tty_os.open(_tty_os.ttyname(out), flags)
+        a, b = _tty_os.fstat(out), _tty_os.fstat(private)
+        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+            return False
         deadline = _tty_time.monotonic() + 0.5
         pending = memoryview(data)
         while pending:
             remaining = deadline - _tty_time.monotonic()
-            if remaining <= 0 or not _tty_select.select([], [out], [], remaining)[1]:
+            if remaining <= 0 or not _tty_select.select([], [private], [], remaining)[1]:
                 return False
             try:
-                count = _tty_os.write(out, pending)
+                count = _tty_os.write(private, pending)
             except (BlockingIOError, InterruptedError):
                 continue
             if count <= 0:
@@ -3096,22 +3186,32 @@ def _local_terminal_emit(data, handles=None):
     except (OSError, ValueError, _tty_termios.error):
         return False
     finally:
-        if flags is not None:
-            try:
-                _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags)
-            except OSError:
-                pass
+        if private is not None:
+            _tty_os.close(private)
+
+
+def _terminal_settings():
+    """Accept old exported settings, but never bring back the removed bridge."""
+    path = _tty_os.environ.get('SPRITE_TTY_MODE', 'native')
+    menu = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
+    if path not in ('native', 'direct', 'responsive'):
+        raise ValueError('SPRITE_TTY_MODE must be native or direct (legacy responsive maps to native).')
+    if menu not in ('plain', 'auto'):
+        raise ValueError('SPRITE_TERMINAL_MODE must be plain or auto.')
+    if _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') not in ('auto', 'never'):
+        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never.')
+    return path, menu
 
 
 def local_startup(diagnostics=False):
-    """No cloud calls, runtime installs, token prompts, or environment dumps."""
+    """Bounded by the caller; local line-input recovery, never emulator resets."""
     import shutil
+    path, _ = _terminal_settings()
+    if _tty_sys.version_info < (3, 9):
+        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
     handles = _local_terminal_handles()
     state = 'not a foreground paired terminal'
     if handles is not None:
-        # A terminated client can leave raw/no-echo input behind. Restore just
-        # the normal line-input essentials for our LOCAL startup menu, without
-        # stty's flushing action and without replacing custom key bindings.
         fd, _ = handles
         _tty_termios.tcflow(fd, _tty_termios.TCOON)
         attrs = _tty_termios.tcgetattr(fd)
@@ -3122,17 +3222,11 @@ def local_startup(diagnostics=False):
             attrs[1] |= _tty_termios.OPOST | _tty_termios.ONLCR
             attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
-        if not local_terminal_reset():
-            raise RuntimeError('Local terminal output could not be restored within its write deadline. Use a fresh Terminal window.')
-        state = 'ready; repaired leftover raw/no-echo input' if repaired else 'ready'
-    mode = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
-    if mode not in ('auto', 'plain'):
-        raise RuntimeError('SPRITE_TERMINAL_MODE must be auto or plain.')
-    print('Sprite Codex v63: local startup ready.', flush=True)
-    if _tty_sys.version_info < (3, 9):
-        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
+        state = 'ready; repaired leftover raw/no-echo input for local menus' if repaired else 'ready'
+    print('Sprite Codex v67: local startup ready.', flush=True)
+    if path == 'responsive':
+        print('       Legacy responsive setting ignored: v66 uses the direct terminal path.', flush=True)
     if diagnostics:
-        # repr escapes control sequences in executable paths / terminal names.
         def safe(value):
             return ascii(str(value))[:360]
         print('Local-only diagnostics (no Sprite/API command was run):', flush=True)
@@ -3141,31 +3235,28 @@ def local_startup(diagnostics=False):
         print('  TERM: ' + safe(_tty_os.environ.get('TERM', '')), flush=True)
         print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
         print('  Local terminal: ' + state, flush=True)
-        print('  Terminal mode: ' + mode, flush=True)
+        print('  Interactive path: direct inherited stdin/stdout/stderr; no display relay.', flush=True)
+        print('  Paste framing: ' + _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') + ' (auto enables it for recognized Codex terminals).', flush=True)
+        print('  Screen/keyboard protocols: owned by Sprite/Codex; no broad automatic reset.', flush=True)
         print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
         print('  No authentication, cloud health, or running session was tested.', flush=True)
     return 0
 
 
-def local_terminal_reset(saved=None, *, flush=False, sane=False):
-    """Restore this local terminal after a TUI boundary. Best effort, no input log.
+def local_terminal_reset(saved=None, *, flush=False, sane=False, emulator=False):
+    """Explicit LOCAL repair only; ordinary clients restore attrs directly.
 
-    `flush=True` is reserved for explicit --repair-terminal or a rejected,
-    contaminated LOCAL menu answer. It discards queued input, including text;
-    normal attach/exit/retry handoffs MUST NOT use it. Nothing here can repair
-    an interrupted paste that a transport or remote process already consumed.
-    `sane` is reserved for explicit recovery and contaminated local menus.
+    --repair-terminal intentionally flushes queued input and resets emulator modes.
+    Never run that operation inside a Codex conversation or on another terminal.
+    It cannot repair an unfinished paste in the remote application's parser.
     """
     handles = _local_terminal_handles()
     if handles is None:
         return False
-    fd, out = handles
+    fd, _ = handles
     try:
-        # Resume flow BEFORE any output or restoration. Neither flush Python's
-        # buffered streams nor make an unbounded blocking write during cleanup.
         _tty_termios.tcflow(fd, _tty_termios.TCOON)
         if saved is not None:
-            # NOW avoids waiting indefinitely on a flow-controlled terminal.
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
         elif sane:
             _tty_subprocess.run(['stty', 'sane'], stdin=fd,
@@ -3173,34 +3264,10 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
                                 stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
         if flush:
             _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
-        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
-                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+        if emulator and _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
             return _local_terminal_emit(_LOCAL_TERMINAL_RESET, handles)
         return True
     except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
-        return False
-
-
-def local_terminal_prepare(*, bracketed_paste=False):
-    """Prepare a local client without consuming input or querying the terminal.
-
-    An existing Codex process will not rerun its startup just because we attach.
-    Establish paste framing locally, while still disabling stray mouse reports.
-    Do not apply a whole-screen/key reset to that app's incoming handoff.
-    Generic shells, tmux clients, and login programs keep ownership of their modes.
-    """
-    if not bracketed_paste:
-        return local_terminal_reset()
-    handles = _local_terminal_handles()
-    if handles is None:
-        return False
-    try:
-        _tty_termios.tcflow(handles[0], _tty_termios.TCOON)
-        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
-                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
-            return _local_terminal_emit(_LOCAL_CODEX_PREPARE, handles)
-        return True
-    except (OSError, ValueError):
         return False
 
 
@@ -3210,12 +3277,15 @@ class _LocalTerminalSignal(BaseException):
 
 
 def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
-    """Run exactly one local interactive client, preserving args/exit status.
+    """Direct inherited terminal with paste support, never a PTY/output bridge.
 
-    Stdin/stdout are the original TTY: this is NOT a PTY relay or text filter.
-    On local signal interruption only the child client is stopped, never an
-    explicit remote session-kill, Codex command, or keep-awake cancellation.
+    bracketed_paste marks a recognized Codex client. Enable only mode 2004 just
+    before its local client starts; input and all display bytes remain inherited.
+    No paste reader, size limit, clipboard access, input flush or replay. The
+    client owns raw input, resize and key protocols. Cleanup occurs AFTER exit.
     """
+    _, menu_mode = _terminal_settings()
+    paste_enabled = False
     handles = _local_terminal_handles()
     saved = None
     if handles is not None:
@@ -3223,7 +3293,8 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
             saved = _tty_copy.deepcopy(_tty_termios.tcgetattr(handles[0]))
         except (OSError, _tty_termios.error):
             pass
-        local_terminal_prepare(bracketed_paste=bracketed_paste)
+    if bracketed_paste:
+        print('       Direct terminal: original keyboard and display; no relay or screen filter.', flush=True)
     old_handlers = {}
     child = None
     caught = 0
@@ -3232,10 +3303,19 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         raise _LocalTerminalSignal(signum)
 
     try:
-        # No SIGCONT or idle timer: don't reset a live app's legitimate modes
-        # merely because the laptop woke or the remote app stopped printing.
         for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
             old_handlers[signum] = _tty_signal.signal(signum, interrupted)
+        if (bracketed_paste and handles is not None and
+                _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') == 'auto' and
+                _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
+            paste_enabled = _local_terminal_emit(_LOCAL_PASTE_ON, handles)
+            if paste_enabled:
+                print('       Clipboard: bracketed paste enabled; wait for the Codex input box before pasting.', flush=True)
+            else:
+                print('warning: local paste-mode write was not confirmed; attachment still uses the native terminal.',
+                      file=_tty_sys.stderr, flush=True)
+        # Keep all THREE descriptors unchanged and on the original terminal.
+        # No shell=True, new session, extra PTY, stdout capture, or input monitor.
         child = _tty_subprocess.Popen(argv, cwd=cwd)
         return child.wait()
     except _LocalTerminalSignal as exc:
@@ -3245,7 +3325,6 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         caught = _tty_signal.SIGINT
         return 128 + caught
     finally:
-        # Ignore a repeat close/terminate while performing bounded local cleanup.
         for signum in old_handlers:
             _tty_signal.signal(signum, _tty_signal.SIG_IGN)
         try:
@@ -3254,26 +3333,36 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
                     child.send_signal(caught)
                     child.wait(timeout=1)
                 except _tty_subprocess.TimeoutExpired:
-                    child.kill()  # this Popen object is only the LOCAL client
+                    child.kill()  # ONLY the local client, never a cloud process
                     try:
                         child.wait(timeout=1)
                     except _tty_subprocess.TimeoutExpired:
                         pass
-                except (OSError, _tty_subprocess.TimeoutExpired):
+                except OSError:
                     pass
         finally:
-            # Preserve unread input across retries. This is not a promise to replay
-            # partially transmitted pastes; the Sprite client still owns input.
-            local_terminal_reset(saved)
+            # Restore pre-client POSIX attributes without draining/reading or
+            # discarding pending keys. Do not reset screen, focus or key protocols.
+            if handles is not None and saved is not None:
+                try:
+                    _tty_termios.tcsetattr(handles[0], _tty_termios.TCSANOW, saved)
+                except (OSError, _tty_termios.error):
+                    pass
+            if handles is not None:
+                cleanup = _LOCAL_PASTE_OFF if paste_enabled else b''
+                if (bracketed_paste and menu_mode == 'auto' and
+                        _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
+                    cleanup += _LOCAL_MENU_MOUSE_OFF
+                if cleanup:
+                    _local_terminal_emit(cleanup, handles)
             for signum, handler in old_handlers.items():
                 _tty_signal.signal(signum, handler)
 
 
 def local_menu_input(prompt):
-    """Reject a contaminated local answer; never strip garbage into approval."""
+    """Reject a control-contaminated answer, not the caller's unread queue."""
     while True:
         answer = input(prompt)
-        # ECHOCTL displays ESC as ^[. Also recognize pasted visible mouse reports.
         tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
         tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
         if not tainted:
@@ -3281,9 +3370,8 @@ def local_menu_input(prompt):
         if not _tty_sys.stdin.isatty():
             raise ValueError('Terminal-control input is not an accepted menu answer.')
         print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
-        print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
-        local_terminal_reset(flush=True, sane=True)
-# END V63 LOCAL TERMINAL HELPERS
+        print('       No queued input was flushed. For persistent mouse text, quit to the LOCAL shell and run --repair-terminal.', flush=True)
+# END V66 DIRECT TERMINAL HELPERS
 
 
 import datetime as dt
@@ -3724,13 +3812,15 @@ class Picker:
             raise AttachError("Session changed during cloud protection setup; no attachment was made.", 3)
         print(f"\n       Attaching to {sprite}, native session {row['id']} ({row['label']}).")
         print("       Existing process credentials are unchanged; no keys, updates or setup.")
+        print("       Keep-awake confirms the runner/lease, NOT Codex progress or provider speed.")
+        print("       If work after Enter is slow: use opening option 9 / --diagnose-response in a SECOND terminal.")
         print("       Detach with Ctrl+\\. This is NOT codex resume; no new Codex is launched.", flush=True)
         failures = 0
         while True:
             started = time.monotonic()
-            # Reassert paste framing for known Codex terminals on EVERY attach,
-            # including a retry to an already-running process. Other programs own
-            # their own modes. No stdin relay, automatic flush, or paste replay.
+            # v66 uses direct stdin/stdout/stderr on EVERY attachment and retry.
+            # The known-Codex hint enables only bracketed paste locally. No relay,
+            # input read, flush, replay or periodic screen/key reset.
             rc = local_terminal_call([self.cli, *command, row["id"]], cwd=self.context,
                                      bracketed_paste=row.get('label') in ('Codex runner', 'Codex command'))
             rc = 128 - rc if rc < 0 else rc
@@ -3860,39 +3950,41 @@ run_attach_only() (
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v63.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v67.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
 
-# BEGIN V63 LOCAL TERMINAL HELPERS
-import fcntl as _tty_fcntl
-import select as _tty_select
-import time as _tty_time
+# BEGIN V66 DIRECT TERMINAL HELPERS
 import copy as _tty_copy
 import os as _tty_os
 import re as _tty_re
+import select as _tty_select
 import signal as _tty_signal
 import subprocess as _tty_subprocess
 import sys as _tty_sys
 import termios as _tty_termios
+import time as _tty_time
 
-# Deliberately not RIS (ESC c), ED 3 (erase scrollback), a clipboard operation,
-# a terminal query, or a keystroke sent to the remote program. These are OUTPUT.
-# Paste framing and mouse reporting are independent terminal protocols.
-_LOCAL_MOUSE_RESET = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
-                             (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016))
-_LOCAL_CODEX_PREPARE = b'\x1b[?2026l' + _LOCAL_MOUSE_RESET + b'\x1b[?2004h'
+# Small, separate protocol operations: enabling paste does NOT reset keyboards,
+# focus, alternate screens, or synchronized rendering. No terminal query is sent.
+_LOCAL_PASTE_ON = b'\x1b[?2004h'
+_LOCAL_PASTE_OFF = b'\x1b[?2004l'
+_LOCAL_MENU_MOUSE_OFF = b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+                               (9, 1000, 1001, 1002, 1003, 1005, 1006, 1007, 1015, 1016))
+
+# ONLY --repair-terminal uses this full sequence. Never use it as an attach hook.
 _LOCAL_TERMINAL_RESET = (
-    b'\x1b[?2026l'  # finish a stranded synchronized-output update
-    + _LOCAL_MOUSE_RESET + b'\x1b[?2004l'  # plain LOCAL menus do not parse pastes
-    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'  # return from alternate screen
-    + b'\x1b[>4;0m\x1b[=0u'  # default extended-key reporting where supported
+    b'\x1b[?2026l'
+    + b''.join(('\x1b[?%dl' % mode).encode('ascii') for mode in
+               (9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 2004))
+    + b'\x1b[?1049l\x1b[?1047l\x1b[?47l'
+    + b'\x1b[>4;0m\x1b[=0u'
     + b'\x1b[?1l\x1b>\x1b(B\x0f\x1b[0m\x1b[?25h'
 )
 
 
 def _local_terminal_handles():
-    """Only operate on this foreground caller's terminal, never a pipe/file."""
+    """This foreground caller's paired terminal, never an unrelated /dev/tty."""
     try:
         fd = _tty_sys.stdin.fileno()
         if not _tty_os.isatty(fd):
@@ -3901,8 +3993,6 @@ def _local_terminal_handles():
             if _tty_os.tcgetpgrp(fd) != _tty_os.getpgrp():
                 return None
         except OSError:
-            # A PTY can be supplied without becoming a controlling terminal.
-            # Do not reach for some unrelated /dev/tty in that case.
             pass
         source = _tty_os.fstat(fd)
         for stream in (_tty_sys.stdout, _tty_sys.stderr):
@@ -3916,33 +4006,28 @@ def _local_terminal_handles():
     return None
 
 
-
 def _local_terminal_emit(data, handles=None):
-    """Bounded LOCAL tty write; never change the active client's IO flags.
-
-    Called only before/after a client or at local startup. Resume stopped output
-    FIRST, then temporarily use nonblocking writes. Restore descriptor flags even
-    on timeout. No stdin read, terminal query, output erase, or input flush.
-    """
+    """Bounded LOCAL protocol output, never a read/relay of keyboard input."""
     handles = handles or _local_terminal_handles()
     if handles is None:
         return False
-    fd, out = handles
-    flags = None
+    private = None
     try:
-        # TCOON resumes this tty's OUTPUT. TCION would send an input-flow byte:
-        # do NOT use TCION or inject an XON keystroke into a remote application.
-        _tty_termios.tcflow(fd, _tty_termios.TCOON)
-        flags = _tty_fcntl.fcntl(out, _tty_fcntl.F_GETFL)
-        _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags | _tty_os.O_NONBLOCK)
+        fd, out = handles
+        flags = _tty_os.O_WRONLY | _tty_os.O_NOCTTY | _tty_os.O_NONBLOCK
+        flags |= getattr(_tty_os, 'O_CLOEXEC', 0)
+        private = _tty_os.open(_tty_os.ttyname(out), flags)
+        a, b = _tty_os.fstat(out), _tty_os.fstat(private)
+        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+            return False
         deadline = _tty_time.monotonic() + 0.5
         pending = memoryview(data)
         while pending:
             remaining = deadline - _tty_time.monotonic()
-            if remaining <= 0 or not _tty_select.select([], [out], [], remaining)[1]:
+            if remaining <= 0 or not _tty_select.select([], [private], [], remaining)[1]:
                 return False
             try:
-                count = _tty_os.write(out, pending)
+                count = _tty_os.write(private, pending)
             except (BlockingIOError, InterruptedError):
                 continue
             if count <= 0:
@@ -3952,22 +4037,32 @@ def _local_terminal_emit(data, handles=None):
     except (OSError, ValueError, _tty_termios.error):
         return False
     finally:
-        if flags is not None:
-            try:
-                _tty_fcntl.fcntl(out, _tty_fcntl.F_SETFL, flags)
-            except OSError:
-                pass
+        if private is not None:
+            _tty_os.close(private)
+
+
+def _terminal_settings():
+    """Accept old exported settings, but never bring back the removed bridge."""
+    path = _tty_os.environ.get('SPRITE_TTY_MODE', 'native')
+    menu = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
+    if path not in ('native', 'direct', 'responsive'):
+        raise ValueError('SPRITE_TTY_MODE must be native or direct (legacy responsive maps to native).')
+    if menu not in ('plain', 'auto'):
+        raise ValueError('SPRITE_TERMINAL_MODE must be plain or auto.')
+    if _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') not in ('auto', 'never'):
+        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never.')
+    return path, menu
 
 
 def local_startup(diagnostics=False):
-    """No cloud calls, runtime installs, token prompts, or environment dumps."""
+    """Bounded by the caller; local line-input recovery, never emulator resets."""
     import shutil
+    path, _ = _terminal_settings()
+    if _tty_sys.version_info < (3, 9):
+        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
     handles = _local_terminal_handles()
     state = 'not a foreground paired terminal'
     if handles is not None:
-        # A terminated client can leave raw/no-echo input behind. Restore just
-        # the normal line-input essentials for our LOCAL startup menu, without
-        # stty's flushing action and without replacing custom key bindings.
         fd, _ = handles
         _tty_termios.tcflow(fd, _tty_termios.TCOON)
         attrs = _tty_termios.tcgetattr(fd)
@@ -3978,17 +4073,11 @@ def local_startup(diagnostics=False):
             attrs[1] |= _tty_termios.OPOST | _tty_termios.ONLCR
             attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
-        if not local_terminal_reset():
-            raise RuntimeError('Local terminal output could not be restored within its write deadline. Use a fresh Terminal window.')
-        state = 'ready; repaired leftover raw/no-echo input' if repaired else 'ready'
-    mode = _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto')
-    if mode not in ('auto', 'plain'):
-        raise RuntimeError('SPRITE_TERMINAL_MODE must be auto or plain.')
-    print('Sprite Codex v63: local startup ready.', flush=True)
-    if _tty_sys.version_info < (3, 9):
-        raise RuntimeError('Python 3.9 or newer is required locally; no Sprite command was run.')
+        state = 'ready; repaired leftover raw/no-echo input for local menus' if repaired else 'ready'
+    print('Sprite Codex v67: local startup ready.', flush=True)
+    if path == 'responsive':
+        print('       Legacy responsive setting ignored: v66 uses the direct terminal path.', flush=True)
     if diagnostics:
-        # repr escapes control sequences in executable paths / terminal names.
         def safe(value):
             return ascii(str(value))[:360]
         print('Local-only diagnostics (no Sprite/API command was run):', flush=True)
@@ -3997,31 +4086,28 @@ def local_startup(diagnostics=False):
         print('  TERM: ' + safe(_tty_os.environ.get('TERM', '')), flush=True)
         print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
         print('  Local terminal: ' + state, flush=True)
-        print('  Terminal mode: ' + mode, flush=True)
+        print('  Interactive path: direct inherited stdin/stdout/stderr; no display relay.', flush=True)
+        print('  Paste framing: ' + _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') + ' (auto enables it for recognized Codex terminals).', flush=True)
+        print('  Screen/keyboard protocols: owned by Sprite/Codex; no broad automatic reset.', flush=True)
         print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
         print('  No authentication, cloud health, or running session was tested.', flush=True)
     return 0
 
 
-def local_terminal_reset(saved=None, *, flush=False, sane=False):
-    """Restore this local terminal after a TUI boundary. Best effort, no input log.
+def local_terminal_reset(saved=None, *, flush=False, sane=False, emulator=False):
+    """Explicit LOCAL repair only; ordinary clients restore attrs directly.
 
-    `flush=True` is reserved for explicit --repair-terminal or a rejected,
-    contaminated LOCAL menu answer. It discards queued input, including text;
-    normal attach/exit/retry handoffs MUST NOT use it. Nothing here can repair
-    an interrupted paste that a transport or remote process already consumed.
-    `sane` is reserved for explicit recovery and contaminated local menus.
+    --repair-terminal intentionally flushes queued input and resets emulator modes.
+    Never run that operation inside a Codex conversation or on another terminal.
+    It cannot repair an unfinished paste in the remote application's parser.
     """
     handles = _local_terminal_handles()
     if handles is None:
         return False
-    fd, out = handles
+    fd, _ = handles
     try:
-        # Resume flow BEFORE any output or restoration. Neither flush Python's
-        # buffered streams nor make an unbounded blocking write during cleanup.
         _tty_termios.tcflow(fd, _tty_termios.TCOON)
         if saved is not None:
-            # NOW avoids waiting indefinitely on a flow-controlled terminal.
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, saved)
         elif sane:
             _tty_subprocess.run(['stty', 'sane'], stdin=fd,
@@ -4029,34 +4115,10 @@ def local_terminal_reset(saved=None, *, flush=False, sane=False):
                                 stderr=_tty_subprocess.DEVNULL, timeout=2, check=True)
         if flush:
             _tty_termios.tcflush(fd, _tty_termios.TCIFLUSH)
-        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
-                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
+        if emulator and _tty_os.environ.get('TERM', '') not in ('', 'dumb'):
             return _local_terminal_emit(_LOCAL_TERMINAL_RESET, handles)
         return True
     except (OSError, ValueError, _tty_termios.error, _tty_subprocess.SubprocessError):
-        return False
-
-
-def local_terminal_prepare(*, bracketed_paste=False):
-    """Prepare a local client without consuming input or querying the terminal.
-
-    An existing Codex process will not rerun its startup just because we attach.
-    Establish paste framing locally, while still disabling stray mouse reports.
-    Do not apply a whole-screen/key reset to that app's incoming handoff.
-    Generic shells, tmux clients, and login programs keep ownership of their modes.
-    """
-    if not bracketed_paste:
-        return local_terminal_reset()
-    handles = _local_terminal_handles()
-    if handles is None:
-        return False
-    try:
-        _tty_termios.tcflow(handles[0], _tty_termios.TCOON)
-        if (_tty_os.environ.get('TERM', '') not in ('', 'dumb') and
-                _tty_os.environ.get('SPRITE_TERMINAL_MODE', 'auto') != 'plain'):
-            return _local_terminal_emit(_LOCAL_CODEX_PREPARE, handles)
-        return True
-    except (OSError, ValueError):
         return False
 
 
@@ -4066,12 +4128,15 @@ class _LocalTerminalSignal(BaseException):
 
 
 def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
-    """Run exactly one local interactive client, preserving args/exit status.
+    """Direct inherited terminal with paste support, never a PTY/output bridge.
 
-    Stdin/stdout are the original TTY: this is NOT a PTY relay or text filter.
-    On local signal interruption only the child client is stopped, never an
-    explicit remote session-kill, Codex command, or keep-awake cancellation.
+    bracketed_paste marks a recognized Codex client. Enable only mode 2004 just
+    before its local client starts; input and all display bytes remain inherited.
+    No paste reader, size limit, clipboard access, input flush or replay. The
+    client owns raw input, resize and key protocols. Cleanup occurs AFTER exit.
     """
+    _, menu_mode = _terminal_settings()
+    paste_enabled = False
     handles = _local_terminal_handles()
     saved = None
     if handles is not None:
@@ -4079,7 +4144,8 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
             saved = _tty_copy.deepcopy(_tty_termios.tcgetattr(handles[0]))
         except (OSError, _tty_termios.error):
             pass
-        local_terminal_prepare(bracketed_paste=bracketed_paste)
+    if bracketed_paste:
+        print('       Direct terminal: original keyboard and display; no relay or screen filter.', flush=True)
     old_handlers = {}
     child = None
     caught = 0
@@ -4088,10 +4154,19 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         raise _LocalTerminalSignal(signum)
 
     try:
-        # No SIGCONT or idle timer: don't reset a live app's legitimate modes
-        # merely because the laptop woke or the remote app stopped printing.
         for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
             old_handlers[signum] = _tty_signal.signal(signum, interrupted)
+        if (bracketed_paste and handles is not None and
+                _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') == 'auto' and
+                _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
+            paste_enabled = _local_terminal_emit(_LOCAL_PASTE_ON, handles)
+            if paste_enabled:
+                print('       Clipboard: bracketed paste enabled; wait for the Codex input box before pasting.', flush=True)
+            else:
+                print('warning: local paste-mode write was not confirmed; attachment still uses the native terminal.',
+                      file=_tty_sys.stderr, flush=True)
+        # Keep all THREE descriptors unchanged and on the original terminal.
+        # No shell=True, new session, extra PTY, stdout capture, or input monitor.
         child = _tty_subprocess.Popen(argv, cwd=cwd)
         return child.wait()
     except _LocalTerminalSignal as exc:
@@ -4101,7 +4176,6 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         caught = _tty_signal.SIGINT
         return 128 + caught
     finally:
-        # Ignore a repeat close/terminate while performing bounded local cleanup.
         for signum in old_handlers:
             _tty_signal.signal(signum, _tty_signal.SIG_IGN)
         try:
@@ -4110,26 +4184,36 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
                     child.send_signal(caught)
                     child.wait(timeout=1)
                 except _tty_subprocess.TimeoutExpired:
-                    child.kill()  # this Popen object is only the LOCAL client
+                    child.kill()  # ONLY the local client, never a cloud process
                     try:
                         child.wait(timeout=1)
                     except _tty_subprocess.TimeoutExpired:
                         pass
-                except (OSError, _tty_subprocess.TimeoutExpired):
+                except OSError:
                     pass
         finally:
-            # Preserve unread input across retries. This is not a promise to replay
-            # partially transmitted pastes; the Sprite client still owns input.
-            local_terminal_reset(saved)
+            # Restore pre-client POSIX attributes without draining/reading or
+            # discarding pending keys. Do not reset screen, focus or key protocols.
+            if handles is not None and saved is not None:
+                try:
+                    _tty_termios.tcsetattr(handles[0], _tty_termios.TCSANOW, saved)
+                except (OSError, _tty_termios.error):
+                    pass
+            if handles is not None:
+                cleanup = _LOCAL_PASTE_OFF if paste_enabled else b''
+                if (bracketed_paste and menu_mode == 'auto' and
+                        _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
+                    cleanup += _LOCAL_MENU_MOUSE_OFF
+                if cleanup:
+                    _local_terminal_emit(cleanup, handles)
             for signum, handler in old_handlers.items():
                 _tty_signal.signal(signum, handler)
 
 
 def local_menu_input(prompt):
-    """Reject a contaminated local answer; never strip garbage into approval."""
+    """Reject a control-contaminated answer, not the caller's unread queue."""
     while True:
         answer = input(prompt)
-        # ECHOCTL displays ESC as ^[. Also recognize pasted visible mouse reports.
         tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
         tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
         if not tainted:
@@ -4137,9 +4221,8 @@ def local_menu_input(prompt):
         if not _tty_sys.stdin.isatty():
             raise ValueError('Terminal-control input is not an accepted menu answer.')
         print('\n       Ignored terminal-control input. No action was confirmed; please re-enter your choice.', flush=True)
-        print('       Clearing queued input for this contaminated LOCAL menu only; no text is replayed to Codex.', flush=True)
-        local_terminal_reset(flush=True, sane=True)
-# END V63 LOCAL TERMINAL HELPERS
+        print('       No queued input was flushed. For persistent mouse text, quit to the LOCAL shell and run --repair-terminal.', flush=True)
+# END V66 DIRECT TERMINAL HELPERS
 
 import base64
 import hashlib
@@ -5839,7 +5922,7 @@ run_file_access() (
 
 retrieve_python() {
   cat <<'RETRIEVE_PY'
-"""Local interactive retrieve mode. Embedded into sprite-codex-v63.sh."""
+"""Local interactive retrieve mode. Embedded into sprite-codex-v67.sh."""
 import contextlib
 import getpass
 import hashlib
@@ -6469,6 +6552,1615 @@ run_retrieve() (
   retrieve_python >"$local_sources/retrieve.py"
   python3 "$local_sources/retrieve.py" "$local_sources" "$OUTPUT_HOST_DIR" "$FILE_WORKDIR"
 )
+
+keepalive_python() {
+  cat <<'KEEPALIVE_MANAGER_PY'
+"""v64 single-script keep-awake manager. Host UI + isolated cloud operations.
+
+Keeps whole-Sprite timers separate from managed-agent guards. No agent signals,
+credential extraction, repository writes, automatic uploads or terminal attach.
+"""
+from __future__ import annotations
+import contextlib
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import runpy
+import secrets
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import types
+import fcntl
+
+CLOUD_SOURCE = '#!/usr/bin/env python3\n"""v60 cloud-side keep-awake guard; no agent credentials or terminal I/O.\n\nTasks API: https://docs.fly.io/sprites/keeping-sprites-running\nThis guards an existing Linux process identity; it does not resurrect agents.\nOnly this program\'s own task is created/refreshed/deleted. No agent is signalled.\n"""\nfrom __future__ import annotations\n\nimport datetime as dt\nfrom decimal import Decimal, InvalidOperation, ROUND_CEILING\nimport fcntl\nimport hashlib\nimport http.client\nimport json\nimport os\nfrom pathlib import Path\nimport re\nimport secrets\nimport signal\nimport socket\nimport stat\nimport subprocess\nimport sys\nimport tempfile\nimport time\n\nSOCKET_PATH = \'/.sprite/api.sock\'\nPROC = Path(\'/proc\')\nAPI_TIMEOUT = 8\nREFRESH_SECONDS = 60\nPOLL_SECONDS = 2\nRETRY_SECONDS = 5\nSTARTUP_TIMEOUT = 40\nLEASE_SECONDS = 300\nTAG_RE = r\'sprite-(?:codex|kimi-code)-native-[A-Za-z0-9._-]{1,100}\'\nMARKER = \'SPRITE_CLOUD_GUARD_V60=\'\n\n\nclass GuardError(Exception):\n    pass\n\n\nclass TaskError(GuardError):\n    pass\n\n\ndef source_text():\n    return globals().get(\'_SOURCE\') or Path(__file__).read_text(encoding=\'utf-8\')\n\n\ndef seconds_from_hours(value):\n    """None means preserve existing policy; zero means process lifetime."""\n    if value in (None, \'\'):\n        return None\n    if str(value).lower() == \'session\':\n        return 0\n    try:\n        hours = Decimal(str(value))\n    except InvalidOperation:\n        raise GuardError(\'SPRITE_RUN_HOURS must be session or a positive number up to 168.\') from None\n    if not hours.is_finite() or not 0 < hours <= 168:\n        raise GuardError(\'SPRITE_RUN_HOURS must be session or a positive number up to 168.\')\n    return int((hours * 3600).to_integral_value(rounding=ROUND_CEILING))\n\n\ndef timestamp(value):\n    if not isinstance(value, str):\n        raise TaskError(\'Tasks API expires_at is not an RFC3339 timestamp.\')\n    try:\n        parsed = dt.datetime.fromisoformat(value.replace(\'Z\', \'+00:00\'))\n        if parsed.tzinfo is None:\n            raise ValueError()\n        result = parsed.timestamp()\n    except (ValueError, OverflowError, OSError):\n        raise TaskError(\'Tasks API expires_at is invalid or has no timezone.\') from None\n    return result\n\n\ndef utc(value):\n    return dt.datetime.fromtimestamp(value, dt.timezone.utc).strftime(\'%Y-%m-%d %H:%M:%S UTC\') if value else \'session lifetime\'\n\n\nclass UnixHTTP(http.client.HTTPConnection):\n    def __init__(self):\n        super().__init__(\'sprite\', timeout=API_TIMEOUT)\n\n    def connect(self):\n        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n        self.sock.settimeout(self.timeout)\n        self.sock.connect(SOCKET_PATH)\n\n\nclass Tasks:\n    def call(self, method, path, body=None):\n        conn = UnixHTTP()\n        data = None if body is None else json.dumps(body).encode(\'utf-8\')\n        try:\n            conn.request(method, path, body=data, headers={\'Content-Type\': \'application/json\', \'Connection\': \'close\'})\n            response = conn.getresponse()\n            raw = response.read(65537)\n            code = response.status\n        except (OSError, http.client.HTTPException):\n            raise TaskError(\'Tasks API socket/HTTP request failed; no verified renewal.\') from None\n        finally:\n            conn.close()\n        if method == \'DELETE\' and code == 404:\n            return None\n        if not 200 <= code < 300:\n            # Never echo arbitrary bodies or redirect to another host.\n            raise TaskError(f\'Tasks API {method} returned HTTP {code}; request was not accepted.\')\n        if len(raw) > 65536:\n            raise TaskError(\'Tasks API response exceeded the bounded read limit.\')\n        return raw\n\n    def verify(self, name, minimum_remaining=1):\n        raw = self.call(\'GET\', \'/v1/tasks/\' + name)\n        try:\n            task = json.loads(raw)\n        except (ValueError, TypeError):\n            raise TaskError(\'Tasks API verification returned invalid JSON.\') from None\n        if isinstance(task, dict) and isinstance(task.get(\'task\'), dict):\n            task = task[\'task\']\n        if not isinstance(task, dict) or task.get(\'error\') or task.get(\'name\') != name:\n            raise TaskError(\'Tasks API verification did not identify the expected task.\')\n        expires = timestamp(task.get(\'expires_at\'))\n        remaining = expires - time.time()\n        if remaining < minimum_remaining or remaining > 3660:\n            raise TaskError(\'Tasks API task expiration is past, too close, or outside the documented one-hour limit.\')\n        return expires\n\n    def renew(self, name, seconds=LEASE_SECONDS):\n        if not isinstance(seconds, int) or not 1 <= seconds <= 3600:\n            raise TaskError(\'Invalid task lease duration.\')\n        self.call(\'PUT\', \'/v1/tasks/\' + name, {\'expire\': seconds})\n        # Require nearly the requested lease, not merely a future timestamp.\n        # A 45-second lease would be insufficient for a 60-second renewal loop.\n        return self.verify(name, max(0.1, seconds - 2 * API_TIMEOUT - 5))\n\n    def release(self, name):\n        self.call(\'DELETE\', \'/v1/tasks/\' + name)\n\n\ndef process_identity(pid):\n    """Use boot ID + PID + Linux start ticks, not kill(pid, 0) alone."""\n    try:\n        pid = int(pid)\n        if pid <= 1:\n            return None\n        directory = PROC / str(pid)\n        owner = directory.stat().st_uid\n        if owner != os.getuid():\n            return None\n        raw = (directory / \'stat\').read_text()\n        fields = raw[raw.rindex(\')\') + 2:].split()\n        if len(fields) < 20 or fields[0] in (\'Z\', \'X\', \'x\'):\n            return None\n        return {\'pid\': pid, \'start_ticks\': fields[19], \'boot_id\': (PROC / \'sys/kernel/random/boot_id\').read_text().strip(), \'uid\': owner}\n    except (OSError, ValueError, IndexError):\n        return None\n\n\ndef same_process(identity):\n    return isinstance(identity, dict) and process_identity(identity.get(\'pid\', 0)) == identity\n\n\ndef runner_record(pid, tag, runner_path=\'\'):\n    identity = process_identity(pid)\n    if identity is None:\n        return None\n    try:\n        with (PROC / str(pid) / \'cmdline\').open(\'rb\') as handle:\n            raw = handle.read(65537)\n        if len(raw) > 65536:\n            return None\n        args = [x.decode(\'utf-8\', \'strict\') for x in raw.rstrip(b\'\\0\').split(b\'\\0\')]\n        # Python helpers, arbitrary shell command text and unrelated agents do not match.\n        if not args or os.path.basename(args[0]) not in (\'bash\', \'sh\'):\n            return None\n        for index, arg in enumerate(args[1:], 1):\n            if arg.startswith(\'-\'):\n                continue\n            base = os.path.basename(arg)\n            if not (base == tag + \'-runner\' or base.startswith(tag + \'-runner-\')):\n                return None  # the script, not any later argument, must be the runner\n            if runner_path and arg != runner_path:\n                return None\n            if len(args) <= index + 7 or not args[index + 1].isdigit():\n                return None\n            if args[index + 3] != tag or not args[index + 4].startswith(\'/\'):\n                return None\n            kind = \'kimi-code\' if tag.startswith(\'sprite-kimi-code-\') else \'codex\'\n            if args[index + 6] != kind:\n                return None\n            # Recheck birth after reading argv (PID could have been reused).\n            if not same_process(identity):\n                return None\n            return {\'identity\': identity, \'runner\': arg, \'tag\': tag, \'workdir\': args[index + 4]}\n    except (OSError, UnicodeError):\n        return None\n    return None\n\n\ndef parent_pid(pid):\n    try:\n        raw = (PROC / str(pid) / \'stat\').read_text()\n        return int(raw[raw.rindex(\')\') + 2:].split()[1])\n    except (OSError, IndexError, ValueError):\n        return 0\n\n\ndef find_runner(tag, runner_path=\'\', pid=0):\n    if not re.fullmatch(TAG_RE, tag):\n        raise GuardError(\'Cannot identify a managed Codex/Kimi runner tag.\')\n    if pid:\n        record = runner_record(pid, tag, runner_path)\n        if record is None:\n            raise GuardError(\'The requested managed runner is not a live owned process.\')\n        return record\n    records = {}\n    for entry in PROC.iterdir():\n        if entry.name.isdigit():\n            record = runner_record(int(entry.name), tag, runner_path)\n            if record:\n                records[int(entry.name)] = record\n    # Old Bash heartbeat subshells retain their parent\'s argv. They are not agents.\n    roots = []\n    for candidate, record in records.items():\n        ancestor, visited, child = parent_pid(candidate), set(), False\n        while ancestor > 1 and ancestor not in visited:\n            if ancestor in records:\n                child = True\n                break\n            visited.add(ancestor)\n            ancestor = parent_pid(ancestor)\n        if not child:\n            roots.append(record)\n    if len(roots) != 1:\n        raise GuardError(\'Managed runner discovery is absent or ambiguous; no process was started/replaced. Recheck the selected session.\')\n    return roots[0]\n\n\ndef private_dir(path):\n    path = Path(path)\n    path.mkdir(mode=0o700, parents=True, exist_ok=True)\n    info = path.lstat()\n    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:\n        raise GuardError(\'Keep-awake state directory must be a private owned directory, not a symlink.\')\n    return path\n\n\ndef state_root():\n    home = Path.home()\n    # Verify each managed path component. Do not follow an injected .local/state link.\n    current = home\n    for part in (\'.local\', \'state\', \'sprite-codex\', \'keepawake-v60\'):\n        current = current / part\n        if current.is_symlink():\n            raise GuardError(\'Refusing a symlink in the cloud guard state path.\')\n        current.mkdir(mode=0o700, exist_ok=True)\n        info = current.lstat()\n        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:\n            raise GuardError(\'Cloud guard state path is not an owned, non-writable-by-others directory.\')\n    return private_dir(current)\n\n\ndef read_json(path):\n    try:\n        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)\n    except FileNotFoundError:\n        return None\n    try:\n        # Atomic replacement can unlink the already-open old inode (nlink=0).\n        # That is safe; multiple links, symlinks and wrong ownership are not.\n        info = os.fstat(fd)\n        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink > 1:\n            raise GuardError(\'Unsafe keep-awake state file; refusing to read it.\')\n        with os.fdopen(fd, \'rb\') as handle:\n            fd = -1\n            raw = handle.read(65537)\n        if len(raw) > 65536:\n            raise GuardError(\'Keep-awake state file is oversized.\')\n        data = json.loads(raw)\n        if not isinstance(data, dict):\n            raise ValueError()\n        return data\n    except (ValueError, UnicodeError):\n        raise GuardError(\'Keep-awake state file is malformed.\') from None\n    finally:\n        if fd >= 0:\n            os.close(fd)\n\n\ndef write_json(path, data):\n    fd, temporary = tempfile.mkstemp(prefix=\'.guard-\', dir=str(path.parent))\n    try:\n        with os.fdopen(fd, \'w\', encoding=\'utf-8\') as handle:\n            json.dump(data, handle, sort_keys=True)\n            handle.write(\'\\n\')\n            handle.flush()\n            os.fsync(handle.fileno())\n        os.replace(temporary, path)\n    finally:\n        try:\n            os.unlink(temporary)\n        except FileNotFoundError:\n            pass\n\n\ndef lock_file(path):\n    fd = os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)\n    info = os.fstat(fd)\n    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:\n        os.close(fd)\n        raise GuardError(\'Unsafe keep-awake lock file.\')\n    return fd\n\n\ndef log_event(directory, message):\n    """Fixed messages only; no command lines, credentials, or HTTP bodies."""\n    path = directory / \'events.log\'\n    if path.exists() and not path.is_symlink() and path.stat().st_size > 262144:\n        os.replace(path, directory / \'events.previous.log\')\n    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)\n    try:\n        info = os.fstat(fd)\n        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:\n            raise GuardError(\'Unsafe guard log file.\')\n        os.write(fd, (utc(time.time()) + \' \' + message + \'\\n\').encode())\n    finally:\n        os.close(fd)\n\n\ndef source_install(root):\n    source = source_text().encode(\'utf-8\')\n    digest = hashlib.sha256(source).hexdigest()\n    path = root / (\'guard-\' + digest[:24] + \'.py\')\n    if path.exists() or path.is_symlink():\n        info = path.lstat()\n        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:\n            raise GuardError(\'Unsafe installed cloud guard file.\')\n        if path.read_bytes() != source:\n            raise GuardError(\'Installed cloud guard content mismatch.\')\n        return path\n    fd, temporary = tempfile.mkstemp(prefix=\'.source-\', dir=root)\n    try:\n        with os.fdopen(fd, \'wb\') as handle:\n            handle.write(source)\n            handle.flush()\n            os.fsync(handle.fileno())\n        try:\n            os.link(temporary, path)\n        except FileExistsError:\n            if path.is_symlink() or path.read_bytes() != source:\n                raise GuardError(\'Cloud guard installation raced with another file.\')\n    finally:\n        os.unlink(temporary)\n    return path\n\n\ndef guard_directory(record):\n    key = hashlib.sha256(json.dumps(record[\'identity\'], sort_keys=True).encode()).hexdigest()[:24]\n    return private_dir(state_root() / key), \'sprite-codex-guard-\' + key\n\n\ndef worker(directory):\n    directory = private_dir(directory)\n    fd = lock_file(directory / \'worker.lock\')\n    try:\n        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n    except BlockingIOError:\n        os.close(fd)\n        return 0\n    stopped = [False]\n    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n    signal.signal(signal.SIGINT, lambda *args: stopped.__setitem__(0, True))\n    signal.signal(signal.SIGTERM, lambda *args: stopped.__setitem__(0, True))\n    api = Tasks()\n    config = read_json(directory / \'config.json\')\n    if not config:\n        os.close(fd)\n        return 1\n    identity = config[\'target\']\n    task = config[\'task\']\n    own = process_identity(os.getpid())\n    state = {\'version\': 60, \'worker\': own, \'target\': identity, \'task\': task,\n             \'status\': \'starting\', \'last_success\': 0, \'expires_at\': 0, \'failures\': 0}\n    next_renew = 0.0\n    reason = \'stopped\'\n    try:\n        log_event(directory, \'worker started; no controlling terminal\')\n        while not stopped[0]:\n            config = read_json(directory / \'config.json\')\n            if not config or config.get(\'target\') != identity or config.get(\'task\') != task:\n                reason = \'configuration-changed\'\n                break\n            if config.get(\'disabled\'):\n                reason = \'released-by-user\'\n                break\n            if not same_process(identity):\n                reason = \'runner-ended\'\n                break\n            deadline = config.get(\'deadline\', 0)\n            if deadline and time.time() >= deadline:\n                reason = \'deadline-reached\'\n                break\n            if state.get(\'generation\') != config[\'generation\']:\n                next_renew = 0.0\n            state[\'deadline\'] = deadline\n            state[\'generation\'] = config[\'generation\']\n            if time.monotonic() >= next_renew:\n                lease = LEASE_SECONDS if not deadline else min(LEASE_SECONDS, max(1, int(deadline - time.time())))\n                try:\n                    expires = api.renew(task, lease)\n                    state.update(status=\'verified\', last_success=time.time(), expires_at=expires, failures=0, error=\'\')\n                    log_event(directory, \'task verified until \' + utc(expires))\n                    next_renew = time.monotonic() + min(REFRESH_SECONDS, max(0.2, lease / 3))\n                except TaskError as exc:\n                    state.update(status=\'unverified\', failures=state[\'failures\'] + 1, error=str(exc))\n                    log_event(directory, str(exc))\n                    next_renew = time.monotonic() + RETRY_SECONDS\n            state[\'checked_at\'] = time.time()\n            write_json(directory / \'status.json\', state)\n            time.sleep(POLL_SECONDS)\n    except (GuardError, OSError, KeyError, TypeError):\n        reason = \'worker-error\'\n    finally:\n        try:\n            api.release(task)\n            state[\'release_verified\'] = True\n        except TaskError:\n            state[\'release_verified\'] = False  # short API lease expires by itself\n        state.update(status=reason, checked_at=time.time())\n        try:\n            write_json(directory / \'status.json\', state)\n            log_event(directory, \'worker ended: \' + reason + \'; agent was not signalled\')\n        except (OSError, GuardError):\n            pass\n        os.close(fd)\n    return 0\n\n\ndef ensure(tag, duration=None, runner_path=\'\', pid=0):\n    record = find_runner(tag, runner_path, pid)\n    directory, task = guard_directory(record)\n    root = directory.parent\n    installed = source_install(root)\n    fd = lock_file(directory / \'control.lock\')\n    cutoff = time.monotonic() + STARTUP_TIMEOUT\n    try:\n        while True:\n            try:\n                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n                break\n            except BlockingIOError:\n                if time.monotonic() >= cutoff:\n                    raise GuardError(\'Another guard installation is busy; no agent was changed.\')\n                time.sleep(0.1)\n        existing = read_json(directory / \'config.json\')\n        if existing and existing.get(\'target\') != record[\'identity\']:\n            raise GuardError(\'Guard process identity changed; refusing to reuse it.\')\n        if existing and duration is None:\n            deadline = existing.get(\'deadline\', 0)\n            if existing.get(\'disabled\'):\n                raise GuardError(\'Protection was explicitly released. Set SPRITE_RUN_HOURS=session or a duration to enable it again.\')\n            if deadline and deadline <= time.time():\n                raise GuardError(\'The chosen keep-awake deadline has expired. Set SPRITE_RUN_HOURS=session or a duration to renew it.\')\n        else:\n            deadline = time.time() + duration if duration else 0\n        generation = secrets.token_hex(12)\n        config = {\'target\': record[\'identity\'], \'tag\': tag, \'task\': task, \'deadline\': deadline,\n                  \'generation\': generation, \'disabled\': False}\n        write_json(directory / \'config.json\', config)\n        old = read_json(directory / \'status.json\')\n        active = old and same_process(old.get(\'worker\')) and old.get(\'status\') not in (\n            \'runner-ended\', \'deadline-reached\', \'worker-error\', \'released-by-user\', \'configuration-changed\', \'stopped\')\n        if not active:\n            # A previous worker may be finishing its final status write and lock release.\n            while old and same_process(old.get(\'worker\')):\n                if time.monotonic() >= cutoff:\n                    raise GuardError(\'Previous guard is still shutting down; retry protection setup.\')\n                time.sleep(0.05)\n            # The worker gets neither this terminal nor the agent\'s credentials.\n            env = {\'HOME\': str(Path.home()), \'PATH\': \'/usr/local/bin:/usr/bin:/bin\', \'LANG\': \'C.UTF-8\', \'PYTHONUNBUFFERED\': \'1\'}\n            subprocess.Popen([sys.executable, str(installed), \'worker\', str(directory)],\n                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n                             start_new_session=True, close_fds=True, cwd=str(root), env=env)\n        while time.monotonic() < cutoff:\n            if not same_process(record[\'identity\']):\n                raise GuardError(\'The original runner ended during keep-awake verification; nothing was relaunched.\')\n            state = read_json(directory / \'status.json\')\n            if state and state.get(\'generation\') == generation and state.get(\'status\') == \'verified\' and same_process(state.get(\'worker\')):\n                if time.time() - state.get(\'last_success\', 0) <= REFRESH_SECONDS + 10:\n                    expires = Tasks().verify(task, min(30, max(0.1, (deadline - time.time()) / 2)) if deadline else 30)\n                    # The API hold must be tied to the same live worker AND runner.\n                    if not same_process(state[\'worker\']) or not same_process(record[\'identity\']):\n                        raise GuardError(\'Guard or runner ended during final verification.\')\n                    return {\'ok\': True, \'tag\': tag, \'task\': task, \'pid\': record[\'identity\'][\'pid\'],\n                            \'worker_pid\': state[\'worker\'][\'pid\'], \'expires_at\': expires, \'deadline\': deadline,\n                            \'status_file\': str(directory / \'status.json\'), \'log_file\': str(directory / \'events.log\')}\n            if state and state.get(\'generation\') == generation and state.get(\'status\') in (\'worker-error\', \'configuration-changed\', \'deadline-reached\', \'runner-ended\'):\n                raise GuardError(\'Cloud guard stopped before verification; no protection was confirmed.\')\n            time.sleep(0.15)\n        state = read_json(directory / \'status.json\') or {}\n        detail = state.get(\'error\', \'Cloud worker readiness timed out.\')\n        raise GuardError(detail + \' Existing agent was not killed; do not assume unattended protection.\')\n    finally:\n        os.close(fd)\n\n\ndef status_all():\n    root = state_root()\n    rows = []\n    for path in sorted(root.iterdir()):\n        if not re.fullmatch(r\'[0-9a-f]{24}\', path.name):\n            continue\n        directory = private_dir(path)\n        config = read_json(directory / \'config.json\')\n        state = read_json(directory / \'status.json\') or {}\n        if not config:\n            continue\n        live = same_process(config.get(\'target\'))\n        watcher = same_process(state.get(\'worker\'))\n        verified = False\n        error = \'\'\n        if live and watcher and not config.get(\'disabled\'):\n            try:\n                expires = Tasks().verify(config[\'task\'])\n                verified = (state.get(\'status\') == \'verified\' and time.time() - state.get(\'last_success\', 0) <= REFRESH_SECONDS + 10)\n            except TaskError as exc:\n                expires, error = 0, str(exc)\n        else:\n            expires = 0\n        rows.append({\'tag\': config.get(\'tag\'), \'pid\': (config.get(\'target\') or {}).get(\'pid\'),\n                     \'runner_alive\': live, \'worker_alive\': bool(watcher), \'verified\': verified,\n                     \'last_success\': state.get(\'last_success\', 0), \'expires_at\': expires,\n                     \'deadline\': config.get(\'deadline\', 0), \'status\': state.get(\'status\', \'unknown\'),\n                     \'error\': error or state.get(\'error\', \'\'), \'status_file\': str(directory / \'status.json\')})\n    return {\'ok\': True, \'guards\': rows}\n\n\ndef release_tag(tag):\n    if not re.fullmatch(TAG_RE, tag):\n        raise GuardError(\'Invalid managed tag for keep-awake release.\')\n    changed = 0\n    for path in state_root().iterdir():\n        if not re.fullmatch(r\'[0-9a-f]{24}\', path.name):\n            continue\n        fd = lock_file(private_dir(path) / \'control.lock\')\n        try:\n            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n            config = read_json(path / \'config.json\')\n            if config and config.get(\'tag\') == tag:\n                config[\'disabled\'] = True\n                write_json(path / \'config.json\', config)\n                changed += 1\n        except BlockingIOError:\n            raise GuardError(\'Cloud guard is being updated; retry release.\') from None\n        finally:\n            os.close(fd)\n    return {\'ok\': True, \'released\': changed, \'note\': \'Stops only v60 holds within a few seconds; does not kill Codex or stop legacy holds.\'}\n\n\ndef remote_request(request):\n    if request.get(\'operation\') == \'status\':\n        return status_all()\n    if request.get(\'operation\') == \'release\':\n        return release_tag(request.get(\'tag\', \'\'))\n    if request.get(\'operation\') != \'ensure\':\n        raise GuardError(\'Unrecognized cloud guard operation.\')\n    duration = request.get(\'seconds\')\n    if duration is not None and (type(duration) is not int or not 0 <= duration <= 604800):\n        raise GuardError(\'Invalid keep-awake duration.\')\n    return ensure(request.get(\'tag\', \'\'), duration, request.get(\'runner\', \'\'), request.get(\'pid\', 0))\n\n\ndef client(cli, context, org, sprite, request):\n    """No mutation retry on timeout. Source and non-secret request go via stdin."""\n    nonce = secrets.token_hex(16)\n    payload = json.dumps({\'source\': source_text(), \'request\': request, \'nonce\': nonce}).encode()\n    # Use an explicit namespace; only our fixed entrypoint handles the request.\n    receiver = ("import json,sys; p=json.load(sys.stdin); n={\'__name__\':\'cloud_guard_received\',\'_SOURCE\':p[\'source\']}; "\n                "exec(compile(p[\'source\'],\'<cloud-guard-v60>\',\'exec\'),n); n[\'received\'](p)")\n    try:\n        help_result = subprocess.run([cli, \'exec\', \'--help\'], cwd=context, stdin=subprocess.DEVNULL,\n                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)\n    except (subprocess.TimeoutExpired, OSError):\n        raise GuardError(\'Cannot check the local Sprite CLI transport capabilities; no cloud protection was confirmed.\') from None\n    args = [cli, \'exec\', *org, \'-s\', sprite]\n    if b\'--http-post\' in help_result.stdout + help_result.stderr:\n        args.append(\'--http-post\')\n    args += [\'--no-port-forward\', \'--\', \'python3\', \'-c\', receiver]\n    try:\n        result = subprocess.run(args, cwd=context, input=payload, stdout=subprocess.PIPE,\n                                stderr=subprocess.PIPE, timeout=STARTUP_TIMEOUT + 30)\n    except subprocess.TimeoutExpired:\n        raise GuardError(\'Cloud protection setup timed out (outcome unknown). It was not automatically replayed; rerun to check the same runner.\') from None\n    except OSError:\n        raise GuardError(\'Cannot start the local Sprite CLI for protection verification.\') from None\n    receipt = None\n    if len(result.stdout) <= 131072:\n        for line in result.stdout.decode(\'utf-8\', \'replace\').splitlines():\n            if line.startswith(MARKER):\n                try:\n                    candidate = json.loads(line[len(MARKER):])\n                    if candidate.get(\'nonce\') == nonce:\n                        receipt = candidate\n                except (ValueError, AttributeError):\n                    pass\n    if not receipt:\n        raise GuardError(f\'No verified cloud-protection receipt (Sprite CLI exit {result.returncode}). No agent was killed or relaunched.\')\n    if not receipt.get(\'ok\'):\n        # Only fixed error strings from this module are returned, not CLI output.\n        raise GuardError(str(receipt.get(\'error\', \'Cloud protection not confirmed.\'))[:700])\n    return receipt\n\n\ndef report(receipt):\n    print(\'\\n       CLOUD KEEP-AWAKE VERIFIED\', flush=True)\n    print(\'       Renewal runs on the Sprite, independently of your laptop/terminal.\')\n    print(\'       API lease verified until: \' + utc(receipt[\'expires_at\']))\n    print(\'       Protection duration: \' + ((\'until \' + utc(receipt[\'deadline\'])) if receipt.get(\'deadline\') else \'while this managed runner remains alive (including idle prompts)\'))\n    print(\'       Compute billing can continue while your laptop sleeps.\')\n    print(\'       Status: \' + receipt[\'status_file\'])\n    print(\'       No Codex restart or credential replacement was performed.\', flush=True)\n\n\ndef received(payload):\n    # A Sprite exec may inherit tokens. Do not pass them to the cloud guard.\n    home = str(Path.home())\n    os.environ.clear()\n    os.environ.update(HOME=home, PATH=\'/usr/local/bin:/usr/bin:/bin\', LANG=\'C.UTF-8\')\n    nonce = payload.get(\'nonce\', \'\')\n    try:\n        reply = remote_request(payload.get(\'request\', {}))\n    except GuardError as exc:\n        reply = {\'ok\': False, \'error\': str(exc)}\n    except (OSError, ValueError, KeyError, TypeError):\n        reply = {\'ok\': False, \'error\': \'Cloud guard operation failed (permissions, disk, process metadata, or configuration); no protection confirmed.\'}\n    reply[\'nonce\'] = nonce\n    print(MARKER + json.dumps(reply, separators=(\',\', \':\')), flush=True)\n\n\ndef main():\n    if len(sys.argv) < 2:\n        raise GuardError(\'Cloud guard action required.\')\n    if sys.argv[1] == \'worker\':\n        return worker(sys.argv[2])\n    if sys.argv[1] == \'ensure\':\n        duration = int(sys.argv[3])\n        receipt = ensure(sys.argv[2], duration, pid=int(sys.argv[4]))\n        report(receipt)\n        return 0\n    if sys.argv[1] == \'status\':\n        print(json.dumps(status_all(), indent=2))\n        return 0\n    if sys.argv[1] == \'release\':\n        print(json.dumps(release_tag(sys.argv[2]), indent=2))\n        return 0\n    raise GuardError(\'Unknown cloud guard action.\')\n\n\nif __name__ == \'__main__\':\n    try:\n        raise SystemExit(main())\n    except GuardError as exc:\n        print(\'error: \' + str(exc), file=sys.stderr)\n        raise SystemExit(1)\n'
+g = types.ModuleType('embedded_cloud_guard')
+g.__dict__['_SOURCE'] = CLOUD_SOURCE
+exec(compile(CLOUD_SOURCE, '<cloud-guard-v60>', 'exec'), g.__dict__)
+Error = g.GuardError
+MARKER = 'SPRITE_KEEPALIVE_V64='
+OWNER = 'sprite-codex-manual-v64'
+TASK_RE = r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}'
+START_WAIT = 45
+STOP_WAIT = 25
+REFRESH = 60
+POLL = 1
+LEASE = 300
+RETRY = 5
+
+
+def source_text():
+    return globals().get('_SOURCE') or Path(__file__).read_text(encoding='utf-8')
+
+
+def safe(value, limit=600):
+    text = str(value)
+    return ''.join(c if c.isprintable() and c not in '\r\n' else '?' for c in text)[:limit]
+
+
+def duration(value):
+    try:
+        # Require a decimal, not NaN, infinity, exponents or a boolean.
+        if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', str(value)):
+            raise ValueError()
+        hours = Decimal(str(value))
+        if not Decimal(1)/60 <= hours <= 168:
+            raise ValueError()
+        return int((hours * 3600).to_integral_value(rounding=ROUND_CEILING))
+    except (InvalidOperation, ValueError):
+        raise Error('Whole-Sprite duration must be decimal hours from one minute through 168 hours.') from None
+
+
+def task_name(value):
+    if not isinstance(value, str) or not re.fullmatch(TASK_RE, value):
+        raise Error('Timer name must be 1..80 letters/digits/dot/underscore/hyphen, starting with a letter or digit.')
+    return value
+
+
+def clean_env():
+    return {'HOME': str(Path.home()), 'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8'}
+
+
+def root_path(create=False):
+    p = Path.home()
+    for part in ('.local', 'state', 'sprite-codex', 'whole-sprite-v64'):
+        p = p / part
+        try:
+            st = p.lstat()
+        except FileNotFoundError:
+            if not create:
+                return p if part == 'whole-sprite-v64' else Path.home()/'.local/state/sprite-codex/whole-sprite-v64'
+            p.mkdir(mode=0o700, exist_ok=True)
+            st = p.lstat()
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+            raise Error('Unsafe keep-alive state directory (owner, symlink, type or write permissions).')
+    return p
+
+
+def paths(name, create=False):
+    name = task_name(name)
+    digest = hashlib.sha256(name.encode()).hexdigest()[:24]
+    p = root_path(create) / digest
+    if create:
+        g.private_dir(p)
+    elif p.exists() or p.is_symlink():
+        st = p.lstat()
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+            raise Error('Unsafe timer state directory.')
+    return p, 'sprite-codex-manual-' + digest, 'sc-keepalive-' + digest
+
+
+@contextlib.contextmanager
+def control_lock(directory):
+    fd = g.lock_file(directory/'control.lock')
+    end = time.monotonic()+START_WAIT
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= end:
+                    raise Error('Another manager is changing this timer; retry status first.')
+                time.sleep(.1)
+        yield
+    finally:
+        os.close(fd)
+
+
+def config_read(directory, name):
+    cfg = g.read_json(directory/'config.json')
+    if cfg:
+        _, task, svc = paths(name)
+        if cfg.get('owner') != OWNER or cfg.get('name') != name or cfg.get('task') != task or cfg.get('service') != svc:
+            raise Error('Timer ownership metadata does not match; nothing was replaced.')
+        if type(cfg.get('deadline')) not in (int, float) or not math.isfinite(cfg['deadline']) or cfg['deadline'] <= 0:
+            raise Error('Invalid saved whole-Sprite deadline; refusing to reset it silently.')
+    return cfg
+
+
+def tasks_list():
+    raw = g.Tasks().call('GET', '/v1/tasks')
+    try:
+        obj = json.loads(raw)
+        rows = obj['tasks']
+        if not isinstance(rows, list):
+            raise ValueError()
+        result = []
+        seen = set()
+        for item in rows:
+            if not isinstance(item, dict) or not isinstance(item.get('name'), str) or item['name'] in seen:
+                raise ValueError()
+            expiry = g.timestamp(item.get('expires_at'))
+            seen.add(item['name'])
+            if expiry > time.time():
+                result.append({'name': item['name'], 'expires_at': expiry})
+        return result
+    except (ValueError, KeyError, TypeError):
+        raise Error('Tasks API inventory is malformed; hold state is unknown.') from None
+
+
+def task_absent(name):
+    return not any(t['name'] == name for t in tasks_list())
+
+
+def service_tool():
+    return shutil.which('sprite-env', path=clean_env()['PATH'])
+
+
+def service_call(args, timeout=12):
+    tool = service_tool()
+    if not tool:
+        raise Error('Sprite Service CLI is unavailable.')
+    try:
+        # Never echo service logs/config responses: an unrelated definition could carry secrets.
+        p = subprocess.run([tool, 'services', *args], env=clean_env(), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Error('Sprite Service command timed out; outcome unknown. Check status before retrying.') from None
+    except OSError:
+        raise Error('Sprite Service CLI could not be executed.') from None
+    if len(p.stdout) > 262144 or len(p.stderr) > 262144:
+        raise Error('Sprite Service response exceeds the diagnostic bound.')
+    return p
+
+
+def service_get(name):
+    """Distinguish proven absence from permission errors; never infer from rc alone."""
+    if not service_tool():
+        return None
+    result = service_call(['list'])
+    if result.returncode:
+        raise Error('Sprite Service inventory failed; refusing an unsafe replacement.')
+    try:
+        obj = json.loads(result.stdout)
+        rows = obj.get('services') if isinstance(obj, dict) else obj
+        if not isinstance(rows, list) or not all(isinstance(v, dict) and isinstance(v.get('name'), str) for v in rows):
+            raise ValueError()
+        hits = [v for v in rows if v['name'] == name]
+        if len(hits) > 1:
+            raise ValueError()
+        if not hits:
+            return None
+        details = service_call(['get', name])
+        if details.returncode:
+            raise ValueError()
+        data = json.loads(details.stdout)
+        if not isinstance(data, dict) or data.get('name') != name or not isinstance(data.get('cmd'), str):
+            raise ValueError()
+        return data
+    except (ValueError, TypeError):
+        raise Error('Sprite Service metadata is unknown; nothing was overwritten or stopped.') from None
+
+
+def owned_service(info, launcher):
+    if info is not None and (info.get('cmd') != str(launcher) or info.get('args') not in (None, [])):
+        raise Error('An existing Service has a different command; refusing to change it.')
+
+
+def service_remove(name, launcher):
+    info = service_get(name)
+    if info is None:
+        return
+    owned_service(info, launcher)
+    # Stop is sticky. Delete only this precisely matched definition, never all services.
+    service_call(['stop', name])
+    service_call(['delete', name])
+    end = time.monotonic()+10
+    while time.monotonic() < end:
+        info = service_get(name)
+        if info is None:
+            return
+        owned_service(info, launcher)
+        time.sleep(.25)
+    raise Error('Service removal was not confirmed; no detached duplicate was started.')
+
+
+def install(directory):
+    text = source_text()
+    code = directory / ('worker-' + hashlib.sha256(text.encode()).hexdigest()[:20] + '.py')
+    if code.exists() or code.is_symlink():
+        st = code.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077 or code.read_text() != text:
+            raise Error('Installed timer worker is not an owned matching file.')
+    else:
+        fd = os.open(code, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as h:
+            h.write(text)
+            h.flush(); os.fsync(h.fileno())
+    launcher = directory/'service-runner.sh'
+    content = '#!/bin/sh\nexec /usr/bin/env -i HOME=' + shlex.quote(str(Path.home()))
+    content += ' PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ' + shlex.quote(sys.executable)
+    content += ' -I ' + shlex.quote(str(code)) + ' --worker ' + shlex.quote(str(directory)) + '\n'
+    if launcher.exists() or launcher.is_symlink():
+        st = launcher.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+            raise Error('Unsafe timer service launcher.')
+    fd, tmp = tempfile.mkstemp(prefix='.launcher-', dir=directory)
+    try:
+        with os.fdopen(fd, 'w') as h:
+            h.write(content); h.flush(); os.fsync(h.fileno())
+        os.chmod(tmp, 0o700)
+        os.replace(tmp, launcher)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+    return code, launcher
+
+
+def worker(directory):
+    directory = Path(directory)
+    root = root_path(False)
+    if directory.parent != root or not re.fullmatch(r'[0-9a-f]{24}', directory.name):
+        raise Error('Invalid worker state path.')
+    g.private_dir(directory)
+    fd = g.lock_file(directory/'worker.lock')
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd); return 0
+    cfg = g.read_json(directory/'config.json')
+    if not cfg:
+        os.close(fd); return 1
+    cfg = config_read(directory, cfg.get('name'))
+    stop = [False]
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__(0, True))
+    signal.signal(signal.SIGINT, lambda *_: stop.__setitem__(0, True))
+    state = {'owner': OWNER, 'worker': g.process_identity(os.getpid()), 'task': cfg['task'],
+             'status': 'starting', 'generation': '', 'last_success': 0, 'failures': 0}
+    next_renew = 0; reason = 'stopped'; now_cfg = cfg
+    try:
+        while not stop[0]:
+            now_cfg = config_read(directory, cfg['name'])
+            if not now_cfg or now_cfg.get('disabled'):
+                reason = 'released-by-user'; break
+            if time.time() >= now_cfg['deadline']:
+                reason = 'deadline-reached'; break
+            if state['generation'] != now_cfg['generation']:
+                next_renew = 0
+            state.update(generation=now_cfg['generation'], deadline=now_cfg['deadline'])
+            if time.monotonic() >= next_renew:
+                lease = min(LEASE, max(1, int(now_cfg['deadline']-time.time())))
+                try:
+                    expiry = g.Tasks().renew(cfg['task'], lease)
+                    state.update(status='verified', last_success=time.time(), expires_at=expiry, failures=0, error='')
+                    g.log_event(directory, 'whole-Sprite lease verified until '+g.utc(expiry))
+                    next_renew = time.monotonic()+min(REFRESH, max(.2, lease/3))
+                except Error as e:
+                    state.update(status='unverified', failures=state['failures']+1, error=str(e))
+                    g.log_event(directory, str(e))
+                    next_renew = time.monotonic()+RETRY
+            state['checked_at'] = time.time()
+            g.write_json(directory/'status.json', state)
+            time.sleep(POLL)
+    except (OSError, Error, ValueError, KeyError, TypeError):
+        reason = 'worker-error'
+    finally:
+        try:
+            g.Tasks().release(cfg['task']); state['release_verified'] = True
+        except Error:
+            state['release_verified'] = False
+        state.update(status=reason, checked_at=time.time())
+        try: g.write_json(directory/'status.json', state)
+        except (Error, OSError): pass
+        # Service expiry is sticky. Do not stop a service on an unexpected worker
+        # failure: runtime may restart it and recheck the persisted deadline.
+        if reason in ('deadline-reached', 'released-by-user') and now_cfg and now_cfg.get('runtime') == 'service':
+            try: service_call(['stop', cfg['service']], timeout=8)
+            except Error: pass
+        os.close(fd)
+    return 0 if reason != 'worker-error' else 1
+
+
+def timer_status(name):
+    directory, task, service = paths(name)
+    cfg = config_read(directory, name) if directory.exists() else None
+    state = g.read_json(directory/'status.json') if cfg else None
+    state = state or {}
+    alive = g.same_process(state.get('worker'))
+    reply = {'name': name, 'task': task, 'service': service, 'present': bool(cfg),
+             'deadline': cfg.get('deadline', 0) if cfg else 0, 'verified': False,
+             'worker_alive': alive, 'status': state.get('status', 'not-started'),
+             'last_success': state.get('last_success', 0), 'expires_at': 0,
+             'runtime': cfg.get('runtime', 'unknown') if cfg else 'none',
+             'disabled': cfg.get('disabled', False) if cfg else False,
+             'status_file': str(directory/'status.json'), 'error': ''}
+    if cfg and alive and not cfg.get('disabled') and cfg['deadline'] > time.time():
+        try:
+            expiry = g.Tasks().verify(task)
+            reply['expires_at'] = expiry
+            latest = config_read(directory, name)
+            reply['verified'] = (g.same_process(state.get('worker')) and latest and not latest.get('disabled')
+                                 and latest.get('generation') == cfg.get('generation') and latest['deadline'] > time.time()
+                                 and state.get('status') == 'verified' and state.get('generation') == cfg.get('generation')
+                                 and time.time()-state.get('last_success', 0) <= REFRESH+10)
+        except Error as e:
+            reply['error'] = str(e)
+    return reply
+
+
+def start_timer(name, seconds, use_service=True):
+    if type(seconds) is not int or not 60 <= seconds <= 604800:
+        raise Error('Manual timer duration must be 60..604800 seconds.')
+    directory, task, service = paths(name, True)
+    with control_lock(directory):
+        cfg = config_read(directory, name)
+        old = g.read_json(directory/'status.json') or {}
+        end = time.monotonic()+START_WAIT
+        # Never shorten an enabled pre-existing timer. A stopped timer is a new run.
+        old_deadline = cfg['deadline'] if cfg and not cfg.get('disabled') else 0
+        deadline = max(time.time()+seconds, old_deadline)
+        generation = secrets.token_hex(12)
+        active = bool(cfg and not cfg.get('disabled') and g.same_process(old.get('worker')) and
+                      old.get('status') not in ('deadline-reached', 'released-by-user', 'worker-error', 'stopped'))
+        if not active:
+            while old and g.same_process(old.get('worker')):
+                if time.monotonic() >= end: raise Error('Old timer is still stopping; inspect status and retry.')
+                time.sleep(.1)
+        runtime = cfg.get('runtime', 'detached') if active else ('service' if use_service and service_tool() else 'detached')
+        info = service_get(service) if service_tool() else None
+        owned_service(info, directory/'service-runner.sh')
+        if not cfg and any(t['name'] == task for t in tasks_list()):
+            raise Error('Task-name collision without owned timer metadata; no task was changed.')
+        config = {'owner': OWNER, 'name': name, 'task': task, 'service': service, 'deadline': deadline,
+                  'generation': generation, 'disabled': False, 'runtime': runtime}
+        code, launcher = install(directory)
+        g.write_json(directory/'config.json', config)
+        warning = ''
+        if not active:
+            # A verified initial lease bridges worker startup. Fresh worker receipt
+            # is still mandatory; this lease alone can never report success.
+            g.Tasks().renew(task, min(LEASE, max(1, int(deadline-time.time()))))
+            if runtime == 'service':
+                try:
+                    if info:
+                        service_remove(service, launcher)
+                    created = service_call(['create', service, '--cmd', str(launcher), '--duration', '2s'], timeout=15)
+                    if created.returncode: raise Error('Service create returned nonzero.')
+                    # Confirm definition as well as worker readiness below.
+                    info = service_get(service)
+                    if info is None: raise Error('Created service was not found.')
+                    owned_service(info, launcher)
+                except Error:
+                    # Do not race an unknown service with a fallback process.
+                    service_remove(service, launcher)
+                    current = g.read_json(directory/'status.json') or {}
+                    while g.same_process(current.get('worker')):
+                        if time.monotonic() >= end: raise Error('Service worker stop not confirmed; no duplicate was started.')
+                        time.sleep(.1)
+                    runtime = config['runtime'] = 'detached'
+                    g.write_json(directory/'config.json', config)
+                    warning = 'Service startup unavailable; using a verified detached worker (no automatic cold-boot restart).'
+            elif info:
+                service_remove(service, launcher)
+            if runtime == 'detached':
+                subprocess.Popen([sys.executable, '-I', str(code), '--worker', str(directory)], cwd=str(directory),
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 env=clean_env(), start_new_session=True, close_fds=True)
+        while time.monotonic() < end:
+            current = timer_status(name)
+            if current['verified']:
+                if runtime == 'service':
+                    info = service_get(service)
+                    owned_service(info, launcher)
+                    if not info or (info.get('state') or {}).get('status') != 'running':
+                        time.sleep(.2); continue
+                return {'ok': True, 'timer': current, 'warning': warning,
+                        'note': 'Verified whole-Sprite timer; no Codex process or repository was changed.'}
+            time.sleep(.2)
+        raise Error('No fresh verified timer receipt. A timer may still be active; inspect status, do not assume rollback.')
+
+
+def stop_timer(name):
+    directory, task, service = paths(name)
+    if not directory.exists():
+        return {'ok': True, 'note': 'No v64 timer state found; no external task or service was removed.'}
+    with control_lock(directory):
+        cfg = config_read(directory, name)
+        if not cfg:
+            return {'ok': True, 'note': 'No owned timer config; no task was removed.'}
+        info = service_get(service) if service_tool() else None
+        owned_service(info, directory/'service-runner.sh')
+        cfg['disabled'] = True
+        g.write_json(directory/'config.json', cfg)
+        if info:
+            service_remove(service, directory/'service-runner.sh')
+        # No PID signal: the isolated worker sees disabled and releases its lease.
+        end = time.monotonic()+STOP_WAIT
+        while time.monotonic() < end:
+            state = g.read_json(directory/'status.json') or {}
+            if not g.same_process(state.get('worker')): break
+            time.sleep(.15)
+        else:
+            raise Error('Timer is marked disabled but worker exit is not verified. Inspect status; no Codex was signalled.')
+        g.Tasks().release(task)
+        if not task_absent(task): raise Error('Timer release was not confirmed by the Tasks API.')
+        return {'ok': True, 'note': 'Whole-Sprite timer released. Codex, its session guard, and other holds are untouched.'}
+
+
+def legacy_root():
+    root = Path.home()/'.local/state/sprite-keepalive'
+    if not root.exists() and not root.is_symlink(): return None
+    for p in (Path.home()/'.local', Path.home()/'.local/state', root):
+        st = p.lstat()
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+            raise Error('Unsafe legacy keepalive state path; no legacy task will be changed.')
+    return root
+
+
+def owned_bytes(path, maxlen=65536):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022 or st.st_size > maxlen:
+            raise Error('Legacy helper file has unsafe owner/type/permissions/size.')
+        data = os.read(fd, maxlen+1)
+        if len(data)>maxlen: raise Error('Legacy helper file too large.')
+        return data
+    finally: os.close(fd)
+
+
+def legacy_status(name):
+    name = task_name(name)
+    root = legacy_root()
+    if root is None or not (root/(name+'.deadline')).exists():
+        return {'name': name, 'present': False}
+    try:
+        data = owned_bytes(root/(name+'.deadline'), 64)
+        deadline = int(data.strip())
+        if deadline < 0: raise ValueError()
+    except (ValueError, OSError):
+        raise Error('Invalid legacy deadline; no legacy files changed.') from None
+    return {'name': name, 'present': True, 'deadline': deadline, 'service': 'keepalive-'+name,
+            'note': 'Legacy keepalive.sh hold; independent of v64 timer and Codex guard.'}
+
+
+def retire_legacy(name):
+    """Explicitly retire only a recognizable owned old helper, not arbitrary tasks."""
+    entry = legacy_status(name)
+    if not entry['present']:
+        return {'ok': True, 'note': 'No matching legacy deadline; nothing removed.'}
+    root = legacy_root()
+    heartbeat = root/(name+'-heartbeat.sh')
+    launcher = root/(name+'-service-runner.sh')
+    hb = owned_bytes(heartbeat).decode('utf-8')
+    expected = ('#!/usr/bin/env bash\nexec '+shlex.quote(str(heartbeat))+'\n').encode()
+    # The original helper unconditionally quoted the path even without spaces.
+    original = ("#!/usr/bin/env bash\nexec '"+str(heartbeat)+"'\n").encode()
+    if owned_bytes(launcher) not in (expected, original):
+        raise Error('Legacy service runner is not the recognized helper; refused.')
+    if ("TASK_NAME='"+name+"'") not in hb or 'while :; do' not in hb or 'http://sprite/v1/tasks/' not in hb:
+        raise Error('Legacy heartbeat signature not recognized; refused.')
+    info = service_get('keepalive-'+name) if service_tool() else None
+    owned_service(info, launcher)
+    # Persist a zero deadline first so a cold restart cannot renew the old timer.
+    g.write_json(root/(name+'.deadline'), 0)
+    if info: service_remove('keepalive-'+name, launcher)
+    pidfile = root/(name+'.pid')
+    try:
+        pid = int(owned_bytes(pidfile,64).strip())
+    except FileNotFoundError: pid = 0
+    except (ValueError,OSError): raise Error('Legacy PID metadata is ambiguous; inspect status before retrying.') from None
+    ident = g.process_identity(pid)
+    if ident:
+        args = (g.PROC/str(pid)/'cmdline').read_bytes().rstrip(b'\0').split(b'\0')
+        if len(args)<2 or os.path.basename(os.fsdecode(args[0])) not in ('bash','sh') or os.fsdecode(args[1]) != str(heartbeat):
+            raise Error('Legacy PID does not belong to its exact heartbeat; not signalled.')
+        # Do not signal a numeric PID after it may have been reused. Cooperative
+        # deadline shutdown is enough for the old helper's five-second loop.
+        end = time.monotonic()+STOP_WAIT
+        while g.same_process(ident) and time.monotonic()<end: time.sleep(.2)
+        if g.same_process(ident): raise Error('Legacy worker has not stopped; no task release claimed.')
+    g.Tasks().release(name)
+    if not task_absent(name): raise Error('Legacy task removal not confirmed.')
+    return {'ok': True, 'note': 'Legacy helper retired; files/logs preserved, no workspace upload, no Codex guard changed.'}
+
+
+def snapshot():
+    holds = tasks_list()
+    root = root_path(False)
+    timers = []
+    if root.exists():
+        for p in sorted(root.iterdir()):
+            if not re.fullmatch(r'[0-9a-f]{24}', p.name): continue
+            st=p.lstat()
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077:
+                raise Error('Unsafe timer directory in inventory; state is unknown.')
+            cfg = g.read_json(p/'config.json')
+            if cfg and cfg.get('owner') == OWNER:
+                timers.append(timer_status(task_name(cfg.get('name'))))
+    legacy = []
+    lr = legacy_root()
+    if lr:
+        for p in sorted(lr.glob('*.deadline'))[:100]:
+            name = p.name[:-9]
+            if re.fullmatch(TASK_RE, name): legacy.append(legacy_status(name))
+    # Existing guards retain their own worker code, state, lifetime and credentials.
+    guards = g.status_all().get('guards', [])
+    return {'ok': True, 'timers': timers, 'guards': guards, 'legacy': legacy, 'tasks': holds, 'now': time.time()}
+
+
+def remote_request(req):
+    op = req.get('operation')
+    if op == 'status': return snapshot()
+    name = task_name(req.get('name', 'manual-keepalive'))
+    if op == 'start': return start_timer(name, req.get('seconds'), req.get('service', True) is True)
+    if op == 'stop': return stop_timer(name)
+    if op == 'retire': return retire_legacy(name)
+    if op == 'session':
+        duration_s = req.get('seconds')
+        if type(duration_s) is not int or not 0 <= duration_s <= 604800: raise Error('Invalid session duration.')
+        receipt = g.ensure(req.get('tag',''), duration_s, req.get('runner',''), req.get('pid',0))
+        return {'ok': True, 'guard': receipt}
+    raise Error('Unrecognized keep-awake management operation.')
+
+
+def received(payload):
+    home = str(Path.home())
+    os.environ.clear(); os.environ.update(HOME=home, PATH='/usr/local/bin:/usr/bin:/bin', LANG='C.UTF-8')
+    try:
+        result = remote_request(payload.get('request',{}))
+    except Error as e:
+        result = {'ok': False, 'error': str(e)}
+    except (OSError, ValueError, TypeError, KeyError):
+        result = {'ok': False, 'error': 'Keep-alive operation failed (state, permission or runtime). Inspect status; no rollback is assumed.'}
+    result['nonce'] = payload.get('nonce','')
+    print(MARKER+json.dumps(result,separators=(',',':')),flush=True)
+
+
+def client(picker, sprite, request):
+    nonce = secrets.token_hex(16)
+    payload = json.dumps({'source': source_text(), 'request': request, 'nonce': nonce}).encode()
+    receiver = ("import json,sys; p=json.load(sys.stdin); n={'__name__':'keepalive_received','_SOURCE':p['source']}; "
+                "exec(compile(p['source'],'<keepalive-v64>','exec'),n); n['received'](p)")
+    help_result = picker.capture(['exec','--help'],check=False)
+    modes = [True,False] if '--http-post' in help_result.stdout+help_result.stderr else [False]
+    for mode in modes:
+        args = [picker.cli,'exec',*picker.org,'-s',sprite]
+        if mode: args += ['--http-post']
+        args += ['--no-port-forward','--','python3','-I','-c',receiver]
+        try:
+            p = subprocess.run(args,cwd=picker.context,input=payload,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=100)
+        except subprocess.TimeoutExpired:
+            if request['operation']=='status' and mode and len(modes)>1: continue
+            raise Error('Management command timed out. Outcome unknown; it was not replayed. Check status before changing the timer again.') from None
+        except OSError:
+            raise Error('Local Sprite client could not be executed.') from None
+        reply=None
+        if len(p.stdout)<=1048576:
+            for line in p.stdout.decode('utf-8','replace').splitlines():
+                if not line.startswith(MARKER): continue
+                try:
+                    item=json.loads(line[len(MARKER):])
+                    if isinstance(item,dict) and item.get('nonce')==nonce: reply=item
+                except ValueError: pass
+        if reply is not None:
+            if reply.get('ok') is not True: raise Error(safe(reply.get('error','Keep-awake not verified.')))
+            return reply
+        if request['operation']=='status' and mode and len(modes)>1: continue
+        raise Error(f'No valid management receipt (Sprite CLI exit {p.returncode}); outcome unknown. Check status; no write was retried.')
+    raise Error('Could not read keep-awake status over either command transport.')
+
+
+def remaining(deadline):
+    if not deadline: return 'session lifetime'
+    seconds=max(0,int(deadline-time.time()))
+    return 'expired' if seconds==0 else f'{seconds//3600}h {(seconds%3600)//60:02d}m'
+
+
+def display(data):
+    print('\n=== keep-awake status (current observation, not historical uptime)')
+    for t in data.get('timers',[]):
+        print('  Whole-Sprite timer '+safe(t['name'])+': '+('VERIFIED' if t['verified'] else 'NOT VERIFIED'))
+        print('    Remaining: '+remaining(t['deadline'])+' | deadline: '+g.utc(t['deadline']))
+        print('    Worker: '+str(t['worker_alive'])+' | runtime: '+safe(t['runtime'])+' | state: '+safe(t['status']))
+        print('    Lease: '+(g.utc(t['expires_at']) if t.get('expires_at') else 'none verified'))
+        if t.get('error'): print('    '+safe(t['error']))
+    for v in data.get('guards',[]):
+        print('  Session '+safe(v.get('tag'))+': '+('VERIFIED' if v.get('verified') else 'NOT VERIFIED'))
+        print('    Policy: '+g.utc(v.get('deadline',0))+' | runner alive: '+str(v.get('runner_alive'))+' | worker alive: '+str(v.get('worker_alive')))
+    active={t['name']:t['expires_at'] for t in data.get('tasks',[])}
+    for v in data.get('legacy',[]):
+        print('  Legacy keepalive.sh '+safe(v['name'])+': deadline '+g.utc(v['deadline'])+' | live API task: '+str(v['name'] in active))
+    if not data.get('timers') and not data.get('guards') and not data.get('legacy'): print('  No recorded managed protection.')
+    print('  All live Tasks API leases: '+str(len(active)))
+    for name,exp in active.items(): print('    '+safe(name)+' -> '+g.utc(exp))
+    print('  A task lease is not the long-term timer deadline. Other tasks can keep billing after this timer stops.')
+
+
+class Manager:
+    def __init__(self,picker,api):
+        self.p=picker; self.a=api; self.sprite=''
+        self.name=task_name(os.environ.get('SPRITE_TASK_NAME','manual-keepalive'))
+        service=os.environ.get('SPRITE_KEEPALIVE_USE_SERVICE','1')
+        if service not in ('0','1'): raise Error('SPRITE_KEEPALIVE_USE_SERVICE must be 0 or 1.')
+        self.service=service=='1'
+    def ask(self,prompt): return self.a['ask'](prompt)
+    def call(self,request): return client(self.p,self.sprite,request)
+    def inventory(self):
+        rows=self.p.sprites()
+        print('\n=== Sprite inventory / keep-awake summary')
+        print('  Warm/cold/unknown Sprites are NOT exec-probed; a race after listing can still wake a Sprite.')
+        for name,state in rows:
+            print('\n  '+safe(name)+' | reported state: '+safe(state))
+            if state!='running':
+                print('    Not probed (avoids deliberately waking it).'); continue
+            try:
+                data=client(self.p,name,{'operation':'status'})
+                for t in data.get('timers',[]): print('    timer '+safe(t['name'])+' '+remaining(t['deadline'])+' '+('VERIFIED' if t['verified'] else 'NOT VERIFIED'))
+                for t in data.get('guards',[]): print('    session '+safe(t.get('tag'))+' '+remaining(t.get('deadline',0))+' '+('VERIFIED' if t.get('verified') else 'NOT VERIFIED'))
+                for t in data.get('legacy',[]): print('    legacy '+safe(t['name'])+' '+remaining(t['deadline']))
+                print('    Live task leases: '+str(len(data['tasks'])))
+            except Error as e: print('    UNKNOWN: '+safe(e))
+        return rows
+    def choose(self,requested=''):
+        if requested and requested not in dict(self.p.sprites()):
+            raise Error('Requested Sprite is not in the current organization inventory; no command was sent.')
+        self.sprite=self.p.choose_sprite(requested)
+    def status(self):
+        print('       Reading '+safe(self.sprite)+' through a fresh command; this can wake a cold Sprite.',flush=True)
+        data=self.call({'operation':'status'}); display(data); return data
+    def start(self,hours=''):
+        hours=hours or self.ask('  Whole-Sprite hours from now [8], Q cancels: ').strip() or '8'
+        if hours.lower()=='q': return
+        seconds=duration(hours)
+        print('  Sprite: '+safe(self.sprite)+' | whole-Sprite timer: '+self.name+' | request: '+hours+' hour(s) from now')
+        print('  Continues even after Codex exits. Compute billing can continue while your Mac is off.')
+        print('  A later existing deadline is preserved. No input/workspace upload or Git action occurs.')
+        if self.ask('  Type KEEP AWAKE to confirm, or Enter to cancel: ')!='KEEP AWAKE': return
+        result=self.call({'operation':'start','name':self.name,'seconds':seconds,'service':self.service})
+        print('\n       WHOLE-SPRITE KEEP-AWAKE VERIFIED')
+        t=result['timer']
+        print('       Timer: '+t['name']+' | deadline: '+g.utc(t['deadline'])+' | remaining: '+remaining(t['deadline']))
+        print('       Runtime: '+t['runtime']+' | API lease: '+g.utc(t['expires_at']))
+        if result.get('warning'): print('       '+result['warning'])
+        print('       You may close this manager. Terminal 1 / Codex was not attached, restarted or signalled.')
+    def stop(self):
+        self.status()
+        print('  Stop only v64 whole-Sprite timer '+self.name+'; NOT Codex or its automatic guard.')
+        if self.ask('  Type STOP TIMER to confirm, or Enter to cancel: ')!='STOP TIMER': return
+        print('       '+self.call({'operation':'stop','name':self.name})['note'])
+    def session(self):
+        rows,_=self.p.sessions(self.sprite)
+        rows=[r for r in rows if r.get('guard_target')]
+        if not rows:
+            print('  No managed runner returned. No Codex was launched or attached.'); return
+        print('\n=== choose session protection to manage (NOT a terminal attachment)')
+        for i,r in enumerate(rows,1):
+            print('    '+str(i)+') ID='+safe(r['id'])+' '+safe(r['label'])+' | '+safe(r['workdir']))
+        choice=self.ask('  Manage session number [1], Q cancels: ') or '1'
+        if choice.lower()=='q': return
+        if not choice.isdigit() or not 1<=int(choice)<=len(rows): raise Error('Invalid session selection.')
+        row=rows[int(choice)-1]
+        value=self.ask('  Session protection: session for its lifetime, or hours from now [session]: ') or 'session'
+        sec=g.seconds_from_hours(value)
+        print('  Changes only this session guard; does NOT attach to its screen or change its credentials.')
+        print('  Numeric hours REPLACE the existing deadline; session removes its cutoff. Billing can continue.')
+        if self.ask('  Type PROTECT SESSION to confirm, or Enter to cancel: ')!='PROTECT SESSION': return
+        if not self.p.live_same_session(self.sprite,row): raise Error('Selected session ended; no replacement launched.')
+        result=self.call({'operation':'session','seconds':sec,**row['guard_target']})
+        g.report(result['guard'])
+    def retire(self):
+        data=self.status()
+        rows=data.get('legacy',[])
+        if not rows: print('  No old keepalive.sh state found.'); return
+        for i,r in enumerate(rows,1): print('    '+str(i)+') '+safe(r['name']))
+        answer=self.ask('  Legacy hold number to retire, or Enter to cancel: ')
+        if not answer: return
+        if not answer.isdigit() or not 1<=int(answer)<=len(rows): raise Error('Invalid legacy selection.')
+        name=rows[int(answer)-1]['name']
+        print('  Verify replacement protection first. Stop old helper '+safe(name)+'; keep logs and workspace files.')
+        if self.ask('  Type RETIRE LEGACY to confirm, or Enter to cancel: ')!='RETIRE LEGACY': return
+        print('       '+self.call({'operation':'retire','name':name})['note'])
+    def menu(self):
+        while True:
+            print('\n=== keep-awake manager — '+safe(self.sprite)+' (Codex terminal untouched)')
+            print('    1) Inspect timers, session protection and legacy holds')
+            print('    2) Start / extend a whole-Sprite timer')
+            print('    3) Stop this whole-Sprite timer (leave Codex protection alone)')
+            print('    4) Change a running session\'s keep-awake budget (no attachment)')
+            print('    5) Retire an old keepalive.sh hold (explicit confirmation)')
+            print('    6) Show Sprite inventory and hold summaries')
+            print('    7) Choose another Sprite')
+            print('    8) Choose a different timer name (current: '+self.name+')')
+            print('    0) Quit manager (leave cloud work running)')
+            answer=self.ask('  Keep-awake action [0]: ').lower()
+            try:
+                if answer in ('','0','q'): return 0
+                if answer=='1': self.status()
+                elif answer=='2': self.start(os.environ.get('SPRITE_KEEPALIVE_HOURS',''))
+                elif answer=='3': self.stop()
+                elif answer=='4': self.session()
+                elif answer=='5': self.retire()
+                elif answer=='6': self.inventory()
+                elif answer=='7': self.choose()
+                elif answer=='8': self.name=task_name(self.ask('  Timer name: '))
+                else: print('  Choose a displayed action.')
+            except self.a['Cancelled']: print('  Action cancelled.')
+            except (Error,self.a['AttachError']) as e: print('error: '+safe(e))
+
+
+def main():
+    if len(sys.argv)>1 and sys.argv[1]=='--worker':
+        return worker(sys.argv[2])
+    if sys.version_info<(3,9): raise Error('Keep-awake management needs Python 3.9+ locally and on the Sprite.')
+    picker_file,action,hours=sys.argv[1:4]
+    if action not in ('inventory','status') and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        raise Error('Changing keep-awake protection requires an interactive terminal and confirmation.')
+    if action=='status' and not sys.stdin.isatty() and not os.environ.get('SPRITE_NAME'):
+        raise Error('Noninteractive --keepalive-status requires SPRITE_NAME.')
+    api=runpy.run_path(picker_file)
+    if os.environ.get('SPRITE_UPLOAD_WORKSPACE') not in (None,'','0'):
+        print('       SPRITE_UPLOAD_WORKSPACE is not used here: keep-awake management never overlays files. Use opening menu 5.')
+    print('\n=== independent keep-awake management')
+    print('       No Codex attach/launch, GitHub/Fly-app/model keys, Git writes or workspace upload.')
+    try:
+        with tempfile.TemporaryDirectory(prefix='sprite-keepawake-context-') as context:
+            manager=Manager(api['Picker'](context,selection_only=True),api)
+            if action=='inventory': manager.inventory(); return 0
+            manager.choose(os.environ.get('SPRITE_NAME',''))
+            if action=='status': manager.status(); return 0
+            if action=='start': manager.start(hours or os.environ.get('SPRITE_KEEPALIVE_HOURS','')); return 0
+            if action=='stop': manager.stop(); return 0
+            if action=='session': manager.session(); return 0
+            try: manager.status()
+            except Error as e: print('warning: '+safe(e))
+            return manager.menu()
+    except api['Cancelled']:
+        print('       Manager closed. No cloud agent was stopped.'); return 0
+    except api['AttachError'] as e:
+        raise Error(str(e)) from None
+
+
+if __name__=='__main__':
+    try: raise SystemExit(main())
+    except KeyboardInterrupt:
+        print('\nManagement interrupted. Earlier completed actions remain; check status before repeating a write.',file=sys.stderr)
+        raise SystemExit(130)
+    except (Error,OSError) as e:
+        print('error: '+safe(e),file=sys.stderr)
+        raise SystemExit(1)
+KEEPALIVE_MANAGER_PY
+}
+
+run_keepalive() (
+  command -v python3 >/dev/null 2>&1 || { echo "error: local python3 is required" >&2; exit 127; }
+  local_sources=$(mktemp -d)
+  trap 'rm -rf -- "$local_sources"' EXIT
+  attach_only_python >"$local_sources/picker.py"
+  keepalive_python >"$local_sources/keepalive.py"
+  python3 -I "$local_sources/keepalive.py" "$local_sources/picker.py" "$KEEPALIVE_ACTION" "$KEEPALIVE_HOURS"
+)
+
+response_diagnostics_python() {
+  cat <<'RESPONSE_DIAGNOSTICS67_PY'
+"""v67 response-delay diagnostics. Explicit second-terminal mode, no Codex TTY use.
+Only allowlisted /proc counters. No Git commands, credentials, model tests, or
+conversation/config/log content. The interactive attachment code is not involved.
+"""
+from __future__ import annotations
+import datetime as dt
+import json
+import math
+import os
+from pathlib import Path
+import re
+import runpy
+import secrets
+import select
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+REMOTE = '"""v67 fixed read-only /proc sampler; does not touch the old TTY or repository.\nOnly called by explicit second-terminal diagnostics. No credentials/model calls,\nno Git invocation, no process signalling, no command arguments or environment reads.\n"""\nimport collections\nimport datetime\nimport json\nimport math\nimport os\nfrom pathlib import Path\nimport re\nimport signal\nimport sys\nimport time\n\nSCHEMA = 1\nNAMES = frozenset((\'codex\', \'codex-cli\', \'codex.exe\'))\nSTATES = frozenset(\'RSDTtZXxIWPK\')\nMAX_SCAN = 8192\nMAX_ROWS = 128\nMAX_THREADS = 256\n\n\ndef safe(value, limit=64):\n    return \'\'.join(c if 32 <= ord(c) < 127 else \'?\' for c in str(value))[:limit]\n\n\ndef read_text(path, limit=16384):\n    try:\n        with open(path, \'rb\') as handle:\n            return handle.read(limit).decode(\'utf-8\', \'replace\')\n    except (OSError, ValueError):\n        return \'\'\n\n\ndef parse_stat(raw):\n    try:\n        left, right = raw.find(\'(\'), raw.rfind(\')\')\n        fields = raw[right + 2:].split()\n        if left < 1 or right <= left or len(fields) < 22 or fields[0] not in STATES:\n            return None\n        return dict(pid=int(raw[:left].strip()), name=safe(raw[left+1:right], 48),\n                    state=fields[0], ppid=int(fields[1]), pgid=int(fields[2]),\n                    tty_nr=int(fields[4]), tpgid=int(fields[5]),\n                    cpu_ticks=int(fields[11])+int(fields[12]),\n                    start_ticks=int(fields[19]), rss_pages=int(fields[21]))\n    except (ValueError, IndexError):\n        return None\n\n\nclass ProcFS:\n    def __init__(self, root=\'/proc\', cgroup=\'/sys/fs/cgroup\'):\n        # Alternate roots are for offline tests only, not caller-configurable.\n        self.root = Path(root)\n        self.cgroup = Path(cgroup)\n        self.hz = int(os.sysconf(\'SC_CLK_TCK\'))\n        self.page = int(os.sysconf(\'SC_PAGE_SIZE\'))\n\n    def boot(self):\n        value = read_text(self.root/\'sys/kernel/random/boot_id\', 128).strip()\n        return value if re.fullmatch(r\'[a-f0-9-]{36}\', value) else \'\'\n\n    def stat(self, pid):\n        value = parse_stat(read_text(self.root/str(pid)/\'stat\', 8192))\n        return value if value and value[\'pid\'] == pid else None\n\n    def scan(self):\n        rows, skipped, truncated = {}, 0, False\n        names = sorted((p for p in self.root.iterdir() if p.name.isdecimal()), key=lambda p:int(p.name))\n        for index, entry in enumerate(names):\n            if index >= MAX_SCAN:\n                truncated = True\n                break\n            # Do not inspect other users\' process metadata beyond ownership.\n            try:\n                if entry.stat().st_uid != os.getuid():\n                    continue\n            except OSError:\n                skipped += 1\n                continue\n            row = self.stat(int(entry.name))\n            if row:\n                rows[row[\'pid\']] = row\n            else:\n                skipped += 1\n        return rows, truncated, skipped\n\n    def identity(self, pid):\n        row, boot = self.stat(pid), self.boot()\n        if not row or not boot or row[\'state\'] in (\'Z\',\'X\',\'x\'):\n            return None\n        return dict(pid=pid, start_ticks=row[\'start_ticks\'], boot_id=boot)\n\n    def same(self, target):\n        return self.identity(target[\'pid\']) == target\n\n    def counters(self, pid):\n        out = {}\n        for line in read_text(self.root/str(pid)/\'io\', 4096).splitlines():\n            key, _, value = line.partition(\':\')\n            if key in (\'rchar\',\'wchar\',\'read_bytes\',\'write_bytes\') and value.strip().isdigit():\n                out[key] = int(value)\n        return out\n\n    def wait(self, pid, tid=None):\n        p = self.root/str(pid)\n        if tid is not None:\n            p = p/\'task\'/str(tid)\n        name = read_text(p/\'wchan\', 256).strip()\n        return name if re.fullmatch(r\'[A-Za-z0-9_.]{1,96}\', name) else \'unavailable\'\n\n    def kernel_stack(self, pid):\n        text = read_text(self.root/str(pid)/\'stack\', 8192)\n        names = []\n        for line in text.splitlines():\n            hit = re.search(r\'(?:^|\\s)([A-Za-z_][A-Za-z0-9_.]*)\\+0x[0-9a-fA-F]+\', line)\n            if hit:\n                names.append(hit.group(1)[:96])\n        return dict(available=bool(names), functions=names[:12])\n\n    def threads(self, pid):\n        counts, waits, limited = collections.Counter(), collections.Counter(), False\n        try:\n            names = sorted((p for p in (self.root/str(pid)/\'task\').iterdir() if p.name.isdecimal()), key=lambda p:int(p.name))\n            for index, path in enumerate(names):\n                if index >= MAX_THREADS:\n                    limited = True\n                    break\n                r = parse_stat(read_text(path/\'stat\',8192))\n                if r:\n                    counts[r[\'state\']] += 1\n                    waits[self.wait(pid, int(path.name))] += 1\n        except OSError:\n            return dict(states={}, waits={}, truncated=False, available=False)\n        return dict(states=dict(counts), waits=dict(waits.most_common(8)), truncated=limited, available=bool(counts))\n\n    def system(self):\n        pressures = {}\n        for kind in (\'cpu\',\'memory\',\'io\'):\n            metric = {}\n            for line in read_text(self.root/\'pressure\'/kind, 4096).splitlines():\n                fields = line.split()\n                if not fields or fields[0] not in (\'some\',\'full\'):\n                    continue\n                record = {}\n                for field in fields[1:]:\n                    key, _, value = field.partition(\'=\')\n                    try:\n                        n = int(value) if key == \'total\' else float(value)\n                    except ValueError:\n                        continue\n                    if key in (\'total\',\'avg10\',\'avg60\',\'avg300\') and n >= 0 and math.isfinite(n):\n                        record[key] = n\n                metric[fields[0]] = record\n            pressures[kind] = metric\n        memory, events = {}, {}\n        for line in read_text(self.root/\'meminfo\', 16384).splitlines():\n            fields = line.split()\n            if len(fields)>1 and fields[0].rstrip(\':\') in (\'MemTotal\',\'MemAvailable\',\'SwapTotal\',\'SwapFree\') and fields[1].isdigit():\n                memory[fields[0].rstrip(\':\')] = int(fields[1])\n        for line in read_text(self.cgroup/\'memory.events\', 4096).splitlines():\n            fields = line.split()\n            if len(fields)==2 and fields[0] in (\'low\',\'high\',\'max\',\'oom\',\'oom_kill\',\'oom_group_kill\') and fields[1].isdigit():\n                events[fields[0]] = int(fields[1])\n        try:\n            uptime = float(read_text(self.root/\'uptime\',128).split()[0])\n        except (IndexError,ValueError):\n            uptime = 0.0\n        return dict(pressure=pressures,memory_kib=memory,cgroup_memory_events=events,\n                    uptime_seconds=uptime,cpu_count=os.cpu_count())\n\n    def catalogue(self):\n        rows, truncated, skipped = self.scan()\n        system = self.system()\n        boot = self.boot()\n        choices = []\n        for r in rows.values():\n            if r[\'name\'].lower() not in NAMES or r[\'state\'] in (\'Z\',\'X\',\'x\'):\n                continue\n            choices.append(dict(pid=r[\'pid\'], name=r[\'name\'], ppid=r[\'ppid\'], state=r[\'state\'],\n                                pgid=r[\'pgid\'],tpgid=r[\'tpgid\'],tty_nr=r[\'tty_nr\'],\n                                age_seconds=round(max(0,system[\'uptime_seconds\']-r[\'start_ticks\']/self.hz),1),\n                                identity=dict(pid=r[\'pid\'],start_ticks=r[\'start_ticks\'],boot_id=boot)))\n        choices.sort(key=lambda r:r[\'pid\'])\n        return dict(choices=choices[:128],truncated=truncated or len(choices)>128,\n                    unreadable_processes=skipped,boot_available=bool(boot),system=system)\n\n    def snapshot(self, target):\n        if not self.same(target):\n            return None\n        rows, limited, skipped = self.scan()\n        if target[\'pid\'] not in rows:\n            row = self.stat(target[\'pid\'])\n            if not row or row[\'start_ticks\'] != target[\'start_ticks\']:\n                return None\n            rows[target[\'pid\']] = row\n        linked = descendants(rows,target[\'pid\'])\n        # Prioritize the parent and D/stopped tasks when the tree is enormous.\n        candidates = sorted(linked,key=lambda p:(p!=target[\'pid\'], rows[p][\'state\'] not in (\'D\',\'T\',\'t\'),p))\n        answer = []\n        for index,pid in enumerate(candidates[:MAX_ROWS]):\n            r = dict(rows[pid])\n            r[\'wait_channel\'] = self.wait(pid)\n            r[\'io\'] = self.counters(pid)\n            r[\'kernel_stack\'] = self.kernel_stack(pid) if r[\'state\']==\'D\' and index<4 else {\'available\':False,\'functions\':[]}\n            r[\'rss_mib\'] = round(max(0,r[\'rss_pages\'])*self.page/1048576,2)\n            # Thread traversal is optional and bounded, not every process on host.\n            if pid==target[\'pid\'] or (index<32 and r[\'name\'] in (\'git\',\'rg\',\'codex\')):\n                r[\'threads\'] = self.threads(pid)\n            else:\n                r[\'threads\'] = dict(states={},waits={},available=False,truncated=False)\n            now = self.stat(pid)\n            if not now or now[\'start_ticks\'] != r[\'start_ticks\']:\n                continue\n            answer.append(r)\n        if not self.same(target):\n            return None\n        return dict(epoch=time.time(), monotonic=time.monotonic(),identity=target,\n                    tickrate=self.hz,processes=answer,system=self.system(),\n                    truncated=limited or len(candidates)>MAX_ROWS,unreadable_processes=skipped)\n\n\ndef descendants(rows, root):\n    if root not in rows:\n        return set()\n    found = {root}\n    for _ in range(256):\n        new = {p for p,r in rows.items() if r[\'ppid\'] in found}\n        if new <= found:\n            break\n        found |= new\n    return found\n\n\ndef emit(nonce, kind, data):\n    print(\'SPRITE_RESPONSE67=\'+json.dumps(dict(schema=SCHEMA,nonce=nonce,kind=kind,data=data),\n                                       separators=(\',\',\':\'),allow_nan=False),flush=True)\n\n\ndef main():\n    nonce, raw = sys.argv[1:3]\n    if not re.fullmatch(\'[a-f0-9]{24}\',nonce):\n        return 2\n    request = json.loads(raw)\n    if not isinstance(request,dict):\n        return 2\n    signal.signal(signal.SIGALRM,lambda *_:os._exit(124))\n    signal.alarm(12)\n    proc = ProcFS()\n    if request == {\'operation\':\'inventory\'}:\n        emit(nonce,\'inventory\',proc.catalogue())\n        return 0\n    if request.get(\'operation\') != \'sample\':\n        return 2\n    count, interval = request.get(\'count\'), request.get(\'interval\')\n    target = request.get(\'identity\')\n    if (type(count) is not int or not 2<=count<=20 or type(interval) is not int or\n        not 1<=interval<=10 or (count-1)*interval>120 or not isinstance(target,dict) or\n        set(target)!= {\'pid\',\'start_ticks\',\'boot_id\'} or type(target[\'pid\']) is not int or\n        not 1<=target[\'pid\']<=2**31-1 or type(target[\'start_ticks\']) is not int or\n        target[\'start_ticks\']<0 or not re.fullmatch(\'[a-f0-9-]{36}\',str(target[\'boot_id\']))):\n        return 2\n    for index in range(count):\n        signal.alarm(12)\n        value = proc.snapshot(target)\n        if value is None:\n            emit(nonce,\'ended\',{\'reason\':\'selected-process-ended-or-identity-changed\'})\n            return 3\n        value[\'index\'] = index\n        emit(nonce,\'sample\',value)\n        if index+1<count:\n            signal.alarm(interval+12)\n            time.sleep(interval)\n    emit(nonce,\'done\',{\'samples\':count})\n    return 0\n\n\nif __name__==\'__main__\':\n    try:\n        raise SystemExit(main())\n    except (OSError,ValueError,KeyError,TypeError,IndexError):\n        # No raw exception/command text; it may contain unintended metadata.\n        print(\'SPRITE_RESPONSE67_REMOTE_ERROR:metadata-unavailable\',file=sys.stderr,flush=True)\n        raise SystemExit(1)\n'
+PREFIX = b'SPRITE_RESPONSE67='
+MAX_STREAM = 8*1024*1024
+MAX_LINE = 512*1024
+
+
+class ProbeError(Exception):
+    pass
+
+
+def safe(value, limit=120):
+    return ''.join(c if 32 <= ord(c) < 127 else '?' for c in str(value))[:limit]
+
+
+def integer_env(name, default, low, high):
+    value = os.environ.get(name, str(default))
+    if not re.fullmatch(r'[0-9]{1,4}',value) or not low<=int(value)<=high:
+        raise ProbeError('%s must be %d..%d.' % (name,low,high))
+    return int(value)
+
+
+def stop_client(proc):
+    # Only the local child client group created by THIS probe; never target PIDs.
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid,signal.SIGTERM)
+        proc.wait(timeout=.5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid,signal.SIGKILL)
+            proc.wait(timeout=1)
+        except (ProcessLookupError,subprocess.TimeoutExpired):
+            pass
+    except ProcessLookupError:
+        pass
+
+
+def numbers(record, allowed):
+    if not isinstance(record,dict):
+        return {}
+    return {k:v for k,v in record.items() if k in allowed and type(v) in (int,float)
+            and math.isfinite(v) and abs(v)<=10**22}
+
+
+def identity(value):
+    if not isinstance(value,dict):
+        raise ProbeError('Missing process identity; nothing was attached.')
+    if (type(value.get('pid')) is not int or not 1<=value['pid']<=2**31-1 or
+        type(value.get('start_ticks')) is not int or value['start_ticks']<0 or
+        not re.fullmatch(r'[a-f0-9-]{36}',str(value.get('boot_id')))):
+        raise ProbeError('Invalid process identity; no target process was changed.')
+    return {key:value[key] for key in ('pid','start_ticks','boot_id')}
+
+
+def clean_system(value):
+    if not isinstance(value,dict):
+        value={}
+    pressure={}
+    for resource in ('cpu','memory','io'):
+        raw=(value.get('pressure') or {}).get(resource,{})
+        pressure[resource]={k:numbers(v,('avg10','avg60','avg300','total')) for k,v in raw.items()
+                            if k in ('some','full') and isinstance(v,dict)} if isinstance(raw,dict) else {}
+    result=numbers(value,('cpu_count','uptime_seconds'))
+    result.update(pressure=pressure,
+        memory_kib=numbers(value.get('memory_kib'),('MemTotal','MemAvailable','SwapTotal','SwapFree')),
+        cgroup_memory_events=numbers(value.get('cgroup_memory_events'),('low','high','max','oom','oom_kill','oom_group_kill')))
+    return result
+
+
+def clean_event(value, nonce):
+    if not isinstance(value,dict) or value.get('nonce')!=nonce or value.get('schema')!=1:
+        raise ProbeError('Unrecognized diagnostic frame; no raw output was saved.')
+    kind,raw=value.get('kind'),value.get('data')
+    if not isinstance(raw,dict):
+        raise ProbeError('Invalid diagnostic data.')
+    if kind=='inventory':
+        if not isinstance(raw.get('choices'),list) or len(raw['choices'])>128:
+            raise ProbeError('Invalid process inventory.')
+        choices=[]
+        for item in raw['choices']:
+            ident=identity(item.get('identity'))
+            if item.get('name') not in ('codex','codex-cli','codex.exe'):
+                raise ProbeError('Unexpected process name in inventory.')
+            row=numbers(item,('pid','ppid','pgid','tpgid','tty_nr','age_seconds'))
+            if row.get('pid')!=ident['pid']:
+                raise ProbeError('Inventory process identity mismatch.')
+            row.update(name=item['name'],state=safe(item.get('state'),1),identity=ident)
+            choices.append(row)
+        return kind,dict(choices=choices,truncated=bool(raw.get('truncated')),
+                         boot_available=bool(raw.get('boot_available')),system=clean_system(raw.get('system')))
+    if kind=='sample':
+        ident=identity(raw.get('identity'))
+        if not isinstance(raw.get('processes'),list) or len(raw['processes'])>128:
+            raise ProbeError('Invalid process sample.')
+        rows=[]
+        for item in raw['processes']:
+            if not isinstance(item,dict):
+                raise ProbeError('Invalid process metadata.')
+            row=numbers(item,('pid','ppid','pgid','tpgid','tty_nr','cpu_ticks','start_ticks','rss_mib'))
+            if not all(key in row and type(row[key]) is int for key in ('pid','ppid','cpu_ticks','start_ticks')):
+                raise ProbeError('Missing process counters.')
+            row.update(name=safe(item.get('name'),48),state=safe(item.get('state'),1),
+                       wait_channel=safe(item.get('wait_channel'),96),
+                       io=numbers(item.get('io'),('rchar','wchar','read_bytes','write_bytes')))
+            stack=item.get('kernel_stack') or {}
+            functions=stack.get('functions') if isinstance(stack,dict) else []
+            functions=functions if isinstance(functions,list) else []
+            functions=[v for v in functions[:12] if isinstance(v,str) and re.fullmatch('[A-Za-z_][A-Za-z0-9_.]{0,95}',v)]
+            row['kernel_stack']={'available':bool(functions),'functions':functions}
+            threads=item.get('threads') or {}
+            states=numbers(threads.get('states'),tuple('RSDTtZXxIWPK'))
+            waits={safe(k,96):v for k,v in (threads.get('waits') or {}).items()
+                   if type(v) is int and 0<=v<=256} if isinstance(threads.get('waits'),dict) else {}
+            row['threads']=dict(states=states,waits=dict(list(waits.items())[:8]),
+                                available=bool(threads.get('available')),truncated=bool(threads.get('truncated')))
+            rows.append(row)
+        required=numbers(raw,('epoch','monotonic','tickrate','index'))
+        if len(required)!=4 or not 1<=required['tickrate']<=10**6 or required['index']<0:
+            raise ProbeError('Invalid sample timing.')
+        required.update(identity=ident,processes=rows,system=clean_system(raw.get('system')),truncated=bool(raw.get('truncated')))
+        return kind,required
+    if kind=='ended':
+        return kind,{'reason':'selected-process-ended-or-identity-changed'}
+    if kind=='done' and type(raw.get('samples')) is int:
+        return kind,{'samples':raw['samples']}
+    raise ProbeError('Unexpected diagnostic event.')
+
+
+def probe(cli, org, sprite, context, route, request, timeout, receive):
+    """Stream nonce-checked fixed records; never print raw stdout/stderr."""
+    nonce=secrets.token_hex(12)
+    cmd=[cli,'exec',*org,'-s',sprite,'--no-port-forward']
+    if route=='http-post':
+        cmd.append('--http-post')
+    cmd+=['--','python3','-I','-S','-u','-c',REMOTE,nonce,json.dumps(request,separators=(',',':'))]
+    proc=None
+    started=time.monotonic()
+    pending=bytearray();total=0;events=0
+    deadline=started+timeout
+    try:
+        proc=subprocess.Popen(cmd,cwd=context,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL,start_new_session=True)
+        while True:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:
+                raise ProbeError('Diagnostic deadline expired; partial samples retained. No probe was automatically replayed.')
+            if not select.select([proc.stdout],[],[],min(.2,remaining))[0]:
+                continue
+            data=os.read(proc.stdout.fileno(),65536)
+            if not data:
+                break
+            total+=len(data);pending.extend(data)
+            if total>MAX_STREAM or (len(pending)>MAX_LINE and b'\n' not in pending):
+                raise ProbeError('Diagnostic output exceeded its bound; raw output was discarded.')
+            while b'\n' in pending:
+                line,_,rest=pending.partition(b'\n');pending=bytearray(rest)
+                if len(line)>MAX_LINE:
+                    raise ProbeError('Diagnostic frame exceeded its bound.')
+                if not line.startswith(PREFIX):
+                    continue
+                try:
+                    kind,value=clean_event(json.loads(line[len(PREFIX):]),nonce)
+                except (ValueError,TypeError,AttributeError,KeyError):
+                    raise ProbeError('Invalid diagnostic frame; raw output was discarded.') from None
+                events+=1;receive(kind,value)
+        if pending.startswith(PREFIX):
+            raise ProbeError('Connection ended mid-frame; partial samples retained.')
+        try:
+            rc=proc.wait(timeout=max(.1,min(1,deadline-time.monotonic())))
+        except subprocess.TimeoutExpired:
+            rc=None
+        return dict(route=route,cli_exit=rc,events=events,wall_seconds=round(time.monotonic()-started,2))
+    finally:
+        stop_client(proc)
+        if proc and proc.stdout:
+            proc.stdout.close()
+
+
+def augment_sample(sample, previous):
+    elapsed=sample['monotonic']-previous['monotonic'] if previous else 0
+    before={ (p['pid'],p['start_ticks']):p for p in previous['processes']} if previous else {}
+    same=bool(previous and previous['identity']==sample['identity'])
+    for row in sample['processes']:
+        old=before.get((row['pid'],row['start_ticks'])) if same else None
+        row['cpu_percent_one_core']=None
+        row['io_delta']={}
+        if old and elapsed>0 and row['cpu_ticks']>=old['cpu_ticks']:
+            row['cpu_percent_one_core']=round(100*(row['cpu_ticks']-old['cpu_ticks'])/sample['tickrate']/elapsed,2)
+            row['io_delta']={k:v-old['io'][k] for k,v in row['io'].items()
+                             if k in old['io'] and v>=old['io'][k]}
+    sample['interval_seconds']=round(elapsed,3) if elapsed>0 else None
+    return sample
+
+
+def findings(report):
+    samples=report['samples']; out=[]
+    if not samples:
+        return ['No valid process samples: Codex health is unknown.']
+    history={}
+    for sample in samples:
+        for p in sample['processes']:
+            history.setdefault((p['pid'],p['start_ticks']),[]).append(p)
+    for (pid,_),rows in sorted(history.items()):
+        d=[p for p in rows if p['state']=='D']
+        stopped=[p for p in rows if p['state'] in ('T','t')]
+        thread_d=[p for p in rows if p.get('threads',{}).get('states',{}).get('D',0)>0]
+        prefix='PID %d (%s)'%(pid,rows[-1]['name'])
+        if len(d)>=2:
+            waits=', '.join(sorted({p['wait_channel'] for p in d}))
+            out.append(prefix+' observed in uninterruptible D wait in %d/%d samples (%s). '
+                       'Storage/kernel waiting is a lead, not proof of continuous blocking or the cause of UI delay. '
+                       'Do not start competing Git writes or delete Git locks.'%(len(d),len(samples),waits))
+        elif d:
+            out.append(prefix+' observed once in D wait; repeat sampling before calling this persistent.')
+        if not d and thread_d:
+            out.append(prefix+' had at least one D-wait thread in %d/%d samples even though the leader was not D. Inspect the thread waits; no deadlock was established.'%(len(thread_d),len(samples)))
+        if stopped:
+            out.append(prefix+' observed stopped/traced in %d/%d samples. No signal was sent.'%(len(stopped),len(samples)))
+    root=report.get('target') or {}
+    for sample in samples:
+        r=next((p for p in sample['processes'] if p['pid']==root.get('pid')),None)
+        if r and r.get('tty_nr') and r.get('tpgid',-1)>0 and r.get('pgid')!=r['tpgid']:
+            out.append('Selected Codex is not in its controlling terminal foreground group in at least one sample. '
+                       'This is a job-control lead; do not change the group automatically.')
+            break
+    first,last=samples[0]['system'],samples[-1]['system']
+    for key in ('oom','oom_kill'):
+        a,b=first.get('cgroup_memory_events',{}).get(key),last.get('cgroup_memory_events',{}).get(key)
+        if a is not None and b is not None and b>a:
+            out.append('Sampled cgroup %s increased by %d; this is not attribution to the selected Codex process.'%(key,b-a))
+    if not out:
+        out.append('No repeated D-wait or stopped-process evidence in these samples. '
+                   'This does NOT establish a healthy event loop or a fast provider response.')
+    if report.get('target_ended'):
+        out.append('The selected PID ended or its identity changed. Sampling stopped; a replacement process was not followed.')
+    if any(s.get('truncated') for s in samples):
+        out.append('A process/thread collection was bounded; omitted tasks may hold additional evidence.')
+    out.append('S/futex waiting and zero sampled CPU may be normal. Process age is NOT time spent in its wait state.')
+    out.append('CPU uses counter differences over the displayed interval (one-core scale), not lifetime ps %CPU. '
+               'I/O counters do not prove useful progress; pressure totals are host/cgroup observations, not per-tool attribution.')
+    out.append('No model/API latency was measured. If typing is immediate but work after Enter is slow, '
+               'provider reasoning, request retries, large context, queued work, and tool waits remain possibilities. '
+               'Do not resend the prompt or restart the runner solely on this report.')
+    return out
+
+
+def render(report):
+    lines=['Sprite Codex v67 - response-delay report',
+           'Sprite: '+safe(report['sprite'])+' | Org: '+safe(report.get('org','')),
+           'Target: Linux process identity, NOT Sprite terminal ID: '+json.dumps(report.get('target')),
+           'Mode: read-only metadata. No terminal attachment/input, Git commands, provider calls, credentials, or process control.',
+           'Outcome: '+safe(report.get('outcome','collecting'),500),'']
+    for sample in report['samples']:
+        stamp=dt.datetime.fromtimestamp(sample['epoch'],dt.timezone.utc).isoformat()
+        lines+=['Sample %d at %s; counter interval=%s s'%(sample['index']+1,stamp,sample.get('interval_seconds')),
+                'PID     PPID    STATE CPU%/core RSS MiB  WAIT                        NAME']
+        for p in sample['processes']:
+            cpu='-' if p['cpu_percent_one_core'] is None else str(p['cpu_percent_one_core'])
+            lines.append('%-7s %-7s %-5s %-9s %-8s %-27s %s'%(p['pid'],p['ppid'],p['state'],cpu,p.get('rss_mib','?'),p['wait_channel'],p['name']))
+            if p['pid']==(report.get('target') or {}).get('pid'):
+                lines.append('    pgid=%s foreground_pgid=%s tty_nr=%s'%(p.get('pgid'),p.get('tpgid'),p.get('tty_nr')))
+            if p['io_delta']:
+                lines.append('    io_delta: '+json.dumps(p['io_delta'],sort_keys=True))
+            if p.get('kernel_stack',{}).get('available'):
+                lines.append('    kernel stack symbols: '+', '.join(p['kernel_stack']['functions']))
+            t=p.get('threads') or {}
+            if t.get('available'):
+                lines.append('    sampled thread states='+json.dumps(t['states'])+' waits='+json.dumps(t['waits'])+
+                             (' (truncated)' if t.get('truncated') else ''))
+        for resource in ('cpu','memory','io'):
+            lines.append(resource.upper()+' pressure: '+json.dumps(sample['system']['pressure'].get(resource,{}),sort_keys=True))
+        lines.append('Memory KiB: '+json.dumps(sample['system']['memory_kib'],sort_keys=True))
+        lines.append('Cgroup memory counters: '+json.dumps(sample['system']['cgroup_memory_events'],sort_keys=True));lines.append('')
+    lines+=['Interpretation (observations, not automatic repair):',*findings(report),'',
+            'No conversation, config, log contents, full argv, process environments, clipboard, or repository files were collected.',
+            'Contains Sprite/org names and process metadata; review before sharing. No credentials requested.',
+            'Sampling can wake a cold Sprite and consume compute; it cannot prove earlier uptime.',
+            'Fresh connectivity tests: opening option 8 / --diagnose-session. Automatic keep-awake status: --keep-awake-status.',
+            'No Git lock deletion, forced restart, signal, model change, or interrupted prompt replay was performed.']
+    return '\n'.join(lines)+'\n'
+
+
+class Report:
+    def __init__(self, destination, sprite, org):
+        self.path=Path(tempfile.mkdtemp(prefix='sprite-response-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-',dir=destination))
+        self.path.chmod(0o700)
+        self.data=dict(schema=1,version=67,sprite=sprite,org=org,target=None,samples=[],attempts=[],outcome='inventory',target_ended=False)
+        self.save()
+
+    def save(self):
+        for name,content in (('report.json',json.dumps(self.data,indent=2,allow_nan=False)+'\n'),('report.txt',render(self.data))):
+            fd,temp=tempfile.mkstemp(prefix='.'+name+'-',dir=self.path)
+            try:
+                os.fchmod(fd,0o600)
+                with os.fdopen(fd,'w',encoding='utf-8') as stream:
+                    stream.write(content)
+                os.replace(temp,self.path/name)
+            finally:
+                try:os.unlink(temp)
+                except FileNotFoundError:pass
+
+
+def discover(picker,sprite,report):
+    requested=os.environ.get('SPRITE_RESPONSE_TRANSPORT','auto')
+    if requested not in ('auto','websocket','http-post'):
+        raise ProbeError('SPRITE_RESPONSE_TRANSPORT must be auto, websocket, or http-post.')
+    routes=['websocket','http-post'] if requested=='auto' else [requested]
+    for route in routes:
+        found=[]
+        def receive(kind,value):
+            if kind!='inventory':raise ProbeError('Unexpected event during discovery.')
+            found.append(value)
+        print('       Reading Codex process inventory ('+route+'); no repository or token checks...',flush=True)
+        try:
+            outcome=probe(picker.cli,picker.org,sprite,picker.context,route,{'operation':'inventory'},15,receive)
+            report.data['attempts'].append(outcome);report.save()
+            if len(found)==1 and found[0]['boot_available']:
+                if outcome['cli_exit']:
+                    print('       Inventory received, but CLI returned exit '+str(outcome['cli_exit'])+'.',flush=True)
+                return route,found[0]
+        except ProbeError as exc:
+            report.data['attempts'].append({'route':route,'error':str(exc)});report.save()
+    raise ProbeError('No verified Codex process inventory. Check the LOCAL Sprite login/connection; do not enter a Fly deploy token here.')
+
+
+def choose(picker_module, inventory, requested):
+    rows=inventory['choices']
+    print('\n=== Select the Codex PROCESS to observe (not to attach)',flush=True)
+    for i,r in enumerate(rows,1):
+        print('    %d) PID=%s  parent=%s  state=%s  age=%.0fs  pgid=%s  foreground=%s'%
+              (i,r['pid'],r.get('ppid'),r['state'],r.get('age_seconds',0),r.get('pgid'),r.get('tpgid')),flush=True)
+    if inventory['truncated']:
+        print('       Inventory is bounded and may omit processes.',flush=True)
+    if requested:
+        row=next((r for r in rows if r['pid']==requested),None)
+        if row is None:raise ProbeError('Requested Codex PID is not in this inventory; nothing was substituted.')
+        return row['identity']
+    if not rows:
+        return None
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise ProbeError('Noninteractive response diagnostics need --response-pid PID and SPRITE_NAME; no process was guessed.')
+    while True:
+        answer=picker_module['ask']('  Process number [1]; Q = cancel: ').strip().lower()
+        if answer in ('q','quit'):
+            raise picker_module['Cancelled']()
+        answer=answer or '1'
+        if answer.isdecimal() and 1<=int(answer)<=len(rows):
+            return rows[int(answer)-1]['identity']
+        print('       Select a listed number. No process was changed.',flush=True)
+
+
+def run(picker_module,destination,requested=0):
+    count=integer_env('SPRITE_RESPONSE_SAMPLES',6,2,20)
+    interval=integer_env('SPRITE_RESPONSE_INTERVAL',3,1,10)
+    if (count-1)*interval>120:
+        raise ProbeError('Response sampling window must be at most 120 seconds.')
+    if requested and not os.environ.get('SPRITE_NAME'):
+        raise ProbeError('--response-pid requires SPRITE_NAME to avoid selecting the same PID on another Sprite.')
+    print('\n=== Codex response-delay check (second terminal)',flush=True)
+    print('       No GitHub/Fly-app/model key prompts. Uses existing local Sprite authentication.',flush=True)
+    print('       Keeps the old Codex terminal untouched. Do not submit your prompt again.',flush=True)
+    print('       Choose its current Linux process below; six default samples span about 15 seconds.',flush=True)
+    print('       Fixed metadata reads may wake a cold Sprite and consume compute; no hold is changed.',flush=True)
+    report=None
+    try:
+        with tempfile.TemporaryDirectory(prefix='sprite-response-context-') as context:
+            picker=picker_module['Picker'](context,selection_only=True)
+            sprite=picker.choose_sprite(os.environ.get('SPRITE_NAME',''))
+            report=Report(destination,sprite,os.environ.get('SPRITE_ORG',''))
+            print('       Partial/final report: '+str(report.path/'report.txt'),flush=True)
+            route,inventory=discover(picker,sprite,report)
+            target=choose(picker_module,inventory,requested)
+            if not target:
+                report.data['outcome']='No recognized live Codex process was found; existing files and sessions were left untouched.'
+                report.save();print(report.data['outcome'],flush=True);return 3
+            report.data.update(target=target,outcome='sampling');report.save()
+            print('       Observing PID %d for %d samples, %ds apart. No automatic restart/repair.'%(target['pid'],count,interval),flush=True)
+            def receive(kind,value):
+                if kind=='sample':
+                    if value['identity']!=target or value['index']!=len(report.data['samples']):
+                        raise ProbeError('Process/frame identity changed; refusing to combine samples.')
+                    previous=report.data['samples'][-1] if report.data['samples'] else None
+                    sample=augment_sample(value,previous)
+                    report.data['samples'].append(sample)
+                    root=next((p for p in sample['processes'] if p['pid']==target['pid']),None)
+                    dwaits=[p for p in sample['processes'] if p['state']=='D']
+                    print('       Sample %d/%d: Codex state=%s; descendants=%d; D-wait tasks=%d'%
+                          (value['index']+1,count,root['state'] if root else 'unavailable',max(0,len(sample['processes'])-1),len(dwaits)),flush=True)
+                    for p in dwaits[:8]:
+                        print('         PID %d %s: D / %s'%(p['pid'],p['name'],p['wait_channel']),flush=True)
+                elif kind=='ended':
+                    report.data['target_ended']=True
+                    report.data['outcome']='Selected process ended or identity changed; no replacement followed.'
+                elif kind=='done':
+                    if value['samples']!=count or len(report.data['samples'])!=count:
+                        raise ProbeError('Incomplete sample count; no completion claim.')
+                    report.data['outcome']='completed'
+                else:raise ProbeError('Unexpected event during sampling.')
+                report.save()
+            request=dict(operation='sample',identity=target,count=count,interval=interval)
+            result=probe(picker.cli,picker.org,sprite,context,route,request,(count-1)*interval+35,receive)
+            report.data['attempts'].append(result)
+            if result.get('cli_exit')!=0:
+                print('       Diagnostic client exit: '+str(result.get('cli_exit'))+' (recorded independently of received samples).',flush=True)
+            if report.data['outcome']=='sampling':
+                raise ProbeError('Connection ended without completion; partial samples retained. No probe was replayed.')
+            report.save()
+            print('\n=== Response-delay findings',flush=True)
+            for line in findings(report.data):print('       '+line,flush=True)
+            print('       Report: '+str(report.path/'report.txt'),flush=True)
+            return 0 if report.data['outcome']=='completed' else 3
+    except picker_module['Cancelled']:
+        if report:
+            report.data['outcome']='cancelled';report.save()
+        print('       Response check cancelled; Codex unchanged.',flush=True);return 0
+    except BaseException as exc:
+        if report:
+            report.data['outcome']=str(exc) if isinstance(exc,ProbeError) else 'interrupted-or-local/probe-error; samples are partial'
+            try:report.save()
+            except OSError:pass
+            print('       Partial report: '+str(report.path/'report.txt'),file=sys.stderr,flush=True)
+        raise
+
+
+def main():
+    source_dir,destination,requested=sys.argv[1:4]
+    picker_module=runpy.run_path(str(Path(source_dir)/'picker.py'))
+    try:
+        return run(picker_module,destination,int(requested or '0'))
+    except picker_module['AttachError'] as exc:
+        print('error: '+str(exc),file=sys.stderr);return 1
+
+
+if __name__=='__main__':
+    def interrupted(*_):raise KeyboardInterrupt
+    for sig in (signal.SIGHUP,signal.SIGTERM):signal.signal(sig,interrupted)
+    try:raise SystemExit(main())
+    except KeyboardInterrupt:
+        print('       Diagnostic cancelled; existing cloud process was not signalled.',file=sys.stderr);raise SystemExit(130)
+    except ProbeError as exc:
+        print('error: '+str(exc),file=sys.stderr);raise SystemExit(1)
+    except (OSError,ValueError,TypeError,KeyError):
+        print('error: local/metadata operation failed; no raw error or credential output was saved.',file=sys.stderr);raise SystemExit(1)
+RESPONSE_DIAGNOSTICS67_PY
+}
+
+run_response_diagnostics() (
+  local work
+  command -v python3 >/dev/null 2>&1 || { echo 'error: local python3 is required' >&2; exit 127; }
+  work=$(mktemp -d)
+  trap 'rm -rf -- "$work"' EXIT
+  attach_only_python >"$work/picker.py"
+  response_diagnostics_python >"$work/response.py"
+  python3 -I -S -u "$work/response.py" "$work" "$OUTPUT_HOST_DIR" "$RESPONSE_PID"
+)
+
+# Explicit diagnostics exit before normal credentials, repository setup and agent launch.
+if [[ $RUN_MODE == response-diagnostics ]]; then
+  if [[ -n $ATTACH_SESSION_ID ]] || (( _OUTPUT_DIR_SELECTED || _JSON_OUTPUT_SELECTED || _FILE_WORKDIR_SELECTED )); then
+    echo 'error: --diagnose-response accepts --response-pid, not session/path/report selectors' >&2; exit 2
+  fi
+  if run_response_diagnostics; then exit 0; else exit $?; fi
+fi
+
+session_diagnostics_python() {
+  cat <<'SESSION_DIAGNOSTICS_PY'
+"""Independent v65 terminal/transport diagnostics. No provider keys or TUI attach.
+
+Only fixed probe traffic; stdout from arbitrary programs is not displayed. May
+wake the Sprite. Never reads process environments, command arguments, configs,
+conversation files or user clipboard. Remote probes self-expire by alarm.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import secrets
+import select
+import signal
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import pty
+import termios
+import tty
+
+REMOTE_METRICS = r'''
+import os,json,time,signal,sys
+from pathlib import Path
+signal.alarm(8)
+nonce=sys.argv[1]
+def text(path,limit=32768):
+    try:
+        with open(path) as f:return f.read(limit)
+    except OSError:return ''
+def stats():
+    result={}
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():continue
+        try:
+            raw=(entry/'stat').read_text(); tail=raw[raw.rfind(')')+2:].split()
+            # comm only, never /proc/PID/cmdline or /proc/PID/environ.
+            name=(entry/'comm').read_text().strip()[:48]
+            result[int(entry.name)]=(int(tail[19]),int(tail[11])+int(tail[12]),
+                                     tail[0],int(tail[1]),int(tail[21]),name)
+        except (OSError,ValueError,IndexError):pass
+    return result
+before=stats(); began=time.monotonic(); time.sleep(.3); after=stats(); elapsed=time.monotonic()-began
+rows=[]
+for pid,v in after.items():
+    old=before.get(pid)
+    pct=100*(v[1]-old[1])/os.sysconf('SC_CLK_TCK')/elapsed if old and old[0]==v[0] else None
+    rows.append(dict(pid=pid,name=v[5],state=v[2],ppid=v[3],rss_mib=round(v[4]*os.sysconf('SC_PAGE_SIZE')/1048576,1),
+                     cpu_pct=round(pct,1) if pct is not None else None))
+rows.sort(key=lambda r:r['cpu_pct'] or 0,reverse=True)
+selected=rows[:8]
+for r in rows:
+    if any(x in r['name'].lower() for x in ('codex','node','python')) and r not in selected and len(selected)<18:selected.append(r)
+mem={}
+for line in text('/proc/meminfo').splitlines():
+    fields=line.split()
+    if fields[0].rstrip(':') in ('MemTotal','MemAvailable','SwapTotal','SwapFree'):
+        mem[fields[0].rstrip(':')]=int(fields[1])
+v=os.statvfs(str(Path.home()))
+print('SPRITE_LATENCY_METRICS='+json.dumps(dict(nonce=nonce,uptime=text('/proc/uptime',100).split()[0],
+    load=os.getloadavg(),cpu_count=os.cpu_count(),memory_kib=mem,home_free_gib=round(v.f_bavail*v.f_frsize/(1024**3),2),
+    processes=selected,oom_events=text('/sys/fs/cgroup/memory.events',4096)),separators=(',',':')),flush=True)
+'''
+REMOTE_ECHO = r'''
+import os,sys,signal
+signal.alarm(20)
+nonce=sys.argv[1]
+if os.isatty(0):
+    import tty,termios
+    tty.setraw(0,when=termios.TCSANOW)
+os.write(1,('SPRITE_ECHO_READY:'+nonce+'\n').encode())
+for n in range(3):
+    buf=bytearray()
+    while not buf.endswith(b'\n') and len(buf)<4096:
+        piece=os.read(0,1)
+        if not piece:raise SystemExit(2)
+        buf.extend(piece)
+    if bytes(buf)!=('probe:'+nonce+':'+str(n)+'\n').encode():raise SystemExit(3)
+    os.write(1,('SPRITE_ECHO_REPLY:'+nonce+':'+str(n)+'\n').encode())
+'''
+
+def safe(value,limit=160):
+    return ''.join(c if 32<=ord(c)<127 else '?' for c in str(value))[:limit]
+
+
+def stop(proc):
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(proc.pid,signal.SIGTERM);proc.wait(timeout=.5)
+        except subprocess.TimeoutExpired:
+            try:os.killpg(proc.pid,signal.SIGKILL)
+            except ProcessLookupError:pass
+            proc.wait(timeout=1)
+        except ProcessLookupError:pass
+
+
+def read_until(fd,marker,buffer,deadline):
+    while time.monotonic()<deadline:
+        if marker in buffer:return
+        if len(buffer)>65536:raise RuntimeError('Probe response exceeded its safety limit')
+        if select.select([fd],[],[],min(.2,max(0,deadline-time.monotonic())))[0]:
+            try:data=os.read(fd,4096)
+            except BlockingIOError:continue
+            except OSError:raise RuntimeError('Probe terminal/stream closed') from None
+            if not data:raise RuntimeError('Probe stream closed before its marker')
+            buffer.extend(data)
+    raise TimeoutError('Probe deadline expired')
+
+
+def echo_probe(cli,org,sprite,context,use_tty,timeout=6):
+    """Three fixed-message RTTs, not shell execution or a model request."""
+    nonce=secrets.token_hex(12)
+    cmd=[cli,'exec',*org,'-s',sprite,'--no-port-forward']
+    if use_tty:cmd.append('--tty')
+    cmd+=['--','python3','-c',REMOTE_ECHO,nonce]
+    proc=None; master=slave=None; result={'kind':'fresh TTY' if use_tty else 'WebSocket non-TTY','ok':False}
+    try:
+        started=time.monotonic()
+        if use_tty:
+            master,slave=pty.openpty()
+            tty.setraw(slave,when=termios.TCSANOW)
+            proc=subprocess.Popen(cmd,stdin=slave,stdout=slave,stderr=subprocess.DEVNULL,cwd=context,start_new_session=True)
+            os.close(slave);slave=None
+            readfd=writefd=master
+        else:
+            proc=subprocess.Popen(cmd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                                  cwd=context,start_new_session=True)
+            readfd=proc.stdout.fileno();writefd=proc.stdin.fileno()
+        buffer=bytearray();read_until(readfd,('SPRITE_ECHO_READY:'+nonce+'\n').encode(),buffer,time.monotonic()+timeout)
+        result['startup_ms']=round((time.monotonic()-started)*1000,1)
+        samples=[]
+        for n in range(3):
+            buffer.clear();began=time.monotonic()
+            os.write(writefd,('probe:'+nonce+':'+str(n)+'\n').encode())
+            read_until(readfd,('SPRITE_ECHO_REPLY:'+nonce+':'+str(n)+'\n').encode(),buffer,time.monotonic()+timeout)
+            samples.append(round((time.monotonic()-began)*1000,2))
+        result.update(ok=True,rtt_ms=samples,median_ms=statistics.median(samples),max_ms=max(samples))
+        try:proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:pass
+    except (OSError,RuntimeError,TimeoutError,subprocess.SubprocessError) as exc:
+        result['error']=type(exc).__name__+': probe did not complete; no Codex session was touched'
+    finally:
+        stop(proc)
+        for fd in (slave,master):
+            if fd is not None:
+                try:os.close(fd)
+                except OSError:pass
+        if proc:
+            for f in (proc.stdin,proc.stdout):
+                if f:f.close()
+    return result
+
+
+def capture(cmd,context,timeout):
+    """Bounded, nonce-framed command output; remote fixed probe is <32 KiB."""
+    proc=subprocess.Popen(cmd,cwd=context,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL,start_new_session=True)
+    data=bytearray();deadline=time.monotonic()+timeout
+    try:
+        while time.monotonic()<deadline:
+            if select.select([proc.stdout],[],[],.1)[0]:
+                chunk=os.read(proc.stdout.fileno(),8192)
+                if not chunk:break
+                data.extend(chunk)
+                if len(data)>65536:raise RuntimeError('Bounded diagnostic response exceeded limit')
+            if proc.poll() is not None:
+                # The next select/read drains the already-buffered result.
+                continue
+        else:raise TimeoutError('Diagnostic command deadline expired')
+        try:proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:pass
+        return proc.returncode,bytes(data)
+    finally:
+        stop(proc);proc.stdout.close()
+
+
+def metrics_probe(cli,org,sprite,context,http=False):
+    nonce=secrets.token_hex(12)
+    cmd=[cli,'exec',*org,'-s',sprite,'--no-port-forward']
+    if http:cmd.append('--http-post')
+    cmd+=['--','python3','-c',REMOTE_METRICS,nonce]
+    started=time.monotonic()
+    try:
+        rc,raw=capture(cmd,context,12)
+        for line in raw.splitlines():
+            if line.startswith(b'SPRITE_LATENCY_METRICS='):
+                value=json.loads(line.split(b'=',1)[1])
+                if value.get('nonce')==nonce:
+                    return dict(ok=True,data=value,wall_ms=round((time.monotonic()-started)*1000,1),cli_exit=rc)
+        return dict(ok=False,error='No matching metrics marker; CLI exit '+str(rc))
+    except (OSError,ValueError,RuntimeError,TimeoutError,subprocess.SubprocessError):
+        return dict(ok=False,error='Probe failed or timed out; diagnostic state unknown')
+
+
+def describe_echo(result):
+    if result.get('ok'):
+        print('       %s: startup %.1f ms; round trips %s ms (median %.2f, max %.2f)'%
+              (result['kind'],result['startup_ms'],result['rtt_ms'],result['median_ms'],result['max_ms']),flush=True)
+    else:print('       '+result['kind']+': '+result.get('error','unverified'),flush=True)
+
+
+def main():
+    source_dir=sys.argv[1]
+    picker_module=runpy.run_path(str(Path(source_dir)/'picker.py'))
+    try:
+        return run(picker_module)
+    except picker_module['Cancelled']:
+        print('       Diagnostics cancelled. No existing agent was changed.',flush=True)
+        return 0
+    except picker_module['AttachError'] as exc:
+        print('error: '+str(exc),file=sys.stderr)
+        return 1
+
+
+def run(picker_module):
+    print('\n=== Sprite terminal responsiveness diagnostics',flush=True)
+    print('       Separate FIXED probes only. No Codex attach/launch, keys, Git writes, terminal kill, or updates.',flush=True)
+    print('       This may wake a cold Sprite. Each probe has a deadline; remote probes also self-expire.',flush=True)
+    print('       No clipboard, user keypresses, prompt text, config contents, process arguments or environments are recorded.',flush=True)
+    with tempfile.TemporaryDirectory(prefix='sprite-diagnostics-context-') as context:
+        picker=picker_module['Picker'](context,selection_only=True)
+        sprite=picker.choose_sprite(os.environ.get('SPRITE_NAME',''))
+        picker.capture(['use',*picker.org,sprite])
+        print('       Sprite: '+safe(sprite)+'; local interactive path: '+'direct (original stdin/stdout/stderr)',flush=True)
+        try:
+            _,raw=capture([picker.cli,'--version'],context,3)
+            match=re.search(rb'\b[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?',raw)
+            print('       Local Sprite CLI version: '+(safe(match[0].decode()) if match else 'not determined'),flush=True)
+        except (OSError,TimeoutError,RuntimeError):
+            print('       Local Sprite CLI version: not determined',flush=True)
+        try:
+            rows,excluded=picker.sessions(sprite)
+            print('       Listed terminal candidates: '+str(len(rows))+' (listing is NOT a responsiveness check)',flush=True)
+            for r in rows[:20]:
+                print('         '+safe(r['id'])+' — '+safe(r['label']),flush=True)
+        except picker_module['AttachError']:
+            print('       Terminal inventory unavailable; continuing independent probes.',flush=True)
+        print('\n       Testing independent WebSocket command round trips...',flush=True)
+        ws=echo_probe(picker.cli,picker.org,sprite,context,False);describe_echo(ws)
+        print('       Testing a fresh, self-expiring raw terminal (not your Codex TTY)...',flush=True)
+        terminal=echo_probe(picker.cli,picker.org,sprite,context,True);describe_echo(terminal)
+        print('       Collecting read-only CPU/memory/disk snapshot...',flush=True)
+        data=metrics_probe(picker.cli,picker.org,sprite,context,http=True)
+        route='HTTP POST'
+        if not data['ok']:
+            print('       HTTP POST metrics unavailable (possibly unsupported); trying read-only WebSocket probe.',flush=True)
+            data=metrics_probe(picker.cli,picker.org,sprite,context,http=False);route='WebSocket'
+        if data['ok']:
+            d=data['data'];print('       '+route+' command completed in '+str(data['wall_ms'])+' ms (includes .3 s CPU sampling).',flush=True)
+            print('       CPU count: '+safe(d.get('cpu_count'))+'; load averages: '+safe(d.get('load')),flush=True)
+            print('       Memory KiB: '+safe(d.get('memory_kib'),300)+'; home free GiB: '+safe(d.get('home_free_gib')),flush=True)
+            print('       Process snapshot (one brief sample; a sleeping process is not necessarily hung):',flush=True)
+            print('       PID      PPID    STATE   CPU%    RSS MiB  NAME',flush=True)
+            for p in d.get('processes',[])[:18]:
+                print('       %-8s %-7s %-7s %-7s %-8s %s'%(safe(p.get('pid')),safe(p.get('ppid')),safe(p.get('state')),
+                      safe(p.get('cpu_pct')),safe(p.get('rss_mib')),safe(p.get('name'),48)),flush=True)
+            # Only recognized numeric counters, never arbitrary file contents.
+            for line in str(d.get('oom_events','')).splitlines():
+                if re.fullmatch(r'(low|high|max|oom|oom_kill|oom_group_kill|sock_throttled) [0-9]+',line):
+                    print('       cgroup memory event counter: '+line,flush=True)
+            print('       Nonzero OOM counters are historical totals, not proof of a current OOM.',flush=True)
+        else:print('       '+data.get('error','Metrics unavailable'),flush=True)
+        print('\n=== How to interpret this run',flush=True)
+        if terminal['ok'] and terminal['max_ms']<1000:
+            print('       The NEW raw TTY returned fixed bytes quickly during this test. This does NOT prove the old Codex TTY is healthy.',flush=True)
+            print('       If Codex alone remains slow, investigate its busy renderer/event loop, the old PTY, and conversation load.',flush=True)
+        elif ws['ok'] and not terminal['ok']:
+            print('       Non-TTY command traffic worked but the fresh TTY did not: investigate the interactive CLI/transport path.',flush=True)
+        else:
+            print('       Slow/failed independent probes also implicate the network/CLI/cloud exec path; changing model keys will not diagnose it.',flush=True)
+        print('       v66 already uses the direct terminal path. Compare direct Sprite CLI attachment to the SAME existing session, one viewer at a time.',flush=True)
+        print('       Ctrl+\\ detaches a viewer; it is not a Codex restart. Unreachable remote probes self-expire; no persistent monitor is installed.',flush=True)
+    return 0
+
+
+if __name__=='__main__':
+    def interrupted(*_):raise KeyboardInterrupt
+    for sig in (signal.SIGTERM,signal.SIGHUP):signal.signal(sig,interrupted)
+    try:raise SystemExit(main())
+    except KeyboardInterrupt:raise SystemExit(130)
+    except (OSError,RuntimeError,ValueError) as exc:
+        print('error: bounded session diagnostics could not complete ('+type(exc).__name__+'). No existing agent was changed.',file=sys.stderr)
+        raise SystemExit(1)
+SESSION_DIAGNOSTICS_PY
+}
+
+run_session_diagnostics() (
+  local work
+  command -v python3 >/dev/null 2>&1 || { echo 'error: python3 is required' >&2; exit 127; }
+  work=$(mktemp -d)
+  trap 'rm -rf -- "$work"' EXIT
+  attach_only_python >"$work/picker.py"
+  session_diagnostics_python >"$work/diagnostics.py"
+  python3 -I -S -u "$work/diagnostics.py" "$work"
+)
+
+if [[ $RUN_MODE == session-diagnostics ]]; then
+  if [[ -n $ATTACH_SESSION_ID ]] || (( _OUTPUT_DIR_SELECTED || _JSON_OUTPUT_SELECTED || _FILE_WORKDIR_SELECTED )); then
+    echo 'error: --diagnose-session does not accept session/path/report selectors' >&2; exit 2
+  fi
+  if run_session_diagnostics; then exit 0; else exit $?; fi
+fi
+
+if [[ $RUN_MODE == keepalive ]]; then
+  if [[ -n $ATTACH_SESSION_ID ]] || (( _OUTPUT_DIR_SELECTED || _JSON_OUTPUT_SELECTED || _FILE_WORKDIR_SELECTED )); then
+    echo "error: keepalive modes do not accept session/path/report selectors" >&2; exit 2
+  fi
+  if run_keepalive; then exit 0; else exit $?; fi
+fi
 
 if [[ $RUN_MODE == guard-status ]]; then
   if [[ -n $ATTACH_SESSION_ID ]] || (( _OUTPUT_DIR_SELECTED || _JSON_OUTPUT_SELECTED || _FILE_WORKDIR_SELECTED )); then
@@ -7750,11 +9442,11 @@ prompt_validated_secret() {
         printf '\n  %s did not pass validation.\n' "$name"
       fi
       if [[ $kind == fly ]]; then
-        printf '    1) Enter a replacement token\n    2) Retry the same token [default]\n    3) Abort without launching\n    4) Change the target Fly app (keep this token)\n'
-        printf '    5) Back up/reset diagnosed corrupt Fly config (confirmation required)\n'
+        startup_menu_line '    1) Enter a replacement token\n    2) Retry the same token [default]\n    3) Abort without launching\n    4) Change the target Fly app (keep this token)'
+        startup_menu_line '    5) Back up/reset diagnosed corrupt Fly config (confirmation required)'
         printf '  Select [1-5]: '
       else
-        printf '    1) Enter a replacement token [default]\n    2) Retry the same token\n    3) Abort without launching\n'
+        startup_menu_line '    1) Enter a replacement token [default]\n    2) Retry the same token\n    3) Abort without launching'
         printf '  Select [1-3]: '
       fi
       IFS= read -r choice || die "credential validation cancelled; no new agent launched"
@@ -10121,10 +11813,10 @@ openai_preflight_recovery() {
 
   while true; do
     printf '\n  OpenAI recovery:\n'
-    printf '    1) Run device-code login again, then retry preflight [default]\n'
-    printf '    2) Clear stored Codex login on this Sprite, device-login again, then retry\n'
-    printf '    3) Retry preflight without changing login\n'
-    printf '    4) Abort\n'
+    startup_menu_line '    1) Run device-code login again, then retry preflight [default]'
+    startup_menu_line '    2) Clear stored Codex login on this Sprite, device-login again, then retry'
+    startup_menu_line '    3) Retry preflight without changing login'
+    startup_menu_line '    4) Abort'
     printf '  Select [1-4]: '
     IFS= read -r choice || true
     case "${choice,,}" in
@@ -11616,6 +13308,7 @@ start_native_agent_session() {
   (
     for _ in $(seq 1 30); do sleep 1; row=$(find_native_session_row "$SESSION_TAG" "" "$REMOTE_WORKDIR" || true); if [[ -n $row ]]; then IFS=$'\t' read -r _ sid _ _ _ <<<"$row"; [[ -n $sid ]] && update_state_session_id "$sid" >/dev/null 2>&1 || true; exit 0; fi; done
   ) >/dev/null 2>&1 & watcher=$!
+  note "Keep-awake is not a Codex progress check; use --diagnose-response in a second terminal for delays after Enter."
   note "starting $AGENT_LABEL directly in a native detachable Sprite TTY"; note "detach with Ctrl+\\; no tmux key prefix or mouse mode is involved"
   local -a terminal_flags=()
   [[ $AGENT_KIND != codex ]] || terminal_flags+=(--codex-paste)
