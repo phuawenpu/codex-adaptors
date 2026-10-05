@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# v68: explicit paste ownership learned from Local Codex 1.0.6.
+# Native Sprite sessions stay native (NO new tmux layer). Direct descriptors,
+# no input/output relay, clipboard read, synthetic paste end, Enter or retry replay.
+# --paste-mode bracketed (default) prepares known Codex clients; native delegates
+# preparation to the app. --paste-status is LOCAL policy info, not a live test.
+# Menus turn mode 2004 off after EVERY interactive client, including generic
+# shells/logins, and before local input(). No ordinary input queue is flushed.
+# Separate file-mode Bash explicitly enables Readline paste for bracketed policy
+# without changing dotfiles. Native mode leaves Bash's own Readline defaults.
+# No tmux list-keys parsing/binding gate or global capability/key rewrite is added.
+# A local mode write is a request, NOT proof of terminal support, delivery or health.
+# Cloud guard, timers, credential checks, Git sync and provider launchers unchanged.
+#
 # v67: distinguish live typing from delayed work AFTER Enter. The direct v66
 # terminal and clipboard implementation is retained; no new terminal relay,
 # input filter, automatic agent restart, Git operation, or model-setting change.
@@ -21,8 +34,8 @@
 # Startup still checks local prerequisites and can restore line input for menus.
 # --repair-terminal is an EXPLICIT local-only repair, never an attach/retry hook.
 # Legacy SPRITE_TTY_MODE=responsive now maps to native with a startup notice;
-# SPRITE_BRACKETED_PASTE=auto (default) enables paste framing; value never leaves
-# all paste-mode control to the native client.
+# Legacy SPRITE_BRACKETED_PASTE=auto/never map to bracketed/native during
+# connections; LOCAL menu cleanup still disables mode 2004 in both policies.
 # SPRITE_TERMINAL_MODE=plain skips local mouse cleanup, not clipboard support.
 # Keep-awake, Git, credentials, providers, files and independent probes retained.
 # This removes identified compatibility risks, not a proven cure for every
@@ -154,7 +167,7 @@
 # reject a stale session. No restart, kill, key recovery or new launch is automatic.
 # API/SDK reference: https://sprites.dev/api/sprites/exec
 # https://github.com/superfly/sprites-go/blob/main/session.go
-# sprite-codex-v67.sh — paste-handoff revision based on v61
+# sprite-codex-v68.sh — paste-handoff revision based on v61
 #
 # Existing single-Sprite bootstrap: OpenAI/Codex or official Kimi Code CLI,
 # GitHub/Fly environment credentials, workspace sync, optional pushes,
@@ -276,17 +289,17 @@
 # installed or started. Model IDs, endpoints, context and reasoning are overridable.
 #
 # Usage:
-#   bash sprite-codex-v67.sh                       # Attach / Normal setup / Quit
-#   bash sprite-codex-v67.sh --attach-only         # no keys or bootstrap setup
-#   SPRITE_NAME=my-sprite bash sprite-codex-v67.sh --attach-only --session-id 1847
-#   bash sprite-codex-v67.sh --download-output     # download ~/output as local ZIP
-#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v67.sh --download-output
-#   bash sprite-codex-v67.sh --bootstrap           # old normal workflow
-#   bash sprite-codex-v67.sh --show-models          # no API calls
-#   bash sprite-codex-v67.sh --test-models          # host API tests only
-#   bash sprite-codex-v67.sh --test-models-sprite   # API tests on one Sprite only
-#   bash sprite-codex-v67.sh --test-models-before-run
-#   bash sprite-codex-v67.sh --test-models --json-output ./model-tests.json
+#   bash sprite-codex-v68.sh                       # Attach / Normal setup / Quit
+#   bash sprite-codex-v68.sh --attach-only         # no keys or bootstrap setup
+#   SPRITE_NAME=my-sprite bash sprite-codex-v68.sh --attach-only --session-id 1847
+#   bash sprite-codex-v68.sh --download-output     # download ~/output as local ZIP
+#   SPRITE_OUTPUT_DIR=/output bash sprite-codex-v68.sh --download-output
+#   bash sprite-codex-v68.sh --bootstrap           # old normal workflow
+#   bash sprite-codex-v68.sh --show-models          # no API calls
+#   bash sprite-codex-v68.sh --test-models          # host API tests only
+#   bash sprite-codex-v68.sh --test-models-sprite   # API tests on one Sprite only
+#   bash sprite-codex-v68.sh --test-models-before-run
+#   bash sprite-codex-v68.sh --test-models --json-output ./model-tests.json
 #
 # API tests validate completed replies, SSE streaming and a two-request function
 # call round trip; all providers are attempted. Exit 0=all pass, 1=failed/missing
@@ -459,6 +472,59 @@ def _local_terminal_emit(data, handles=None):
             _tty_os.close(private)
 
 
+def _paste_mode():
+    """Invocation policy only: explicit new setting > legacy alias > bracketed.
+
+    native means the application owns paste mode DURING its connection. It is not
+    forced plain paste: an application may still enable mode 2004 itself.
+    """
+    value = _tty_os.environ.get('SPRITE_PASTE_MODE', '')
+    if value:
+        if value not in ('bracketed', 'native'):
+            raise ValueError('SPRITE_PASTE_MODE must be bracketed or native.')
+        return value
+    legacy = _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto')
+    if legacy not in ('auto', 'never'):
+        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never (legacy aliases).')
+    return 'bracketed' if legacy == 'auto' else 'native'
+
+
+def local_paste_menu():
+    """End mode-2004 ownership at a LOCAL menu boundary; never flush or read stdin.
+
+    A generic shell/login/tmux client can enable paste even when this wrapper did
+    not. Plain input() / Bash read menus do not accept bracketed-paste events.
+    Only an output mode-disable is written; no paste-end marker is sent to Codex.
+    """
+    if _tty_os.environ.get('TERM', '') in ('', 'dumb'):
+        return False
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    module = _tty_sys.modules.get('readline')
+    if module is not None:
+        try:
+            module.parse_and_bind('set enable-bracketed-paste off')
+        except (AttributeError, ValueError, RuntimeError):
+            pass
+    return _local_terminal_emit(_LOCAL_PASTE_OFF, handles)
+
+
+def local_paste_status():
+    """Policy report only: no terminal query/input read, credentials or cloud call."""
+    _terminal_settings()
+    print('Sprite Codex v68: clipboard policy (LOCAL only).', flush=True)
+    print('  Selected policy: ' + _paste_mode(), flush=True)
+    print('  Codex native terminal: direct stdin/stdout/stderr; no input/output relay.')
+    print('  bracketed: request mode 2004 before recognized Codex connections/retries.')
+    print('  native: no wrapper preparation; application/client may enable paste themselves.')
+    print('  File-mode Bash: explicit Readline bracketed paste in bracketed mode.')
+    print('  Local menus: mode 2004 disabled before reading choices and after every client.')
+    print('  tmux: not used by native Sprite sessions; legacy tmux settings are unchanged.')
+    print('  No terminal response, clipboard content, remote app state or payload was tested.')
+    return 0
+
+
 def _terminal_settings():
     """Accept old exported settings, but never bring back the removed bridge."""
     path = _tty_os.environ.get('SPRITE_TTY_MODE', 'native')
@@ -467,8 +533,7 @@ def _terminal_settings():
         raise ValueError('SPRITE_TTY_MODE must be native or direct (legacy responsive maps to native).')
     if menu not in ('plain', 'auto'):
         raise ValueError('SPRITE_TERMINAL_MODE must be plain or auto.')
-    if _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') not in ('auto', 'never'):
-        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never.')
+    _paste_mode()
     return path, menu
 
 
@@ -492,7 +557,9 @@ def local_startup(diagnostics=False):
             attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
         state = 'ready; repaired leftover raw/no-echo input for local menus' if repaired else 'ready'
-    print('Sprite Codex v67: local startup ready.', flush=True)
+    # Local startup is a menu boundary, not the remote app's initialization.
+    local_paste_menu()
+    print('Sprite Codex v68: local startup ready.', flush=True)
     if path == 'responsive':
         print('       Legacy responsive setting ignored: v66 uses the direct terminal path.', flush=True)
     if diagnostics:
@@ -505,7 +572,7 @@ def local_startup(diagnostics=False):
         print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
         print('  Local terminal: ' + state, flush=True)
         print('  Interactive path: direct inherited stdin/stdout/stderr; no display relay.', flush=True)
-        print('  Paste framing: ' + _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') + ' (auto enables it for recognized Codex terminals).', flush=True)
+        print('  Paste policy: ' + _paste_mode() + ' (native application processing; no clipboard reader).', flush=True)
         print('  Screen/keyboard protocols: owned by Sprite/Codex; no broad automatic reset.', flush=True)
         print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
         print('  No authentication, cloud health, or running session was tested.', flush=True)
@@ -575,14 +642,17 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
             old_handlers[signum] = _tty_signal.signal(signum, interrupted)
         if (bracketed_paste and handles is not None and
-                _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') == 'auto' and
+                _paste_mode() == 'bracketed' and
                 _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
             paste_enabled = _local_terminal_emit(_LOCAL_PASTE_ON, handles)
             if paste_enabled:
-                print('       Clipboard: bracketed paste enabled; wait for the Codex input box before pasting.', flush=True)
+                print('       Clipboard: bracketed paste requested for Codex; wait for its input box before pasting.', flush=True)
+                print('       Native client/application processes the paste. This is not delivery or responsiveness verification.', flush=True)
             else:
                 print('warning: local paste-mode write was not confirmed; attachment still uses the native terminal.',
                       file=_tty_sys.stderr, flush=True)
+        elif bracketed_paste and _paste_mode() == 'native':
+            print('       Clipboard: application-controlled mode; no wrapper paste enable request.', flush=True)
         # Keep all THREE descriptors unchanged and on the original terminal.
         # No shell=True, new session, extra PTY, stdout capture, or input monitor.
         child = _tty_subprocess.Popen(argv, cwd=cwd)
@@ -618,7 +688,9 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
                 except (OSError, _tty_termios.error):
                     pass
             if handles is not None:
-                cleanup = _LOCAL_PASTE_OFF if paste_enabled else b''
+                # Always close the paste protocol before LOCAL menus, even if a
+                # shell/login/tmux client (not us) enabled it. No queued input read.
+                cleanup = _LOCAL_PASTE_OFF if _tty_os.environ.get('TERM', '') not in ('', 'dumb') else b''
                 if (bracketed_paste and menu_mode == 'auto' and
                         _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
                     cleanup += _LOCAL_MENU_MOUSE_OFF
@@ -631,6 +703,7 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
 def local_menu_input(prompt):
     """Reject a control-contaminated answer, not the caller's unread queue."""
     while True:
+        local_paste_menu()
         answer = input(prompt)
         tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
         tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
@@ -722,8 +795,10 @@ print('Local terminal input/display modes reset. No Sprite command was run.')
 
 show_usage() {
   cat <<'HELP'
-Usage: bash sprite-codex-v67.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
+Usage: bash sprite-codex-v68.sh [option] [--output-dir PATH] [--json-output PATH | --session-id ID]
 
+  --paste-mode MODE        bracketed (default) or native; invocation only.
+  --paste-status           Show LOCAL paste policy only; no Sprite/login/query.
   --diagnose-response      Sample live Codex/child waits from a second terminal; no keys.
   --response-pid PID       Optional exact Linux Codex PID; requires --diagnose-response
                            and SPRITE_NAME (not a Sprite terminal-session ID).
@@ -764,8 +839,13 @@ v66: interactive clients use the original stdin/stdout/stderr, as in v58.
 No extra local attachment PTY, output filter, imposed raw mode, broad screen/key
 reset, input flush or paste replay. The native client owns input/output directly.
 SPRITE_TTY_MODE=native|direct are accepted; legacy responsive maps to native.
-SPRITE_BRACKETED_PASTE=auto (default) enables framing for recognized Codex clients.
-SPRITE_BRACKETED_PASTE=never leaves mode control to the client for comparison.
+SPRITE_PASTE_MODE=bracketed (default) requests framing for recognized Codex clients.
+--paste-mode overrides SPRITE_PASTE_MODE; then legacy SPRITE_BRACKETED_PASTE=auto
+or SPRITE_BRACKETED_PASTE=never supplies bracketed/native when the new key is unset.
+native delegates preparation to the app; it is NOT a forced plain-paste switch.
+Local menus turn framing off after EVERY client and before input(), in either mode.
+File-mode Bash enables Readline paste in bracketed mode without changing dotfiles.
+--paste-status reports policy, not clipboard delivery, terminal support or cloud health.
 SPRITE_TERMINAL_MODE=auto (default) disables leftover mouse reports ONLY on return
 to local menus. plain skips that mouse cleanup, but does not disable paste support.
 Use a fresh local Terminal when migrating. Full --repair-terminal is EXPLICIT
@@ -1004,6 +1084,7 @@ KEEPALIVE_HOURS=""
 MODEL_TEST_MODE="${MODEL_TEST_MODE:-ask}"
 MODEL_TEST_JSON="${MODEL_TEST_JSON:-}"
 _MODE_SELECTED=0
+_PASTE_MODE_SELECTED=0
 _JSON_OUTPUT_SELECTED=0
 ATTACH_SESSION_ID=""
 RESPONSE_PID=""
@@ -1020,6 +1101,10 @@ _FILE_WORKDIR_SELECTED=0
 while (($#)); do
   case "$1" in
     --help|-h) show_usage; exit 0 ;;
+    --paste-mode)
+      [[ $# -ge 2 && $_PASTE_MODE_SELECTED == 0 ]] || { echo 'error: --paste-mode requires one mode' >&2; exit 2; }
+      case "$2" in bracketed|native) ;; *) echo 'error: --paste-mode must be bracketed or native' >&2; exit 2 ;; esac
+      SPRITE_PASTE_MODE=$2; export SPRITE_PASTE_MODE; _PASTE_MODE_SELECTED=1; shift 2 ;;
     --keepalive|--keepalive-start|--keepalive-stop|--keepalive-status|--keepalive-inventory|--manage-session)
       (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
       _MODE_SELECTED=1; RUN_MODE=keepalive
@@ -1033,10 +1118,11 @@ while (($#)); do
         --keepalive-inventory) KEEPALIVE_ACTION=inventory; shift ;;
         --manage-session) KEEPALIVE_ACTION=session; shift ;;
       esac ;;
-    --diagnose-response|--diagnose-session|--diagnose-local|--repair-terminal|--attach-only|--files|--shell|--retrieve|--recover|--check-fly|--keep-awake-status|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
+    --paste-status|--diagnose-response|--diagnose-session|--diagnose-local|--repair-terminal|--attach-only|--files|--shell|--retrieve|--recover|--check-fly|--keep-awake-status|--bootstrap|--download-output|--test-models|--test-models-sprite|--test-models-before-run|--show-models)
       (( _MODE_SELECTED == 0 )) || { echo "error: select only one run mode" >&2; exit 2; }
       _MODE_SELECTED=1
       case "$1" in
+        --paste-status) RUN_MODE=paste-status ;;
         --diagnose-response) RUN_MODE=response-diagnostics ;;
         --diagnose-session) RUN_MODE=session-diagnostics ;;
         --diagnose-local) RUN_MODE=local-diagnostics ;;
@@ -1086,6 +1172,22 @@ if [[ -n $RESPONSE_PID && $RUN_MODE != response-diagnostics ]]; then
   echo 'error: --response-pid requires --diagnose-response' >&2; exit 2
 fi
 
+# Policy output is intentionally not a terminal query or remote operation.
+if [[ $RUN_MODE == paste-status ]]; then
+  if [[ -n $ATTACH_SESSION_ID || -n $RESPONSE_PID ]] || (( _JSON_OUTPUT_SELECTED || _OUTPUT_DIR_SELECTED || _FILE_WORKDIR_SELECTED )); then
+    echo 'error: --paste-status does not accept session/path/report selectors' >&2; exit 2
+  fi
+  command -v python3 >/dev/null 2>&1 || { echo 'error: local python3 is required' >&2; exit 127; }
+  python3 -I -S -u -c "$(local_terminal_python)
+try:
+    raise SystemExit(local_paste_status())
+except ValueError as exc:
+    print('error: ' + str(exc), file=_tty_sys.stderr)
+    raise SystemExit(2)
+"
+  exit $?
+fi
+
 # This route deliberately precedes all cloud/credential/config validation.
 if [[ $RUN_MODE == terminal-repair ]]; then
   if [[ -n $ATTACH_SESSION_ID ]] || (( _JSON_OUTPUT_SELECTED || _OUTPUT_DIR_SELECTED || _FILE_WORKDIR_SELECTED )); then
@@ -1128,7 +1230,7 @@ fi
 if [[ $RUN_MODE == bootstrap && $_MODE_SELECTED == 0 && $_JSON_OUTPUT_SELECTED == 0 && -t 0 && -t 1 ]]; then
   while :; do
     printf '\n'
-    startup_menu_line '=== Sprite Codex: what would you like to do? [v67]'
+    startup_menu_line '=== Sprite Codex: what would you like to do? [v68]'
     startup_menu_line '    1) Attach to an existing Sprite terminal session [default]'
     startup_menu_line '    2) Normal setup / launch or resume a saved conversation'
     startup_menu_line '    3) Quit'
@@ -1251,6 +1353,59 @@ def _local_terminal_emit(data, handles=None):
             _tty_os.close(private)
 
 
+def _paste_mode():
+    """Invocation policy only: explicit new setting > legacy alias > bracketed.
+
+    native means the application owns paste mode DURING its connection. It is not
+    forced plain paste: an application may still enable mode 2004 itself.
+    """
+    value = _tty_os.environ.get('SPRITE_PASTE_MODE', '')
+    if value:
+        if value not in ('bracketed', 'native'):
+            raise ValueError('SPRITE_PASTE_MODE must be bracketed or native.')
+        return value
+    legacy = _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto')
+    if legacy not in ('auto', 'never'):
+        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never (legacy aliases).')
+    return 'bracketed' if legacy == 'auto' else 'native'
+
+
+def local_paste_menu():
+    """End mode-2004 ownership at a LOCAL menu boundary; never flush or read stdin.
+
+    A generic shell/login/tmux client can enable paste even when this wrapper did
+    not. Plain input() / Bash read menus do not accept bracketed-paste events.
+    Only an output mode-disable is written; no paste-end marker is sent to Codex.
+    """
+    if _tty_os.environ.get('TERM', '') in ('', 'dumb'):
+        return False
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    module = _tty_sys.modules.get('readline')
+    if module is not None:
+        try:
+            module.parse_and_bind('set enable-bracketed-paste off')
+        except (AttributeError, ValueError, RuntimeError):
+            pass
+    return _local_terminal_emit(_LOCAL_PASTE_OFF, handles)
+
+
+def local_paste_status():
+    """Policy report only: no terminal query/input read, credentials or cloud call."""
+    _terminal_settings()
+    print('Sprite Codex v68: clipboard policy (LOCAL only).', flush=True)
+    print('  Selected policy: ' + _paste_mode(), flush=True)
+    print('  Codex native terminal: direct stdin/stdout/stderr; no input/output relay.')
+    print('  bracketed: request mode 2004 before recognized Codex connections/retries.')
+    print('  native: no wrapper preparation; application/client may enable paste themselves.')
+    print('  File-mode Bash: explicit Readline bracketed paste in bracketed mode.')
+    print('  Local menus: mode 2004 disabled before reading choices and after every client.')
+    print('  tmux: not used by native Sprite sessions; legacy tmux settings are unchanged.')
+    print('  No terminal response, clipboard content, remote app state or payload was tested.')
+    return 0
+
+
 def _terminal_settings():
     """Accept old exported settings, but never bring back the removed bridge."""
     path = _tty_os.environ.get('SPRITE_TTY_MODE', 'native')
@@ -1259,8 +1414,7 @@ def _terminal_settings():
         raise ValueError('SPRITE_TTY_MODE must be native or direct (legacy responsive maps to native).')
     if menu not in ('plain', 'auto'):
         raise ValueError('SPRITE_TERMINAL_MODE must be plain or auto.')
-    if _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') not in ('auto', 'never'):
-        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never.')
+    _paste_mode()
     return path, menu
 
 
@@ -1284,7 +1438,9 @@ def local_startup(diagnostics=False):
             attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
         state = 'ready; repaired leftover raw/no-echo input for local menus' if repaired else 'ready'
-    print('Sprite Codex v67: local startup ready.', flush=True)
+    # Local startup is a menu boundary, not the remote app's initialization.
+    local_paste_menu()
+    print('Sprite Codex v68: local startup ready.', flush=True)
     if path == 'responsive':
         print('       Legacy responsive setting ignored: v66 uses the direct terminal path.', flush=True)
     if diagnostics:
@@ -1297,7 +1453,7 @@ def local_startup(diagnostics=False):
         print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
         print('  Local terminal: ' + state, flush=True)
         print('  Interactive path: direct inherited stdin/stdout/stderr; no display relay.', flush=True)
-        print('  Paste framing: ' + _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') + ' (auto enables it for recognized Codex terminals).', flush=True)
+        print('  Paste policy: ' + _paste_mode() + ' (native application processing; no clipboard reader).', flush=True)
         print('  Screen/keyboard protocols: owned by Sprite/Codex; no broad automatic reset.', flush=True)
         print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
         print('  No authentication, cloud health, or running session was tested.', flush=True)
@@ -1367,14 +1523,17 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
             old_handlers[signum] = _tty_signal.signal(signum, interrupted)
         if (bracketed_paste and handles is not None and
-                _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') == 'auto' and
+                _paste_mode() == 'bracketed' and
                 _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
             paste_enabled = _local_terminal_emit(_LOCAL_PASTE_ON, handles)
             if paste_enabled:
-                print('       Clipboard: bracketed paste enabled; wait for the Codex input box before pasting.', flush=True)
+                print('       Clipboard: bracketed paste requested for Codex; wait for its input box before pasting.', flush=True)
+                print('       Native client/application processes the paste. This is not delivery or responsiveness verification.', flush=True)
             else:
                 print('warning: local paste-mode write was not confirmed; attachment still uses the native terminal.',
                       file=_tty_sys.stderr, flush=True)
+        elif bracketed_paste and _paste_mode() == 'native':
+            print('       Clipboard: application-controlled mode; no wrapper paste enable request.', flush=True)
         # Keep all THREE descriptors unchanged and on the original terminal.
         # No shell=True, new session, extra PTY, stdout capture, or input monitor.
         child = _tty_subprocess.Popen(argv, cwd=cwd)
@@ -1410,7 +1569,9 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
                 except (OSError, _tty_termios.error):
                     pass
             if handles is not None:
-                cleanup = _LOCAL_PASTE_OFF if paste_enabled else b''
+                # Always close the paste protocol before LOCAL menus, even if a
+                # shell/login/tmux client (not us) enabled it. No queued input read.
+                cleanup = _LOCAL_PASTE_OFF if _tty_os.environ.get('TERM', '') not in ('', 'dumb') else b''
                 if (bracketed_paste and menu_mode == 'auto' and
                         _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
                     cleanup += _LOCAL_MENU_MOUSE_OFF
@@ -1423,6 +1584,7 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
 def local_menu_input(prompt):
     """Reject a control-contaminated answer, not the caller's unread queue."""
     while True:
+        local_paste_menu()
         answer = input(prompt)
         tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
         tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
@@ -3190,6 +3352,59 @@ def _local_terminal_emit(data, handles=None):
             _tty_os.close(private)
 
 
+def _paste_mode():
+    """Invocation policy only: explicit new setting > legacy alias > bracketed.
+
+    native means the application owns paste mode DURING its connection. It is not
+    forced plain paste: an application may still enable mode 2004 itself.
+    """
+    value = _tty_os.environ.get('SPRITE_PASTE_MODE', '')
+    if value:
+        if value not in ('bracketed', 'native'):
+            raise ValueError('SPRITE_PASTE_MODE must be bracketed or native.')
+        return value
+    legacy = _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto')
+    if legacy not in ('auto', 'never'):
+        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never (legacy aliases).')
+    return 'bracketed' if legacy == 'auto' else 'native'
+
+
+def local_paste_menu():
+    """End mode-2004 ownership at a LOCAL menu boundary; never flush or read stdin.
+
+    A generic shell/login/tmux client can enable paste even when this wrapper did
+    not. Plain input() / Bash read menus do not accept bracketed-paste events.
+    Only an output mode-disable is written; no paste-end marker is sent to Codex.
+    """
+    if _tty_os.environ.get('TERM', '') in ('', 'dumb'):
+        return False
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    module = _tty_sys.modules.get('readline')
+    if module is not None:
+        try:
+            module.parse_and_bind('set enable-bracketed-paste off')
+        except (AttributeError, ValueError, RuntimeError):
+            pass
+    return _local_terminal_emit(_LOCAL_PASTE_OFF, handles)
+
+
+def local_paste_status():
+    """Policy report only: no terminal query/input read, credentials or cloud call."""
+    _terminal_settings()
+    print('Sprite Codex v68: clipboard policy (LOCAL only).', flush=True)
+    print('  Selected policy: ' + _paste_mode(), flush=True)
+    print('  Codex native terminal: direct stdin/stdout/stderr; no input/output relay.')
+    print('  bracketed: request mode 2004 before recognized Codex connections/retries.')
+    print('  native: no wrapper preparation; application/client may enable paste themselves.')
+    print('  File-mode Bash: explicit Readline bracketed paste in bracketed mode.')
+    print('  Local menus: mode 2004 disabled before reading choices and after every client.')
+    print('  tmux: not used by native Sprite sessions; legacy tmux settings are unchanged.')
+    print('  No terminal response, clipboard content, remote app state or payload was tested.')
+    return 0
+
+
 def _terminal_settings():
     """Accept old exported settings, but never bring back the removed bridge."""
     path = _tty_os.environ.get('SPRITE_TTY_MODE', 'native')
@@ -3198,8 +3413,7 @@ def _terminal_settings():
         raise ValueError('SPRITE_TTY_MODE must be native or direct (legacy responsive maps to native).')
     if menu not in ('plain', 'auto'):
         raise ValueError('SPRITE_TERMINAL_MODE must be plain or auto.')
-    if _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') not in ('auto', 'never'):
-        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never.')
+    _paste_mode()
     return path, menu
 
 
@@ -3223,7 +3437,9 @@ def local_startup(diagnostics=False):
             attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
         state = 'ready; repaired leftover raw/no-echo input for local menus' if repaired else 'ready'
-    print('Sprite Codex v67: local startup ready.', flush=True)
+    # Local startup is a menu boundary, not the remote app's initialization.
+    local_paste_menu()
+    print('Sprite Codex v68: local startup ready.', flush=True)
     if path == 'responsive':
         print('       Legacy responsive setting ignored: v66 uses the direct terminal path.', flush=True)
     if diagnostics:
@@ -3236,7 +3452,7 @@ def local_startup(diagnostics=False):
         print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
         print('  Local terminal: ' + state, flush=True)
         print('  Interactive path: direct inherited stdin/stdout/stderr; no display relay.', flush=True)
-        print('  Paste framing: ' + _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') + ' (auto enables it for recognized Codex terminals).', flush=True)
+        print('  Paste policy: ' + _paste_mode() + ' (native application processing; no clipboard reader).', flush=True)
         print('  Screen/keyboard protocols: owned by Sprite/Codex; no broad automatic reset.', flush=True)
         print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
         print('  No authentication, cloud health, or running session was tested.', flush=True)
@@ -3306,14 +3522,17 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
             old_handlers[signum] = _tty_signal.signal(signum, interrupted)
         if (bracketed_paste and handles is not None and
-                _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') == 'auto' and
+                _paste_mode() == 'bracketed' and
                 _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
             paste_enabled = _local_terminal_emit(_LOCAL_PASTE_ON, handles)
             if paste_enabled:
-                print('       Clipboard: bracketed paste enabled; wait for the Codex input box before pasting.', flush=True)
+                print('       Clipboard: bracketed paste requested for Codex; wait for its input box before pasting.', flush=True)
+                print('       Native client/application processes the paste. This is not delivery or responsiveness verification.', flush=True)
             else:
                 print('warning: local paste-mode write was not confirmed; attachment still uses the native terminal.',
                       file=_tty_sys.stderr, flush=True)
+        elif bracketed_paste and _paste_mode() == 'native':
+            print('       Clipboard: application-controlled mode; no wrapper paste enable request.', flush=True)
         # Keep all THREE descriptors unchanged and on the original terminal.
         # No shell=True, new session, extra PTY, stdout capture, or input monitor.
         child = _tty_subprocess.Popen(argv, cwd=cwd)
@@ -3349,7 +3568,9 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
                 except (OSError, _tty_termios.error):
                     pass
             if handles is not None:
-                cleanup = _LOCAL_PASTE_OFF if paste_enabled else b''
+                # Always close the paste protocol before LOCAL menus, even if a
+                # shell/login/tmux client (not us) enabled it. No queued input read.
+                cleanup = _LOCAL_PASTE_OFF if _tty_os.environ.get('TERM', '') not in ('', 'dumb') else b''
                 if (bracketed_paste and menu_mode == 'auto' and
                         _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
                     cleanup += _LOCAL_MENU_MOUSE_OFF
@@ -3362,6 +3583,7 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
 def local_menu_input(prompt):
     """Reject a control-contaminated answer, not the caller's unread queue."""
     while True:
+        local_paste_menu()
         answer = input(prompt)
         tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
         tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
@@ -3950,7 +4172,7 @@ run_attach_only() (
 file_access_python() {
   cat <<'FILES_ACCESS_PY'
 """Local shell/file menu for one existing Sprite, separate from its agent TTY.
-Generated into sprite-codex-v67.sh; uses the retained picker and ZIP downloader.
+Generated into sprite-codex-v68.sh; uses the retained picker and ZIP downloader.
 """
 from __future__ import annotations
 
@@ -4041,6 +4263,59 @@ def _local_terminal_emit(data, handles=None):
             _tty_os.close(private)
 
 
+def _paste_mode():
+    """Invocation policy only: explicit new setting > legacy alias > bracketed.
+
+    native means the application owns paste mode DURING its connection. It is not
+    forced plain paste: an application may still enable mode 2004 itself.
+    """
+    value = _tty_os.environ.get('SPRITE_PASTE_MODE', '')
+    if value:
+        if value not in ('bracketed', 'native'):
+            raise ValueError('SPRITE_PASTE_MODE must be bracketed or native.')
+        return value
+    legacy = _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto')
+    if legacy not in ('auto', 'never'):
+        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never (legacy aliases).')
+    return 'bracketed' if legacy == 'auto' else 'native'
+
+
+def local_paste_menu():
+    """End mode-2004 ownership at a LOCAL menu boundary; never flush or read stdin.
+
+    A generic shell/login/tmux client can enable paste even when this wrapper did
+    not. Plain input() / Bash read menus do not accept bracketed-paste events.
+    Only an output mode-disable is written; no paste-end marker is sent to Codex.
+    """
+    if _tty_os.environ.get('TERM', '') in ('', 'dumb'):
+        return False
+    handles = _local_terminal_handles()
+    if handles is None:
+        return False
+    module = _tty_sys.modules.get('readline')
+    if module is not None:
+        try:
+            module.parse_and_bind('set enable-bracketed-paste off')
+        except (AttributeError, ValueError, RuntimeError):
+            pass
+    return _local_terminal_emit(_LOCAL_PASTE_OFF, handles)
+
+
+def local_paste_status():
+    """Policy report only: no terminal query/input read, credentials or cloud call."""
+    _terminal_settings()
+    print('Sprite Codex v68: clipboard policy (LOCAL only).', flush=True)
+    print('  Selected policy: ' + _paste_mode(), flush=True)
+    print('  Codex native terminal: direct stdin/stdout/stderr; no input/output relay.')
+    print('  bracketed: request mode 2004 before recognized Codex connections/retries.')
+    print('  native: no wrapper preparation; application/client may enable paste themselves.')
+    print('  File-mode Bash: explicit Readline bracketed paste in bracketed mode.')
+    print('  Local menus: mode 2004 disabled before reading choices and after every client.')
+    print('  tmux: not used by native Sprite sessions; legacy tmux settings are unchanged.')
+    print('  No terminal response, clipboard content, remote app state or payload was tested.')
+    return 0
+
+
 def _terminal_settings():
     """Accept old exported settings, but never bring back the removed bridge."""
     path = _tty_os.environ.get('SPRITE_TTY_MODE', 'native')
@@ -4049,8 +4324,7 @@ def _terminal_settings():
         raise ValueError('SPRITE_TTY_MODE must be native or direct (legacy responsive maps to native).')
     if menu not in ('plain', 'auto'):
         raise ValueError('SPRITE_TERMINAL_MODE must be plain or auto.')
-    if _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') not in ('auto', 'never'):
-        raise ValueError('SPRITE_BRACKETED_PASTE must be auto or never.')
+    _paste_mode()
     return path, menu
 
 
@@ -4074,7 +4348,9 @@ def local_startup(diagnostics=False):
             attrs[3] |= _tty_termios.ICANON | _tty_termios.ECHO | _tty_termios.ISIG | _tty_termios.IEXTEN
             _tty_termios.tcsetattr(fd, _tty_termios.TCSANOW, attrs)
         state = 'ready; repaired leftover raw/no-echo input for local menus' if repaired else 'ready'
-    print('Sprite Codex v67: local startup ready.', flush=True)
+    # Local startup is a menu boundary, not the remote app's initialization.
+    local_paste_menu()
+    print('Sprite Codex v68: local startup ready.', flush=True)
     if path == 'responsive':
         print('       Legacy responsive setting ignored: v66 uses the direct terminal path.', flush=True)
     if diagnostics:
@@ -4087,7 +4363,7 @@ def local_startup(diagnostics=False):
         print('  stdin/stdout/stderr are terminals: ' + '/'.join(str(_tty_os.isatty(i)) for i in (0, 1, 2)), flush=True)
         print('  Local terminal: ' + state, flush=True)
         print('  Interactive path: direct inherited stdin/stdout/stderr; no display relay.', flush=True)
-        print('  Paste framing: ' + _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') + ' (auto enables it for recognized Codex terminals).', flush=True)
+        print('  Paste policy: ' + _paste_mode() + ' (native application processing; no clipboard reader).', flush=True)
         print('  Screen/keyboard protocols: owned by Sprite/Codex; no broad automatic reset.', flush=True)
         print('  Isolated Python startup: enabled; site/customization imports disabled.', flush=True)
         print('  No authentication, cloud health, or running session was tested.', flush=True)
@@ -4157,14 +4433,17 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
         for signum in (_tty_signal.SIGHUP, _tty_signal.SIGTERM):
             old_handlers[signum] = _tty_signal.signal(signum, interrupted)
         if (bracketed_paste and handles is not None and
-                _tty_os.environ.get('SPRITE_BRACKETED_PASTE', 'auto') == 'auto' and
+                _paste_mode() == 'bracketed' and
                 _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
             paste_enabled = _local_terminal_emit(_LOCAL_PASTE_ON, handles)
             if paste_enabled:
-                print('       Clipboard: bracketed paste enabled; wait for the Codex input box before pasting.', flush=True)
+                print('       Clipboard: bracketed paste requested for Codex; wait for its input box before pasting.', flush=True)
+                print('       Native client/application processes the paste. This is not delivery or responsiveness verification.', flush=True)
             else:
                 print('warning: local paste-mode write was not confirmed; attachment still uses the native terminal.',
                       file=_tty_sys.stderr, flush=True)
+        elif bracketed_paste and _paste_mode() == 'native':
+            print('       Clipboard: application-controlled mode; no wrapper paste enable request.', flush=True)
         # Keep all THREE descriptors unchanged and on the original terminal.
         # No shell=True, new session, extra PTY, stdout capture, or input monitor.
         child = _tty_subprocess.Popen(argv, cwd=cwd)
@@ -4200,7 +4479,9 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
                 except (OSError, _tty_termios.error):
                     pass
             if handles is not None:
-                cleanup = _LOCAL_PASTE_OFF if paste_enabled else b''
+                # Always close the paste protocol before LOCAL menus, even if a
+                # shell/login/tmux client (not us) enabled it. No queued input read.
+                cleanup = _LOCAL_PASTE_OFF if _tty_os.environ.get('TERM', '') not in ('', 'dumb') else b''
                 if (bracketed_paste and menu_mode == 'auto' and
                         _tty_os.environ.get('TERM', '') not in ('', 'dumb')):
                     cleanup += _LOCAL_MENU_MOUSE_OFF
@@ -4213,6 +4494,7 @@ def local_terminal_call(argv, *, cwd=None, bracketed_paste=False):
 def local_menu_input(prompt):
     """Reject a control-contaminated answer, not the caller's unread queue."""
     while True:
+        local_paste_menu()
         answer = input(prompt)
         tainted = any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in answer)
         tainted = tainted or bool(_tty_re.search(r'\^\[\[<[0-9;]+[Mm]', answer))
@@ -4628,7 +4910,16 @@ def handle(req):
         env["PATH"] = os.path.expanduser("~/.local/bin") + ":" + os.path.expanduser("~/.fly/bin") + ":" + env.get("PATH", "/usr/bin:/bin")
         env.update(PS1="sprite-files:\\w\\$ ", HISTFILE="/dev/null", PWD=path)
         # Do not source arbitrary startup commands or load another agent's env.
-        os.execvpe("bash", ["bash", "--noprofile", "--norc", "-i"], env)
+        mode = req.get("paste_mode", "bracketed")
+        if mode not in ("bracketed", "native"):
+            raise FileError("invalid_paste_mode")
+        if mode == "bracketed":
+            # An ephemeral rc stream sets only Readline paste. No ~/.bashrc or
+            # ~/.inputrc rewrite and no remote terminal-input injection.
+            script = 'exec /bin/bash --noprofile --rcfile <(printf \'%s\\n\' \'bind "set enable-bracketed-paste on"\' \'PS1=\'"\'"\'sprite-files:\\w\\$ \'"\'"\'\') -i'
+            os.execvpe("bash", ["bash", "--noprofile", "--norc", "-c", script], env)
+        else:
+            os.execvpe("bash", ["bash", "--noprofile", "--norc", "-i"], env)
     raise FileError("invalid_action")
 
 def main():
@@ -5066,10 +5357,11 @@ class Browser:
         info = self.control("stat", self.cwd)
         if info.get("kind") != "dir":
             raise FilesError("Directory is no longer available.")
-        req = self.request("shell", self.cwd, identity=info["identity"])
+        req = self.request("shell", self.cwd, identity=info["identity"], paste_mode=_paste_mode())
         print("\n       Opening a SEPARATE Bash terminal in " + safe(self.cwd))
         print("       Codex is not attached, restarted, paused or signalled by this operation.")
         print("       This shell does not inherit the running agent's GitHub/Fly/model tokens.")
+        print("       Bash paste policy: " + _paste_mode() + "; no persistent shell startup files are modified.")
         print("       Type exit to return to this LOCAL file menu for uploads/downloads.")
         print("       Shell cd does not change the selected workspace or the input/output picker roots.", flush=True)
         rc = local_terminal_call(self.args(req, tty=True), cwd=self.picker.context)
@@ -5922,7 +6214,7 @@ run_file_access() (
 
 retrieve_python() {
   cat <<'RETRIEVE_PY'
-"""Local interactive retrieve mode. Embedded into sprite-codex-v67.sh."""
+"""Local interactive retrieve mode. Embedded into sprite-codex-v68.sh."""
 import contextlib
 import getpass
 import hashlib
